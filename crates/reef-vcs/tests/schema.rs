@@ -279,55 +279,6 @@ fn set_main(root: &Path) {
     pollster::block_on(tx.commit("bookmark set")).unwrap();
 }
 
-/// Points `main` at a new commit on the root commit holding a permissive
-/// `reef-policy.toml`, so a landing has a policy that allows it (R3.13).
-fn set_main_with_policy(root: &Path) {
-    use jj_lib::default_backend_factories::{
-        default_backend_factories, default_working_copy_factories,
-    };
-    use jj_lib::op_store::RefTarget;
-    use jj_lib::ref_name::RefName;
-    use jj_lib::repo::Repo as _;
-    let settings = reef_daemon::testing::test_settings();
-    let workspace = jj_lib::default_backend_factories::default_workspace_loader_factory()
-        .create(root)
-        .unwrap()
-        .load(
-            &settings,
-            &default_backend_factories(),
-            &default_working_copy_factories(),
-        )
-        .unwrap();
-    let repo = pollster::block_on(workspace.repo_loader().load_at_head(None)).unwrap();
-    let mut tx = repo.start_transaction();
-    let store = tx.repo().store().clone();
-    let path = jj_lib::repo_path::RepoPathBuf::from_internal_string("reef-policy.toml").unwrap();
-    let policy = "version = 1\n\n[owners]\nidentities = [\"alice\"]\n";
-    let id = pollster::block_on(store.write_file(&path, &mut policy.as_bytes())).unwrap();
-    let mut builder =
-        jj_lib::merged_tree_builder::MergedTreeBuilder::new(store.empty_merged_tree());
-    builder.set_or_remove(
-        path,
-        Some(jj_lib::backend::TreeValue::File {
-            id,
-            executable: false,
-            copy_id: jj_lib::backend::CopyId::placeholder(),
-        }),
-    );
-    let tree = pollster::block_on(builder.write_tree()).unwrap();
-    let root_commit = store.root_commit_id().clone();
-    let commit = pollster::block_on(
-        tx.repo_mut()
-            .new_commit(vec![root_commit], tree)
-            .set_description("policy")
-            .write(),
-    )
-    .unwrap();
-    tx.repo_mut()
-        .set_local_bookmark_target(RefName::new("main"), RefTarget::normal(commit.id().clone()));
-    pollster::block_on(tx.commit("policy on main")).unwrap();
-}
-
 /// Runs `reef` command lines against one daemon, checks each one's stdout
 /// against its schema, and records which commands ran.
 struct Script {
@@ -510,13 +461,17 @@ async fn outputs_match_their_schemas() {
     // The lifecycle (R3.09), with `main` on the root commit as `jj
     // bookmark set` would put it, so proposals have a destination.
     set_main(&root);
-    script.both(&a_dir, &["propose", "-m", "schema test"]).await;
+    // `main` is the root commit, so `@`'s stack is the repository's whole
+    // history: these propose the change alone (R3.10).
+    script
+        .both(&a_dir, &["propose", "--only", "-m", "schema test"])
+        .await;
     script.both(&a_dir, &["proposal", "list"]).await;
     script.both(&a_dir, &["proposal", "show"]).await;
     script.both(&a_dir, &["proposal", "withdraw"]).await;
-    script.json(&a_dir, &["propose"]).await;
+    script.json(&a_dir, &["propose", "--only"]).await;
     script.both(&a_dir, &["proposal", "decline", "@"]).await;
-    script.json(&a_dir, &["propose"]).await;
+    script.json(&a_dir, &["propose", "--only"]).await;
     let replacement = script
         .json(&root, &["ws", "create", "--new-on", &a_change])
         .await;
@@ -534,7 +489,7 @@ async fn outputs_match_their_schemas() {
         .await;
     // The landing service (R3.13): a change on `main`, which now holds a
     // policy that allows it, proposed and landed.
-    set_main_with_policy(&root);
+    common::set_main_with_policy(&root);
     let lander = script
         .json(&root, &["ws", "create", "--new-on", "main"])
         .await;
@@ -544,6 +499,31 @@ async fn outputs_match_their_schemas() {
     script.json(&lander_dir, &["land"]).await;
     script.both(&lander_dir, &["landing", "list"]).await;
     script.both(&lander_dir, &["landing", "show", "@-"]).await;
+    // Stacks (R3.10): two changes on `main`, proposed and landed from the
+    // upper one.
+    let bottom = script
+        .json(&root, &["ws", "create", "--new-on", "main"])
+        .await;
+    let bottom_dir = PathBuf::from(text(&bottom["path"]));
+    std::fs::write(bottom_dir.join("bottom.txt"), "bottom\n").unwrap();
+    // Proposed alone and withdrawn: proposing takes the workspace's
+    // snapshot first, and the stack's proposal below proposes it again.
+    script.json(&bottom_dir, &["propose", "--only"]).await;
+    script
+        .json(&bottom_dir, &["proposal", "withdraw", "--stack"])
+        .await;
+    let upper = script
+        .json(
+            &root,
+            &["ws", "create", "--new-on", &text(&bottom["change_id"])],
+        )
+        .await;
+    let upper_dir = PathBuf::from(text(&upper["path"]));
+    std::fs::write(upper_dir.join("upper.txt"), "upper\n").unwrap();
+    script.both(&upper_dir, &["propose"]).await;
+    script.both(&upper_dir, &["proposal", "show"]).await;
+    script.json(&upper_dir, &["land"]).await;
+    script.both(&upper_dir, &["landing", "show", "@-"]).await;
     // Comments and instructions (R3.12), on a draft of its own (the earlier
     // change was superseded, and takes no instruction): each command once
     // in JSON and once in brief; a second move to the same state records

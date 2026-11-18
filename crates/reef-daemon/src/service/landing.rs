@@ -156,12 +156,26 @@ impl LandingService for LandingHandler {
                 }
             }
         }
+        let mut stack: Vec<v1::Landing> = outcome
+            .stack
+            .iter()
+            .map(|member| landing_message(member, true))
+            .collect();
+        fill_pushes(
+            state,
+            outcome
+                .stack
+                .iter()
+                .map(|member| &member.row)
+                .zip(stack.iter_mut()),
+        );
         Ok(Response::new(LandChangeResponse {
             landing: Some(landing),
             enqueue,
             operation,
             snapshot,
             change,
+            stack,
         }))
     }
 
@@ -210,9 +224,31 @@ impl LandingService for LandingHandler {
         };
         let mut message = landing_message(&landing, true);
         fill_pushes(state, [(&landing.row, &mut message)]);
+        let members = match &landing.row.stack {
+            Some(stack) => state
+                .db
+                .landings_of_stack(target.repo.id, stack)
+                .map_err(status)?
+                .into_iter()
+                .filter(|member| member.row.id != landing.row.id)
+                .collect(),
+            None => Vec::new(),
+        };
+        let mut stack: Vec<v1::Landing> = members
+            .iter()
+            .map(|member| landing_message(member, true))
+            .collect();
+        fill_pushes(
+            state,
+            members
+                .iter()
+                .map(|member| &member.row)
+                .zip(stack.iter_mut()),
+        );
         Ok(Response::new(GetLandingResponse {
             landing: Some(message),
             policy,
+            stack,
         }))
     }
 

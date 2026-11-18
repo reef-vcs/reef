@@ -15,7 +15,7 @@
 //! every wake-up, and a move re-forms the batch, which costs nothing for
 //! trees already tested since evidence is by tree and jobs dedupe.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -33,7 +33,7 @@ use super::worker::{
 };
 use super::{
     JudgeContext, Judged, LandingError, MAX_ATTEMPTS, Outcome, Reason, Requester, Verdict,
-    change_hex, change_row, commit_hex, judge, judge_with, pins,
+    change_hex, change_row, commit_hex, judge_with, pins,
 };
 use crate::daemon::AppState;
 use crate::db::{
@@ -143,6 +143,30 @@ struct Member {
     input: reef_policy::input::Landing,
     /// The chain's tree with it applied.
     planned: String,
+    /// The members of its stack below it in the batch, in order (R3.10):
+    /// its preview rebases them first.
+    below: Vec<LandTarget>,
+    /// The submitted trees of its stack's members above it in the batch
+    /// that have it as an ancestor, whose sign-offs count for it (R3.10).
+    above: Vec<String>,
+    /// The landings of its stack group that are its ancestors (R3.10): it
+    /// cannot land without them, and their landing rewrites it.
+    ancestors: HashSet<String>,
+    /// Its stack group, numbered in formation order.
+    group: usize,
+}
+
+impl Member {
+    /// What judging it at landing sees besides the change (R3.10, R3.14).
+    fn context(&self, batch: reef_policy::Batch, evidence_tree: Option<String>) -> JudgeContext {
+        JudgeContext {
+            landing: Some(self.input.clone()),
+            batch,
+            evidence_tree,
+            below: self.below.clone(),
+            above: self.above.clone(),
+        }
+    }
 }
 
 /// A batch being driven.
@@ -444,113 +468,218 @@ async fn form(
     let shared = state.manager.repo_lock(repo).read_owned().await;
     let mut members: Vec<Member> = Vec::new();
     let mut progress = false;
-    for candidate in candidates {
-        if members.len() >= settings.max || state.shutdown.is_cancelled() {
+    for (group_index, mut group) in stack_groups(state, repo, candidates)
+        .await?
+        .into_iter()
+        .enumerate()
+    {
+        // A group is at most a stack's size (S-211): the rest wait for the
+        // lower part to land.
+        let excess = group.split_off(group.len().min(land::MAX_STACK));
+        for (mut landing, _) in excess {
+            let Some(target) = target_of(&landing, destination) else {
+                continue;
+            };
+            let who = who_of(&landing);
+            dequeue(
+                state,
+                repo,
+                &mut landing,
+                &target,
+                &who,
+                Reason::UnlandedParents,
+                "its stack has more than 32 queued changes: land the lower part first, then propose and land it again",
+            )
+            .await?;
+            progress = true;
+        }
+        if state.shutdown.is_cancelled()
+            || (!members.is_empty() && members.len() + group.len() > settings.max)
+        {
             break;
         }
-        // Read again: an earlier step may have finished it.
-        let Some(mut landing) = state
-            .db
-            .landing(repo, &candidate.row.id)?
-            .filter(|fresh| fresh.row.outcome == Outcome::Queued.as_str())
-        else {
-            continue;
-        };
-        let Some(first) = landing.changes.first().cloned() else {
-            finish(
-                state,
-                repo,
-                &mut landing,
-                Outcome::Cancelled,
-                None,
-                "no change",
-            )?;
-            progress = true;
-            continue;
-        };
-        let (Some(change), Some(commit)) = (
-            change_hex(&first.change_id),
-            commit_hex(&first.queued_commit),
-        ) else {
-            finish(
-                state,
-                repo,
-                &mut landing,
-                Outcome::Cancelled,
-                None,
-                "an unreadable change",
-            )?;
-            progress = true;
-            continue;
-        };
-        let target = LandTarget {
-            change,
-            commit,
-            bookmark: destination.to_owned(),
-        };
-        if let Some(done) = settled(state, repo, &mut landing, &target)? {
-            done?;
-            progress = true;
-            continue;
-        }
-        let who = who_of(&landing);
-        // One landing that cannot be judged must not hold up the rest: it
-        // stays queued with the error noted, and the next wake-up tries it
-        // again.
-        let verdict = match judge(state, repo, &target).await {
-            Ok(verdict) => verdict,
-            Err(error) => {
-                tracing::warn!(repo = %repo, landing_id = %landing.row.id, error = %ErrorChain(&error), "cannot judge a queued change");
-                fail(state, repo, &landing.row.id, &error);
+        let trees: Vec<(String, Option<String>, HashSet<String>)> = group
+            .iter()
+            .map(|(landing, ancestors)| {
+                (
+                    landing.row.id.clone(),
+                    landing
+                        .changes
+                        .first()
+                        .and_then(|first| first.queued_tree.clone()),
+                    ancestors.clone(),
+                )
+            })
+            .collect();
+        let mut added: Vec<Member> = Vec::new();
+        let mut alone = false;
+        // A member returned takes its descendants in the group with it:
+        // they cannot land without it (R3.10).
+        let mut returned: Vec<(String, String)> = Vec::new();
+        // A change to a policy file lands on its own (S-146, S-210): the
+        // group's members after it wait for the next batch.
+        let mut policy_change = false;
+        for (candidate, ancestors) in group {
+            if policy_change {
+                break;
+            }
+            // Read again: an earlier step may have finished it.
+            let Some(mut landing) = state
+                .db
+                .landing(repo, &candidate.row.id)?
+                .filter(|fresh| fresh.row.outcome == Outcome::Queued.as_str())
+            else {
+                continue;
+            };
+            let Some(first) = landing.changes.first().cloned() else {
+                finish(
+                    state,
+                    repo,
+                    &mut landing,
+                    Outcome::Cancelled,
+                    None,
+                    "no change",
+                )?;
+                progress = true;
+                continue;
+            };
+            let (Some(change), Some(commit)) = (
+                change_hex(&first.change_id),
+                commit_hex(&first.queued_commit),
+            ) else {
+                finish(
+                    state,
+                    repo,
+                    &mut landing,
+                    Outcome::Cancelled,
+                    None,
+                    "an unreadable change",
+                )?;
+                progress = true;
+                continue;
+            };
+            let target = LandTarget {
+                change,
+                commit,
+                bookmark: destination.to_owned(),
+            };
+            if let Some(done) = settled(state, repo, &mut landing, &target)? {
+                done?;
+                progress = true;
                 continue;
             }
-        };
-        match verdict {
-            Verdict::Allow(judged) => {
-                let alone = settings.alone(&judged.paths) || pace.solo.contains(&landing.row.id);
-                if alone && !members.is_empty() {
-                    break;
-                }
-                let input = policy_input::landing_input(destination, &judged.preview);
-                let planned = judged.preview.landed_tree.clone().unwrap_or_default();
-                members.push(Member {
-                    landing,
-                    target,
-                    who,
-                    queued_tree: first.queued_tree.clone(),
-                    judged,
-                    input,
-                    planned,
-                });
-                if alone {
-                    break;
-                }
-            }
-            Verdict::Block {
-                reason: Reason::Busy,
-                ..
-            } => return Ok(Formation::Moved),
-            Verdict::Block {
-                reason,
-                message,
-                preview,
-                judged,
-                destination: head,
-                ..
-            } => {
-                landing.row.destination_before = head;
-                landing.changes = vec![change_row(
+            let who = who_of(&landing);
+            if let Some((_, why)) = returned
+                .iter()
+                .find(|(id, _)| ancestors.contains(id))
+                .cloned()
+            {
+                returned.push((landing.row.id.clone(), why.clone()));
+                dequeue(
+                    state,
+                    repo,
+                    &mut landing,
                     &target,
-                    first.queued_tree.clone(),
-                    preview.as_ref(),
-                    judged.as_deref(),
-                )];
-                if let Some(judged) = &judged {
-                    record_policy(&mut landing, judged);
-                }
-                dequeue(state, repo, &mut landing, &target, &who, reason, &message).await?;
+                    &who,
+                    Reason::UnlandedParents,
+                    &why,
+                )
+                .await?;
                 progress = true;
+                continue;
             }
+            let below: Vec<LandTarget> = added.iter().map(|member| member.target.clone()).collect();
+            let above: Vec<String> = trees
+                .iter()
+                .filter(|(_, _, theirs)| theirs.contains(&landing.row.id))
+                .filter_map(|(_, tree, _)| tree.clone())
+                .collect();
+            let context = JudgeContext {
+                below: below.clone(),
+                above: above.clone(),
+                ..JudgeContext::default()
+            };
+            // One landing that cannot be judged must not hold up the rest: it
+            // stays queued with the error noted, and the next wake-up tries it
+            // again.
+            let verdict = match judge_with(state, repo, &target, &context).await {
+                Ok(verdict) => verdict,
+                Err(error) => {
+                    tracing::warn!(repo = %repo, landing_id = %landing.row.id, error = %ErrorChain(&error), "cannot judge a queued change");
+                    fail(state, repo, &landing.row.id, &error);
+                    if trees.len() > 1 {
+                        // Its stack waits for it whole: a part landing now
+                        // would rewrite the rest.
+                        added.clear();
+                        break;
+                    }
+                    continue;
+                }
+            };
+            match verdict {
+                Verdict::Allow(judged) => {
+                    alone |= settings.alone(&judged.paths) || pace.solo.contains(&landing.row.id);
+                    policy_change = super::touches_policy(&judged.paths);
+                    let input = policy_input::landing_input(destination, &judged.preview);
+                    let planned = judged.preview.landed_tree.clone().unwrap_or_default();
+                    added.push(Member {
+                        landing,
+                        target,
+                        who,
+                        queued_tree: first.queued_tree.clone(),
+                        judged,
+                        input,
+                        planned,
+                        below,
+                        above,
+                        ancestors,
+                        group: group_index,
+                    });
+                }
+                Verdict::Block {
+                    reason: Reason::Busy,
+                    ..
+                } => return Ok(Formation::Moved),
+                Verdict::Block {
+                    reason,
+                    message,
+                    preview,
+                    judged,
+                    destination: head,
+                    ..
+                } => {
+                    landing.row.destination_before = head;
+                    landing.changes = vec![change_row(
+                        &target,
+                        first.queued_tree.clone(),
+                        preview.as_ref(),
+                        judged.as_deref(),
+                    )];
+                    if let Some(judged) = &judged {
+                        record_policy(&mut landing, judged);
+                    }
+                    dequeue(state, repo, &mut landing, &target, &who, reason, &message).await?;
+                    returned.push((
+                        landing.row.id.clone(),
+                        format!(
+                            "change {} below it in its stack was returned: {}",
+                            short(&target),
+                            reason.as_str()
+                        ),
+                    ));
+                    progress = true;
+                }
+            }
+        }
+        if added.is_empty() {
+            continue;
+        }
+        if alone && !members.is_empty() {
+            break;
+        }
+        members.extend(added);
+        if alone {
+            break;
         }
     }
     let Some(base) = members
@@ -583,14 +712,33 @@ async fn form(
             .await??;
         match chain {
             Ok(chain) if chain.destination == base => {
-                let mut kept = Vec::with_capacity(members.len());
+                let mut kept: Vec<Member> = Vec::with_capacity(members.len());
                 for (mut member, found) in members.into_iter().zip(chain.members) {
                     if !found.included {
                         // It conflicts with an earlier member only, or an
                         // earlier member has its edits (R3.16): it stays
                         // queued for the next batch, which judges it against
                         // what landed (and returns it `empty` if that is its
-                        // edits).
+                        // edits). Unless a change below it in its stack
+                        // lands now, which rewrites it (R3.10): it is
+                        // returned.
+                        if kept
+                            .iter()
+                            .any(|landing| member.ancestors.contains(&landing.landing.row.id))
+                        {
+                            let (reason, message) = excluded_reason(&found, destination);
+                            let who = member.who.clone();
+                            dequeue(
+                                state,
+                                repo,
+                                &mut member.landing,
+                                &member.target,
+                                &who,
+                                reason,
+                                &message,
+                            )
+                            .await?;
+                        }
                         continue;
                     }
                     member.planned = found.tree.unwrap_or_default();
@@ -607,8 +755,9 @@ async fn form(
             }
             Ok(_) => return Ok(Formation::Moved),
             Err(error) => {
-                tracing::warn!(repo = %repo, error = %ErrorChain(&error), "cannot preview a batch's chain; landing its first change alone");
-                members.truncate(1);
+                tracing::warn!(repo = %repo, error = %ErrorChain(&error), "cannot preview a batch's chain; landing its first stack alone");
+                let first = members[0].group;
+                members.retain(|member| member.group == first);
             }
         }
     }
@@ -686,6 +835,154 @@ async fn form(
     Ok(Formation::Formed(Box::new(formed)))
 }
 
+/// The candidates (oldest first) as stack groups (R3.10): each queued
+/// change with the queued changes above it, read from the queued commits'
+/// parents, in queue order of their oldest member, each group bottom first.
+/// A queued change with no queued parent or child is a group of one. Each
+/// landing comes with the landing ids of its ancestors in its group.
+async fn stack_groups(
+    state: &AppState,
+    repo: RepoId,
+    candidates: Vec<StoredLanding>,
+) -> Result<Vec<Vec<(StoredLanding, HashSet<String>)>>, LandingError> {
+    let commits: Vec<Option<CommitIdHex>> = candidates
+        .iter()
+        .map(|landing| {
+            landing
+                .changes
+                .first()
+                .and_then(|first| commit_hex(&first.queued_commit))
+        })
+        .collect();
+    let parents: Vec<Vec<CommitIdHex>> = {
+        let wanted = commits.clone();
+        state
+            .manager
+            .handle(repo)?
+            .call_async(move |head| {
+                async move {
+                    let repo = head.repo.readonly();
+                    let mut parents = Vec::with_capacity(wanted.len());
+                    for commit in &wanted {
+                        let found = match commit {
+                            Some(commit) => land::parents(&repo, commit).await.ok().flatten(),
+                            None => None,
+                        };
+                        parents.push(found.unwrap_or_default());
+                    }
+                    Ok::<_, LandingError>(parents)
+                }
+                .boxed_local()
+            })
+            .await??
+    };
+    let index_of: HashMap<&CommitIdHex, usize> = commits
+        .iter()
+        .enumerate()
+        .filter_map(|(index, commit)| commit.as_ref().map(|commit| (commit, index)))
+        .collect();
+    let below: Vec<Vec<usize>> = parents
+        .iter()
+        .map(|parents| {
+            parents
+                .iter()
+                .filter_map(|parent| index_of.get(parent).copied())
+                .collect()
+        })
+        .collect();
+    let mut root: Vec<usize> = (0..candidates.len()).collect();
+    for (index, parents) in below.iter().enumerate() {
+        for &parent in parents {
+            let (a, b) = (find(&mut root, index), find(&mut root, parent));
+            root[a.max(b)] = a.min(b);
+        }
+    }
+    let mut groups: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for index in 0..candidates.len() {
+        let group = find(&mut root, index);
+        groups.entry(group).or_default().push(index);
+    }
+    let ids: Vec<String> = candidates
+        .iter()
+        .map(|landing| landing.row.id.clone())
+        .collect();
+    let mut slots: Vec<Option<StoredLanding>> = candidates.into_iter().map(Some).collect();
+    let mut ancestors: Vec<HashSet<usize>> = vec![HashSet::new(); slots.len()];
+    let mut ordered = Vec::with_capacity(groups.len());
+    for (_, mut pending) in groups {
+        // Parents first, ties in queue order; each parent's ancestors are
+        // complete when its children are placed.
+        let mut group = Vec::with_capacity(pending.len());
+        let mut placed: HashSet<usize> = HashSet::new();
+        while !pending.is_empty() {
+            let next = pending
+                .iter()
+                .position(|&index| below[index].iter().all(|parent| placed.contains(parent)))
+                .unwrap_or(0);
+            let index = pending.remove(next);
+            placed.insert(index);
+            let mut mine = HashSet::new();
+            for &parent in &below[index] {
+                mine.insert(parent);
+                mine.extend(ancestors[parent].iter().copied());
+            }
+            ancestors[index].clone_from(&mine);
+            if let Some(landing) = slots[index].take() {
+                let names = mine.iter().map(|&at| ids[at].clone()).collect();
+                group.push((landing, names));
+            }
+        }
+        ordered.push(group);
+    }
+    Ok(ordered)
+}
+
+/// The representative of `index`'s set in the union-find `root`.
+fn find(root: &mut [usize], index: usize) -> usize {
+    let mut at = index;
+    while root[at] != at {
+        root[at] = root[root[at]];
+        at = root[at];
+    }
+    at
+}
+
+/// The change `landing` queued, at its queued commit, for `destination`;
+/// `None` for a row that names none.
+fn target_of(landing: &StoredLanding, destination: &str) -> Option<LandTarget> {
+    let first = landing.changes.first()?;
+    Some(LandTarget {
+        change: change_hex(&first.change_id)?,
+        commit: commit_hex(&first.queued_commit)?,
+        bookmark: destination.to_owned(),
+    })
+}
+
+/// A change's id as messages show it.
+fn short(target: &LandTarget) -> String {
+    target.change.as_str().chars().take(12).collect()
+}
+
+/// Why the chain left `found` out, as a dequeue's reason and message.
+fn excluded_reason(found: &land::ChainMember, destination: &str) -> (Reason, String) {
+    if let Some(parent) = &found.parent_excluded {
+        (
+            Reason::UnlandedParents,
+            format!("its parent {parent} does not land with the batch"),
+        )
+    } else if found.empty {
+        (Reason::Empty, super::empty_message(destination))
+    } else {
+        (
+            Reason::Conflicted,
+            format!(
+                "rebasing onto the batch's earlier changes conflicts in {} paths",
+                found.conflicts_total
+            ),
+        )
+    }
+}
+
 /// Tests and lands `batch`, bisecting on failure.
 #[expect(
     clippy::too_many_lines,
@@ -738,6 +1035,16 @@ async fn run(
                 {
                     return Ok(next);
                 }
+                // The changes the probe did not test that build on what
+                // landed, or on what gets no verdict, go back with them.
+                return_descendants(
+                    state,
+                    repo,
+                    batch,
+                    mid,
+                    "the changes below it in its stack landed or got no verdict without it",
+                )
+                .await?;
                 return unavailable(state, repo, batch, (lo, mid), &evaluations, &why).await;
             }
             Trial::Reform(why) => return reform(state, repo, batch, &why, pace).await,
@@ -795,14 +1102,54 @@ async fn run(
         .await?;
     }
     batch.member_result(culprit, "culprit");
-    for index in hi..n {
-        batch.member_result(index, "requeued");
-    }
+    // The changes above the culprit in its stack cannot land without it, and
+    // those above a landed change were rewritten by its landing (R3.10):
+    // they are returned with it. The rest are requeued.
+    let why = format!(
+        "change {} below it in its stack failed checks on the batch's tree",
+        short(&batch.members[culprit].target)
+    );
+    return_descendants(state, repo, batch, hi, &why).await?;
     batch.stored.row.culprit_position = Some(u32::try_from(hi).unwrap_or(u32::MAX));
     end_trials(state, repo, batch).await;
     end(state, batch, "split", &message)?;
     pace.moves = 0;
     Ok(Next::Again)
+}
+
+/// Returns each member from `from` on that descends from one of the first
+/// `from` members, which landed or were returned (R3.10): it cannot land
+/// without them, and a landing rewrote it. The rest are requeued.
+async fn return_descendants(
+    state: &Arc<AppState>,
+    repo: RepoId,
+    batch: &mut Formed,
+    from: usize,
+    why: &str,
+) -> Result<(), LandingError> {
+    let below: HashSet<String> = batch.members[..from]
+        .iter()
+        .map(|member| member.landing.row.id.clone())
+        .collect();
+    for index in from..batch.members.len() {
+        if batch.members[index].ancestors.is_disjoint(&below) {
+            batch.member_result(index, "requeued");
+            continue;
+        }
+        let _shared = state.manager.repo_lock(repo).read_owned().await;
+        dequeue_member(
+            state,
+            repo,
+            batch,
+            index,
+            Reason::UnlandedParents,
+            why,
+            (None, None),
+        )
+        .await?;
+        batch.member_result(index, "dequeued");
+    }
+    Ok(())
 }
 
 /// Tests prefix `k` (from 1) of `batch`: evaluates its members over the
@@ -857,11 +1204,7 @@ async fn test(
         let mut evaluations = Vec::with_capacity(k);
         for index in 0..k {
             let member = &batch.members[index];
-            let context = JudgeContext {
-                landing: Some(member.input.clone()),
-                batch: batch.input(index, Some(&trial)),
-                evidence_tree: Some(tree.clone()),
-            };
+            let context = member.context(batch.input(index, Some(&trial)), Some(tree.clone()));
             match judge_with(state, repo, &member.target, &context).await? {
                 Verdict::Allow(judged)
                 | Verdict::Block {
@@ -1345,7 +1688,9 @@ async fn unavailable(
     }
     drop(shared);
     for index in k..batch.members.len() {
-        batch.member_result(index, "requeued");
+        if batch.stored.members[index].result.is_none() {
+            batch.member_result(index, "requeued");
+        }
     }
     end_trials(state, repo, batch).await;
     end(state, batch, "unavailable", why)?;
@@ -1445,11 +1790,7 @@ async fn land_prefix_part(
     let mut judged_all: Vec<Box<Judged>> = Vec::with_capacity(p);
     for index in 0..p {
         let member = &batch.members[index];
-        let context = JudgeContext {
-            landing: Some(member.input.clone()),
-            batch: batch.input(index, trial.as_ref()),
-            evidence_tree: None,
-        };
+        let context = member.context(batch.input(index, trial.as_ref()), None);
         match judge_with(state, repo, &member.target, &context).await? {
             Verdict::Allow(judged) if judged.preview.destination.as_str() == batch.base() => {
                 judged_all.push(judged);
@@ -1849,9 +2190,19 @@ async fn refused(
         ) => Reason::Destination,
         _ => Reason::Failed,
     };
+    let one_group = batch.members[..p]
+        .iter()
+        .all(|member| member.group == batch.members[0].group);
     if let Some(index) = named.or_else(|| (p == 1).then_some(0)) {
         dequeue_member(state, repo, batch, index, reason, message, (None, None)).await?;
         batch.member_result(index, "dequeued");
+    } else if one_group {
+        // One stack, which lands whole or not at all: landing it alone
+        // again would fail the same way (R3.10).
+        for index in 0..p {
+            dequeue_member(state, repo, batch, index, reason, message, (None, None)).await?;
+            batch.member_result(index, "dequeued");
+        }
     } else {
         for member in &batch.members[..p] {
             pace.solo.insert(member.landing.row.id.clone());

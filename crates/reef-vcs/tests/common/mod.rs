@@ -107,3 +107,52 @@ fn newest_source(crates: &[&str]) -> Option<SystemTime> {
 pub(crate) fn daemon_beside(dir: &Path) {
     std::os::unix::fs::symlink(daemon_bin(), dir.join("reef-daemon")).unwrap();
 }
+
+/// Points `main` at a new commit on the root commit holding a permissive
+/// `reef-policy.toml`, so a landing has a policy that allows it (R3.13).
+pub(crate) fn set_main_with_policy(root: &Path) {
+    use jj_lib::default_backend_factories::{
+        default_backend_factories, default_working_copy_factories,
+    };
+    use jj_lib::op_store::RefTarget;
+    use jj_lib::ref_name::RefName;
+    use jj_lib::repo::Repo as _;
+    let settings = reef_daemon::testing::test_settings();
+    let workspace = jj_lib::default_backend_factories::default_workspace_loader_factory()
+        .create(root)
+        .unwrap()
+        .load(
+            &settings,
+            &default_backend_factories(),
+            &default_working_copy_factories(),
+        )
+        .unwrap();
+    let repo = pollster::block_on(workspace.repo_loader().load_at_head(None)).unwrap();
+    let mut tx = repo.start_transaction();
+    let store = tx.repo().store().clone();
+    let path = jj_lib::repo_path::RepoPathBuf::from_internal_string("reef-policy.toml").unwrap();
+    let policy = "version = 1\n\n[owners]\nidentities = [\"alice\"]\n";
+    let id = pollster::block_on(store.write_file(&path, &mut policy.as_bytes())).unwrap();
+    let mut builder =
+        jj_lib::merged_tree_builder::MergedTreeBuilder::new(store.empty_merged_tree());
+    builder.set_or_remove(
+        path,
+        Some(jj_lib::backend::TreeValue::File {
+            id,
+            executable: false,
+            copy_id: jj_lib::backend::CopyId::placeholder(),
+        }),
+    );
+    let tree = pollster::block_on(builder.write_tree()).unwrap();
+    let root_commit = store.root_commit_id().clone();
+    let commit = pollster::block_on(
+        tx.repo_mut()
+            .new_commit(vec![root_commit], tree)
+            .set_description("policy")
+            .write(),
+    )
+    .unwrap();
+    tx.repo_mut()
+        .set_local_bookmark_target(RefName::new("main"), RefTarget::normal(commit.id().clone()));
+    pollster::block_on(tx.commit("policy on main")).unwrap();
+}

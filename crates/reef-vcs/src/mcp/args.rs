@@ -457,6 +457,32 @@ pub(super) struct PublishChange {
     pub(super) description: Option<String>,
 }
 
+/// `propose_change`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ProposeChange {
+    /// Repository: id, prefix, or absolute path in it.
+    pub(super) repo: Option<String>,
+    /// Workspace: id, prefix, or absolute path in it.
+    pub(super) workspace: Option<String>,
+    /// The change (default: `@`).
+    pub(super) revision: Option<String>,
+    /// Propose it alone.
+    pub(super) only: Option<bool>,
+}
+
+/// `land_change`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct LandChange {
+    /// Repository: id, prefix, or absolute path in it.
+    pub(super) repo: Option<String>,
+    /// Workspace: id, prefix, or absolute path in it.
+    pub(super) workspace: Option<String>,
+    /// The change (default: `@`).
+    pub(super) revision: Option<String>,
+}
+
 /// `push_landed`.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]

@@ -573,15 +573,25 @@ async fn gate_refusals() {
         (Code::FailedPrecondition, "NOT_PROPOSED".to_owned())
     );
 
-    // A change on an unlanded parent.
+    // A change on an unproposed parent lands with its stack (R3.10), so the
+    // parent must be proposed: the error names it.
     let child = commit_on(client, &repo.id, &change.commit_id, &[("d.txt", "d\n")]).await;
     propose(client, &repo.id, &child.commit_id, "").await;
-    let unlanded = landed(client, land(&repo.id, &child.commit_id))
+    let unproposed = client
+        .land_change(land(&repo.id, &child.commit_id))
         .await
-        .landing
-        .unwrap();
-    assert_eq!(unlanded.outcome(), Outcome::Blocked);
-    assert_eq!(unlanded.reason(), Reason::UnlandedParents);
+        .unwrap_err();
+    assert_eq!(
+        reason(&unproposed),
+        (Code::FailedPrecondition, "NOT_PROPOSED".to_owned())
+    );
+    let ClientError::Rpc { metadata, .. } = &unproposed else {
+        panic!("{unproposed:?}");
+    };
+    assert_eq!(
+        metadata.get("change_id").map(String::as_str),
+        Some(change.change_id.as_str())
+    );
 
     // A proposal for a bookmark that is gone.
     bookmark(&repo, "feature", Some(&main.commit_id)).await;

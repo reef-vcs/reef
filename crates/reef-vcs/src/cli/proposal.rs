@@ -87,6 +87,9 @@ pub(crate) struct ProposeArgs {
     /// The local bookmark it is for [default: the trunk bookmark].
     #[arg(long, value_name = "BOOKMARK")]
     to: Option<String>,
+    /// Propose this change alone, not the changes below it in its stack.
+    #[arg(long)]
+    only: bool,
     #[command(flatten)]
     flags: TransitionFlags,
 }
@@ -155,6 +158,9 @@ struct WithdrawArgs {
     /// The change.
     #[arg(value_name = "REV", default_value = "@")]
     revision: String,
+    /// Also the changes below it in its stack that are in review.
+    #[arg(long)]
+    stack: bool,
     #[command(flatten)]
     flags: TransitionFlags,
 }
@@ -165,6 +171,9 @@ struct DeclineArgs {
     /// The change.
     #[arg(value_name = "REV")]
     revision: String,
+    /// Also the changes below it in its stack that are in review.
+    #[arg(long)]
+    stack: bool,
     #[command(flatten)]
     flags: TransitionFlags,
 }
@@ -190,6 +199,7 @@ pub(crate) async fn propose(ctx: &Ctx, args: ProposeArgs) -> Result<(), CliError
         v1::LifecycleState::Proposed,
         args.to.unwrap_or_default(),
         String::new(),
+        !args.only,
         args.flags,
     ))
     .await
@@ -207,6 +217,7 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<(), CliError> {
                 v1::LifecycleState::Withdrawn,
                 String::new(),
                 String::new(),
+                args.stack,
                 args.flags,
             ))
             .await
@@ -218,6 +229,7 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<(), CliError> {
                 v1::LifecycleState::Declined,
                 String::new(),
                 String::new(),
+                args.stack,
                 args.flags,
             ))
             .await
@@ -229,6 +241,7 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<(), CliError> {
                 v1::LifecycleState::Superseded,
                 String::new(),
                 args.by,
+                false,
                 args.flags,
             ))
             .await
@@ -242,6 +255,7 @@ async fn transition(
     to: v1::LifecycleState,
     destination: String,
     superseded_by: String,
+    stack: bool,
     flags: TransitionFlags,
 ) -> Result<(), CliError> {
     let scope = scope::resolve(ctx, &flags.scope).await?;
@@ -267,6 +281,7 @@ async fn transition(
             .map_or(v1::TransitionActor::Unspecified, v1::TransitionActor::from)
             .into(),
         skip_snapshot: false,
+        stack,
     };
     let response = Box::pin(ctx.call(ctx.client.transition_change(request)))
         .await
@@ -356,6 +371,7 @@ async fn show(ctx: &Ctx, args: ShowArgs) -> Result<(), CliError> {
         ))
         .await
         .map_err(|error| advice.refine(error))?;
+    let stack = stack_below(ctx, &scope.repo_id, &change).await;
     let history = ProposalHistory {
         change: reef_client::json::Change::from(&change),
         transitions: transitions
@@ -364,8 +380,39 @@ async fn show(ctx: &Ctx, args: ShowArgs) -> Result<(), CliError> {
             .filter(|transition| transition.change_id == change.change_id)
             .map(ChangeTransition::from)
             .collect(),
+        stack,
     };
     ctx.out.object_with(&history, brief::ProposalHistory::from)
+}
+
+/// The changes below `change` in its stack, bottom first (R3.10): its
+/// ancestors not on its destination (the proposal's, else `trunk()`).
+/// Empty when the read fails: the stack is context, not the answer.
+async fn stack_below(ctx: &Ctx, repo: &str, change: &v1::Change) -> Vec<reef_client::json::Change> {
+    let destination = change
+        .lifecycle
+        .as_ref()
+        .map(|lifecycle| lifecycle.destination.as_str())
+        .filter(|destination| !destination.is_empty())
+        .map_or_else(
+            || "trunk()".to_owned(),
+            |name| format!("bookmarks(exact:{name:?})"),
+        );
+    let commit = &change.commit_id;
+    let request = v1::ListChangesRequest {
+        repo: repo.to_owned(),
+        revset: format!("(::{commit} ~ ::({destination})) ~ {commit}"),
+        ..v1::ListChangesRequest::default()
+    };
+    match ctx.call(ctx.client.list_changes(request)).await {
+        Ok(entries) => entries
+            .iter()
+            .rev()
+            .filter_map(|entry| entry.change.as_ref())
+            .map(reef_client::json::Change::from)
+            .collect(),
+        Err(_) => Vec::new(),
+    }
 }
 
 /// A lifecycle in a line: `proposed (round 2, amended)`.
@@ -425,7 +472,21 @@ fn transition_line(transition: &ChangeTransition) -> String {
 
 impl TextRender for Transitioned {
     fn render(&self, w: &mut dyn Write) -> io::Result<()> {
-        let mut pairs = vec![("change", self.change.change_id_reverse_hex.clone())];
+        let mut pairs = Vec::new();
+        if self.transitions.len() > 1 || self.transition.is_none() {
+            for transition in &self.transitions {
+                pairs.push((
+                    "stack",
+                    format!(
+                        "{} {} (round {})",
+                        short(&transition.change_id_reverse_hex),
+                        transition.to.as_deref().unwrap_or("-"),
+                        transition.round
+                    ),
+                ));
+            }
+        }
+        pairs.push(("change", self.change.change_id_reverse_hex.clone()));
         if let Some(lifecycle) = &self.lifecycle {
             pairs.push(("state", lifecycle_words(lifecycle)));
             if let Some(destination) = &lifecycle.destination {
@@ -450,6 +511,16 @@ impl TextRender for ProposalHistory {
             if let Some(destination) = &lifecycle.destination {
                 pairs.push(("destination", destination.clone()));
             }
+        }
+        for below in &self.stack {
+            let state = below
+                .lifecycle
+                .as_ref()
+                .map_or_else(|| "draft".to_owned(), lifecycle_words);
+            pairs.push((
+                "below",
+                format!("{} {state}", short(&below.change_id_reverse_hex)),
+            ));
         }
         block(w, &pairs)?;
         if !self.transitions.is_empty() {

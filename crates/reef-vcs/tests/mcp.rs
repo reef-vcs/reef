@@ -25,7 +25,7 @@ use serde_json::{Value, json};
 use tokio::process::Command;
 
 /// The tools, in `tools/list`'s order.
-const TOOLS: [&str; 24] = [
+const TOOLS: [&str; 26] = [
     "list_repositories",
     "list_workspaces",
     "get_workspace",
@@ -45,6 +45,8 @@ const TOOLS: [&str; 24] = [
     "release_workspace",
     "describe_change",
     "publish_change",
+    "propose_change",
+    "land_change",
     "push_landed",
     "rebase_change",
     "abandon_change",
@@ -218,9 +220,12 @@ async fn handshake_and_tools() {
     // `push_landed` took it to 23,960 (the user's decision 10): an MCP agent
     // has no landing tool and otherwise cannot tell whether its landed work
     // reached the team's git remote without leaving Reef for `git ls-remote`
-    // or `git push` at the root. Raising it again needs the same argument
-    // in that ticket's brief.
-    assert!(bytes <= 23_960, "tools/list is {bytes} bytes");
+    // or `git push` at the root. R3.10's `propose_change` and `land_change`
+    // took it to 25,286 (the user's decision 8): without them an MCP agent
+    // has no way to put its work forward or land it, and leaves Reef for
+    // `reef propose` and `reef land` in a shell at the root. Raising it
+    // again needs the same argument in that ticket's brief.
+    assert!(bytes <= 25_286, "tools/list is {bytes} bytes");
 }
 
 // 3
@@ -262,7 +267,7 @@ async fn starts_without_a_daemon() {
     command.env_remove("REEF_STATE_DIR");
     let mut mcp = Mcp::start(command).await;
     let listed = mcp.request("tools/list", json!({})).await;
-    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 24);
+    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 26);
     let error = mcp.err("get_status", json!({})).await;
     assert_eq!(error["kind"], "unavailable", "{error}");
     assert_eq!(
@@ -1484,9 +1489,46 @@ async fn every_tool_result_matches_its_output_schema() {
             || refused["reason"] == "DESTINATION_NOT_FOUND",
         "{refused}"
     );
+    // `propose_stack_and_land_it` calls these on a repository with a
+    // trunk, each result checked against its schema.
+    called.insert("propose_change");
+    called.insert("land_change");
     for tool in TOOLS {
         assert!(called.contains(tool), "{tool} was not called");
     }
+}
+
+/// R3.10: `propose_change` proposes a stack of two in one operation and
+/// `land_change` lands it, waiting; each result matches its schema.
+#[tokio::test(flavor = "multi_thread")]
+async fn propose_stack_and_land_it() {
+    let (daemon, repo) = fixture().await;
+    common::set_main_with_policy(&repo.root);
+    let mut root = server(&daemon, &repo.root).await;
+    let created = root.ok("create_workspace", json!({"new_on": "main"})).await;
+    write(&created, "bottom.txt", "bottom\n");
+    let mut mcp = server(&daemon, &path(&created)).await;
+    mcp.ok("describe_change", json!({"description": "bottom\n"}))
+        .await;
+    let upper = mcp
+        .ok(
+            "edit_files",
+            json!({"new_on": "@", "edits": [{"path": "upper.txt", "content": "upper\n"}]}),
+        )
+        .await;
+    let upper = upper["change"]["change_id"].as_str().unwrap().to_owned();
+    let proposed = mcp.ok("propose_change", json!({"revision": upper})).await;
+    assert_eq!(
+        proposed["transitions"].as_array().map(Vec::len),
+        Some(2),
+        "{proposed}"
+    );
+    let landed = mcp.ok("land_change", json!({"revision": upper})).await;
+    assert_eq!(landed["outcome"], "landed", "{landed}");
+    assert_eq!(landed["stack"][0]["outcome"], "landed", "{landed}");
+    // Asked again, a landed change is final: the error says so.
+    let again = mcp.err("land_change", json!({"revision": upper})).await;
+    assert_eq!(again["reason"], "NOT_PROPOSED", "{again}");
 }
 
 // R3.12 test 16: a wait that sees an instruction for the server's session
