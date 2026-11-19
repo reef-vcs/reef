@@ -893,17 +893,20 @@ impl IdentityService for IdentityHandler {
         request: Request<ResetPasskeysRequest>,
     ) -> Result<Response<ResetPasskeysResponse>, Status> {
         let request = request.into_inner();
-        let (removed, revoked_key_ids) = self
+        // Nothing after the reset's commit can fail it: the identity is
+        // the one the reset found.
+        let reset = self
             .state
             .identity
             .reset_passkeys(&request.identity, &request.reason)
             .map_err(status)?;
         Ok(Response::new(ResetPasskeysResponse {
-            removed: removed
+            removed: reset
+                .removed
                 .iter()
-                .map(|row| self.passkey_message(row))
-                .collect::<Result<_, _>>()?,
-            revoked_key_ids,
+                .map(|row| passkey_message(row, Some(&reset.identity)))
+                .collect(),
+            revoked_key_ids: reset.revoked_key_ids,
         }))
     }
 

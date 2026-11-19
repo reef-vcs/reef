@@ -34,7 +34,7 @@ use reef_evidence::webauthn::{
 
 use super::issue::Channel;
 use super::{Identities, IdentityError, Refusal, audit, new_id};
-use crate::db::{IdentityRow, PasskeyInserted, PasskeyRow};
+use crate::db::{IdentityRow, PasskeyInserted, PasskeyRow, PasskeyUsed};
 use crate::model::Timestamp;
 
 /// The RP ID of the web UI's listener, which serves `http://localhost`.
@@ -145,6 +145,17 @@ impl Passkeys {
     fn change(&self) -> MutexGuard<'_, ()> {
         self.changes.lock().unwrap_or_else(PoisonError::into_inner)
     }
+}
+
+/// What `ResetPasskeys` did.
+#[derive(Debug)]
+pub struct PasskeyReset {
+    /// The identity, as the reset found it.
+    pub identity: IdentityRow,
+    /// The passkeys it removed, as they are after.
+    pub removed: Vec<PasskeyRow>,
+    /// The keys it revoked.
+    pub revoked_key_ids: Vec<String>,
 }
 
 /// A started registration, as `StartPasskeyRegistration` answers it.
@@ -408,13 +419,9 @@ impl Identities {
     }
 
     /// `ResetPasskeys`: every live passkey of `named` removed, and every
-    /// unexpired key they certified revoked from now, in one transaction.
-    /// The removed passkeys, and the keys revoked.
-    pub fn reset_passkeys(
-        &self,
-        named: &str,
-        reason: &str,
-    ) -> Result<(Vec<PasskeyRow>, Vec<String>), IdentityError> {
+    /// unexpired key any of its passkeys certified, removed ones included,
+    /// revoked from now, in one transaction.
+    pub fn reset_passkeys(&self, named: &str, reason: &str) -> Result<PasskeyReset, IdentityError> {
         if named.trim().is_empty() {
             return Err(IdentityError::InvalidPasskey {
                 field: "identity",
@@ -445,7 +452,11 @@ impl Identities {
             revoked_key_count = keys.len(),
             "passkeys reset"
         );
-        Ok((removed, keys))
+        Ok(PasskeyReset {
+            identity,
+            removed,
+            revoked_key_ids: keys,
+        })
     }
 
     /// Checks `assertion` over `challenge` as a ceremony of the web UI at
@@ -485,17 +496,26 @@ impl Identities {
                 ),
             });
         }
-        let used = self
+        match self
             .db
             .use_passkey(&row.id, asserted.sign_count, Timestamp::now())?
-            .ok_or_else(|| IdentityError::PasskeyInvalid {
+        {
+            PasskeyUsed::Used(used) => Ok((*used, key, bytes)),
+            PasskeyUsed::Removed => Err(IdentityError::PasskeyInvalid {
+                check: "passkey",
+                message: format!(
+                    "passkey {} was removed while the assertion was being checked",
+                    row.id
+                ),
+            }),
+            PasskeyUsed::CountNotAbove => Err(IdentityError::PasskeyInvalid {
                 check: "counter",
                 message: format!(
                     "the sign count {} is not above the passkey's last, {}: a cloned authenticator?",
                     asserted.sign_count, row.sign_count
                 ),
-            })?;
-        Ok((used, key, bytes))
+            }),
+        }
     }
 
     fn unused_passkey_id(&self) -> Result<String, IdentityError> {

@@ -72,7 +72,7 @@ pub use jobs::{
     insert_job_evidence_in, insert_job_in, job_evidence_in, job_in, next_job_evidence_seq_in,
     open_job_by_spec_in, open_job_count_in, queued_jobs_in, repository_exists_in, update_job_in,
 };
-pub use passkeys::{PasskeyInserted, PasskeyRow};
+pub use passkeys::{PasskeyInserted, PasskeyRow, PasskeyUsed};
 pub use provenance::{
     DeclaredColumns, ProvenanceFilter, ProvenanceRow, ProvenanceSessionRow, StoredProvenance,
 };

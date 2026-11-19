@@ -391,6 +391,7 @@ impl Identities {
                     limit,
                 });
             }
+            Ok(KeyInserted::PasskeyRemoved(_)) => unreachable!("a Sigstore key names no passkey"),
             // Raced with another registration of the key.
             Err(DbError::Conflict { .. }) => return self.existing(&key_id, &bundle).await,
             Err(error) => return Err(error.into()),

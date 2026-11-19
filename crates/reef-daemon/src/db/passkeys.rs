@@ -11,6 +11,18 @@ use super::identity::revoke_in;
 use super::{Db, DbError, RevocationRow};
 use crate::model::Timestamp;
 
+/// What [`Db::use_passkey`] did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PasskeyUsed {
+    /// Recorded: the passkey as it is after.
+    Used(Box<PasskeyRow>),
+    /// Nothing: no live passkey has the id. A removal or a reset committed
+    /// since the assertion's passkey was read.
+    Removed,
+    /// Nothing: the sign count is not above the passkey's last.
+    CountNotAbove,
+}
+
 /// One row of `passkeys`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PasskeyRow {
@@ -209,31 +221,35 @@ impl Db {
 
     /// Records an accepted assertion by live passkey `id` with `sign_count`
     /// at `at`, only when the count went up, or it and the stored one are
-    /// both 0 (an authenticator that keeps none). The passkey as it is
-    /// after; `None` when it is removed or the count did not go up.
+    /// both 0 (an authenticator that keeps none).
     pub fn use_passkey(
         &self,
         id: &str,
         sign_count: u32,
         at: Timestamp,
-    ) -> Result<Option<PasskeyRow>, DbError> {
+    ) -> Result<PasskeyUsed, DbError> {
         self.in_transaction(|tx| {
-            let used = tx.execute(
-                "UPDATE passkeys SET sign_count = ?2, last_used_at = ?3
-                 WHERE id = ?1 AND removed_at IS NULL
-                   AND (sign_count < ?2 OR (sign_count = 0 AND ?2 = 0))",
-                params![id, sign_count, at],
-            )?;
-            if used == 0 {
-                return Ok(None);
-            }
-            Ok(tx
+            let live = tx
                 .query_row(
-                    &format!("SELECT {COLUMNS} FROM passkeys WHERE id = ?1"),
+                    &format!("SELECT {COLUMNS} FROM passkeys WHERE id = ?1 AND removed_at IS NULL"),
                     [id],
                     passkey_from,
                 )
-                .optional()?)
+                .optional()?;
+            let Some(mut row) = live else {
+                return Ok(PasskeyUsed::Removed);
+            };
+            let counted = row.sign_count < sign_count || (row.sign_count == 0 && sign_count == 0);
+            if !counted {
+                return Ok(PasskeyUsed::CountNotAbove);
+            }
+            tx.execute(
+                "UPDATE passkeys SET sign_count = ?2, last_used_at = ?3 WHERE id = ?1",
+                params![id, sign_count, at],
+            )?;
+            row.sign_count = sign_count;
+            row.last_used_at = Some(at);
+            Ok(PasskeyUsed::Used(Box::new(row)))
         })
     }
 
@@ -266,10 +282,11 @@ impl Db {
     }
 
     /// Removes every live passkey of `identity_id` at `at` and revokes,
-    /// from `at`, the session keys they certified that are unrevoked and
-    /// unexpired, in one transaction: a key stored before it is revoked, and
-    /// one stored after it is refused (`insert_session_key`). The passkeys
-    /// as they are after, and the ids of the keys revoked.
+    /// from `at`, the unrevoked, unexpired session keys that any of its
+    /// passkeys certified, removed ones included, in one transaction: a key
+    /// stored before it is revoked, and one stored after it is refused
+    /// (`insert_session_key`). The passkeys it removed as they are after,
+    /// and the ids of the keys revoked.
     pub fn reset_passkeys(
         &self,
         identity_id: &str,
@@ -284,9 +301,6 @@ impl Db {
                 stmt.query_map([identity_id], |found| found.get(0))?
                     .collect::<rusqlite::Result<_>>()?
             };
-            if ids.is_empty() {
-                return Ok((Vec::new(), Vec::new()));
-            }
             tx.execute(
                 "UPDATE passkeys SET removed_at = ?2, removed_reason = ?3
                  WHERE identity_id = ?1 AND removed_at IS NULL",
@@ -301,15 +315,14 @@ impl Db {
                 stmt.query_map(params_from_iter(&ids), passkey_from)?
                     .collect::<rusqlite::Result<_>>()?
             };
-            let mut values: Vec<SqlValue> = ids.into_iter().map(SqlValue::Text).collect();
-            values.push(SqlValue::Integer(at.0));
             let keys: Vec<String> = {
-                let mut stmt = tx.prepare(&format!(
+                let mut stmt = tx.prepare(
                     "SELECT key_id FROM session_keys
-                     WHERE passkey_id IN ({marks}) AND not_after >= ? AND revoked_at IS NULL
-                     ORDER BY issued_at, key_id"
-                ))?;
-                stmt.query_map(params_from_iter(values), |found| found.get(0))?
+                     WHERE passkey_id IN (SELECT id FROM passkeys WHERE identity_id = ?1)
+                       AND not_after >= ?2 AND revoked_at IS NULL
+                     ORDER BY issued_at, key_id",
+                )?;
+                stmt.query_map(params![identity_id, at], |found| found.get(0))?
                     .collect::<rusqlite::Result<_>>()?
             };
             let revocation = RevocationRow {

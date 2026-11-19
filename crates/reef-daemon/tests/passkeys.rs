@@ -1701,13 +1701,15 @@ async fn a_resolution_during_an_approve_is_busy() {
     daemon.stop().await;
 }
 
-// 9. A reset while an approve is between its passkey check and its key's
-// insert: whichever commits first, no live key is left certified by the
-// reset passkey. The approve's record of the passkey's use and its read
-// of the key before the insert are made slow, so the reset waits for the
-// database behind one of them and commits between them, or after the
-// read; the insert is then refused. Review of df9d1598, F1.
-#[tokio::test(flavor = "multi_thread")]
+// 9. A reset that commits after an approve has recorded its passkey's use
+// and before the approve's key is inserted: the insert is refused, so no
+// live key is left certified by the reset passkey, and the approval is
+// pending again. On one thread the approve's task runs only while the test
+// awaits, and inserts the key on that thread. Its read of the key before
+// the insert is made slow; the test waits for the use, then resets without
+// an await, so the reset commits before the insert can run. Reviews of
+// df9d1598, F1, and 62dd8618, F1.
+#[tokio::test(flavor = "current_thread")]
 async fn a_reset_during_an_approve_leaves_no_live_key() {
     use reef_daemon::identity::IdentityError;
     use reef_daemon::identity::approvals::Resolution;
@@ -1717,9 +1719,9 @@ async fn a_reset_during_an_approve_leaves_no_live_key() {
     create_identity(client, "alice").await;
     let page = ui(client).await;
     let mut passkey = Authenticator::new(Algorithm::EdDsa);
-    register(&page, &mut passkey, "alice", None).await.unwrap();
+    let registered = register(&page, &mut passkey, "alice", None).await.unwrap();
     let change = commit_on(client, &repo.id, "root()", &[("a.txt", "a\n")]).await;
-    let identities = std::sync::Arc::clone(&daemon.handle.state().identity);
+    let identities = &daemon.handle.state().identity;
     let key = fresh_key();
     let key_id = key.public_key().id().to_string();
     let approval = request_approval(
@@ -1738,72 +1740,128 @@ async fn a_reset_during_an_approve_leaves_no_live_key() {
     db.execute_batch(
         "CREATE VIEW slow AS WITH RECURSIVE c(x) AS
            (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 15000000) SELECT count(*) AS n FROM c;
-         CREATE TRIGGER slow_use AFTER UPDATE OF sign_count ON passkeys
-         BEGIN SELECT n FROM slow; END;
          ALTER TABLE identity_authorities RENAME TO identity_authorities_real;
          CREATE VIEW identity_authorities AS SELECT * FROM identity_authorities_real
            WHERE (SELECT n FROM slow) > 0;",
     )
     .unwrap();
-    let origin = page.origin.clone();
-    let id = approval.id.clone();
-    let approving = tokio::spawn(async move {
-        let web = Channel::Web {
-            session: "0123456789abcdef".to_owned(),
-        };
-        identities
-            .resolve_approval(&web, Some(&origin), &id, Resolution::Approve(asserted))
-            .await
-    });
-    tokio::time::sleep(Duration::from_millis(400)).await;
-    let reset = client
-        .reset_passkeys(ResetPasskeysRequest {
-            identity: "alice".to_owned(),
-            reason: "lost my laptop".to_owned(),
-        })
-        .await
+    let used = || -> bool {
+        db.query_row(
+            "SELECT last_used_at IS NOT NULL FROM passkeys WHERE id = ?1",
+            [&registered.id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    let web = Channel::Web {
+        session: "0123456789abcdef".to_owned(),
+    };
+    let mut approving = Box::pin(identities.resolve_approval(
+        &web,
+        Some(&page.origin),
+        &approval.id,
+        Resolution::Approve(asserted),
+    ));
+    assert!(futures::poll!(approving.as_mut()).is_pending());
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !used() {
+        assert!(
+            Instant::now() < deadline,
+            "the approve never used the passkey"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let reset = identities
+        .reset_passkeys("alice", "lost my laptop")
         .unwrap();
-    let approved = approving.await.unwrap();
+    let approved = approving.await;
     db.execute_batch(
         "DROP VIEW identity_authorities;
          ALTER TABLE identity_authorities_real RENAME TO identity_authorities;
-         DROP TRIGGER slow_use; DROP VIEW slow;",
+         DROP VIEW slow;",
     )
     .unwrap();
     assert_eq!(reset.removed.len(), 1, "the reset removed the passkey");
-    match approved {
-        // The reset first: the insert is refused, and the approval is
-        // pending again.
-        Err(IdentityError::PasskeyInvalid { check, .. }) => {
-            assert_eq!(check, "passkey");
-            assert_eq!(
-                client.get_session_key(&key_id).await.unwrap_err().reason(),
-                "SESSION_KEY_NOT_FOUND",
-                "an approve refused at its insert certified key {key_id}"
-            );
-            assert_eq!(reset.revoked_key_ids, Vec::<String>::new());
-            let pending = client
-                .get_approval(GetApprovalRequest {
-                    id: approval.id.clone(),
-                    wait: None,
-                })
-                .await
-                .unwrap()
-                .approval
-                .unwrap();
-            assert_eq!(pending.state(), ApprovalState::Pending);
-        }
-        // The insert first: the reset revokes the key.
-        Ok(_) => {
-            assert_eq!(reset.revoked_key_ids, std::slice::from_ref(&key_id));
-            let key = client.get_session_key(&key_id).await.unwrap().key.unwrap();
-            assert!(
-                key.revocation.is_some(),
-                "key {key_id} certified by a reset passkey is live"
-            );
-        }
-        Err(error) => panic!("the approve failed otherwise: {error:?}"),
-    }
+    assert!(
+        reset.removed[0].last_used_at.is_some(),
+        "the reset committed before the approve used the passkey"
+    );
+    assert_eq!(reset.revoked_key_ids, Vec::<String>::new());
+    assert!(
+        matches!(&approved, Err(IdentityError::PasskeyInvalid { check: "passkey", message })
+            if message.contains("while the approval was being checked")),
+        "the approve was not refused at its insert: {approved:?}"
+    );
+    assert_eq!(
+        client.get_session_key(&key_id).await.unwrap_err().reason(),
+        "SESSION_KEY_NOT_FOUND",
+        "an approve refused at its insert certified key {key_id}"
+    );
+    let pending = client
+        .get_approval(GetApprovalRequest {
+            id: approval.id.clone(),
+            wait: None,
+        })
+        .await
+        .unwrap()
+        .approval
+        .unwrap();
+    assert_eq!(pending.state(), ApprovalState::Pending);
+    daemon.stop().await;
+}
+
+// A reset revokes the keys every passkey of the identity certified, one
+// removed before it included: removing a passkey revokes nothing, and the
+// reset is the way back from one the person did not add. Review of
+// 62dd8618, F4.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reset_revokes_what_a_removed_passkey_certified() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    create_identity(client, "alice").await;
+    let page = ui(client).await;
+    let mut passkey = Authenticator::new(Algorithm::EdDsa);
+    register(&page, &mut passkey, "alice", None).await.unwrap();
+    let mut rogue = Authenticator::new(Algorithm::Es256);
+    let rogue_key = register(&page, &mut rogue, "alice", Some(&mut passkey))
+        .await
+        .unwrap();
+    let change = commit_on(client, &repo.id, "root()", &[("a.txt", "a\n")]).await;
+    let (_, _, approved) = signed_off(client, &page, &repo.id, "alice", &change, &mut rogue).await;
+    let key_id = approved.key.unwrap().key_id;
+    let challenge = reef_evidence::webauthn::passkey_change_challenge(
+        reef_evidence::webauthn::PasskeyChange::Remove {
+            passkey: &rogue_key.id,
+        },
+    );
+    page.identities()
+        .remove_passkey(RemovePasskeyRequest {
+            id: rogue_key.id.clone(),
+            assertion: Some(assertion(&mut passkey, &page.origin, &challenge)),
+            reason: "not mine".to_owned(),
+        })
+        .await
+        .unwrap();
+    let kept = client.get_session_key(&key_id).await.unwrap().key.unwrap();
+    assert!(
+        kept.revocation.is_none(),
+        "the removal revoked key {key_id}"
+    );
+
+    let reset = client
+        .reset_passkeys(ResetPasskeysRequest {
+            identity: "alice".to_owned(),
+            reason: "a passkey I did not add".to_owned(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(reset.removed.len(), 1, "only the live passkey is removed");
+    assert_eq!(reset.revoked_key_ids, std::slice::from_ref(&key_id));
+    let revoked = client.get_session_key(&key_id).await.unwrap().key.unwrap();
+    assert!(
+        revoked.revocation.is_some(),
+        "key {key_id} of a removed passkey is live after the reset"
+    );
     daemon.stop().await;
 }
 

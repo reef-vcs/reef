@@ -655,7 +655,7 @@ impl Identities {
                     state: "certified",
                 });
             }
-            Err(DbError::NotFound { id, .. }) => {
+            Ok(KeyInserted::PasskeyRemoved(id)) => {
                 return Err(IdentityError::PasskeyInvalid {
                     check: "passkey",
                     message: format!(
@@ -803,6 +803,7 @@ impl Identities {
                     limit,
                 });
             }
+            KeyInserted::PasskeyRemoved(_) => unreachable!("a held key names no passkey"),
         }
         audit::issued(&row, &identity.name, None);
         held.not_after = Some(not_after);

@@ -166,12 +166,16 @@ pub enum InTheWay {
 }
 
 /// What [`Db::insert_session_key`] did.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Inserted {
     /// The key (and its new session) is stored.
     Stored,
     /// Nothing: the identity holds its limit of unexpired keys.
     Full,
+    /// Nothing: the key's passkey, by id, is no live passkey of its
+    /// identity. A removal or a reset committed since its assertion was
+    /// checked.
+    PasskeyRemoved(String),
 }
 
 /// Which session keys a listing returns.
@@ -644,9 +648,10 @@ impl Db {
     /// transaction, unless its identity already holds `limit` keys that have
     /// not expired at `key.issued_at` (counted in the same transaction).
     /// `Err(DbError::Conflict)` when the key is already there: two requests
-    /// raced with one key. `Err(DbError::NotFound)` when `key.passkey_id`
-    /// names no live passkey of its identity: a removal or a reset
-    /// committed first, and a reset revokes only the keys stored before it.
+    /// raced with one key. [`Inserted::PasskeyRemoved`] when
+    /// `key.passkey_id` names no live passkey of its identity: a removal or
+    /// a reset committed first, and a reset revokes only the keys stored
+    /// before it.
     pub fn insert_session_key(
         &self,
         session: Option<&SessionRow>,
@@ -662,10 +667,7 @@ impl Db {
                     |row| row.get(0),
                 )?;
                 if !live {
-                    return Err(DbError::NotFound {
-                        what: "live passkey",
-                        id: passkey.clone(),
-                    });
+                    return Ok(Inserted::PasskeyRemoved(passkey.clone()));
                 }
             }
             let held: i64 = tx.query_row(
@@ -1148,7 +1150,7 @@ impl Db {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::db::{PasskeyInserted, PasskeyRow};
+    use crate::db::{PasskeyInserted, PasskeyRow, PasskeyUsed};
 
     pub(crate) fn identity(id: &str, name: &str, at: i64) -> IdentityRow {
         IdentityRow {
@@ -1458,7 +1460,7 @@ pub(crate) mod tests {
         };
         let refused = |result: Result<Inserted, DbError>, passkey: &str| {
             assert!(
-                matches!(&result, Err(DbError::NotFound { id, .. }) if id == passkey),
+                matches!(&result, Ok(Inserted::PasskeyRemoved(id)) if id == passkey),
                 "{result:?}"
             );
         };
@@ -1488,18 +1490,70 @@ pub(crate) mod tests {
             insert(&approved("k4", "s4", "pk_2"), "s4").unwrap(),
             Inserted::Stored
         );
-        let (removed, revoked) = db.reset_passkeys("idn_1", Timestamp(30), "reset").unwrap();
-        assert_eq!(removed.len(), 1);
-        assert_eq!(revoked, ["k4"]);
-        let k4 = db.session_keys_by_id(&["k4"]).unwrap().pop().unwrap();
-        assert_eq!(
-            k4.revocation.map(|row| (row.revoked_at, row.invalid_from)),
-            Some((Timestamp(30), Timestamp(30)))
-        );
-        refused(insert(&approved("k5", "s5", "pk_2"), "s5"), "pk_2");
         // The removal revoked nothing: k1 was certified while pk_1 was live.
         let k1 = db.session_keys_by_id(&["k1"]).unwrap().pop().unwrap();
         assert_eq!(k1.revocation, None);
+        // A reset revokes what every passkey of the identity certified,
+        // the one removed before it included. Review of 62dd8618, F4.
+        let (removed, revoked) = db.reset_passkeys("idn_1", Timestamp(30), "reset").unwrap();
+        assert_eq!(removed.len(), 1);
+        assert_eq!(revoked, ["k1", "k4"]);
+        for key in db.session_keys_by_id(&["k1", "k4"]).unwrap() {
+            assert_eq!(
+                key.revocation.map(|row| (row.revoked_at, row.invalid_from)),
+                Some((Timestamp(30), Timestamp(30))),
+                "{}",
+                key.key_id
+            );
+        }
+        refused(insert(&approved("k5", "s5", "pk_2"), "s5"), "pk_2");
+        // With no live passkey left, a reset still revokes what the
+        // removed ones certified.
+        let bobs = SessionKeyRow {
+            identity_id: "idn_2".into(),
+            ..approved("k6", "s6", "pk_3")
+        };
+        assert_eq!(
+            db.insert_session_key(Some(&session("s6", "idn_2")), &bobs, 8)
+                .unwrap(),
+            Inserted::Stored
+        );
+        db.remove_passkey("pk_3", Timestamp(40), "removed", None)
+            .unwrap()
+            .unwrap();
+        let (removed, revoked) = db.reset_passkeys("idn_2", Timestamp(50), "reset").unwrap();
+        assert_eq!((removed.len(), revoked), (0, vec!["k6".to_owned()]));
+    }
+
+    // A use of a passkey says why it recorded nothing: the passkey is no
+    // longer live, or the count did not go up. Review of 62dd8618, F2.
+    #[test]
+    fn a_passkeys_use_tells_removed_from_a_stale_count() {
+        let db = Db::open_in_memory().unwrap();
+        db.insert_identity(&identity("idn_1", "alice", 1)).unwrap();
+        db.insert_passkey(&passkey("pk_1", "idn_1", 1), 32).unwrap();
+        let PasskeyUsed::Used(used) = db.use_passkey("pk_1", 5, Timestamp(10)).unwrap() else {
+            panic!("a first use with a count was not recorded");
+        };
+        assert_eq!(
+            (used.sign_count, used.last_used_at),
+            (5, Some(Timestamp(10)))
+        );
+        assert_eq!(
+            db.use_passkey("pk_1", 5, Timestamp(11)).unwrap(),
+            PasskeyUsed::CountNotAbove
+        );
+        db.remove_passkey("pk_1", Timestamp(20), "removed", None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            db.use_passkey("pk_1", 6, Timestamp(21)).unwrap(),
+            PasskeyUsed::Removed
+        );
+        assert_eq!(
+            db.use_passkey("pk_9", 6, Timestamp(21)).unwrap(),
+            PasskeyUsed::Removed
+        );
     }
 
     #[test]

@@ -573,7 +573,7 @@ async fn passkey(ctx: &Ctx, command: PasskeyCommand, advice: &AdviceCtx) -> Resu
                 removed: response.removed.iter().map(Passkey::from).collect(),
                 revoked_key_ids: response.revoked_key_ids,
             };
-            if !reset.removed.is_empty() {
+            if !reset.removed.is_empty() || !reset.revoked_key_ids.is_empty() {
                 ctx.out.note(&format!(
                     "reef: removed {} passkey{} and revoked {} key{}: no sign-off is verified with them again",
                     reset.removed.len(),
@@ -1287,7 +1287,7 @@ struct Reset(PasskeysReset);
 impl TextRender for Reset {
     fn render(&self, w: &mut dyn Write) -> io::Result<()> {
         if self.0.removed.is_empty() {
-            return writeln!(w, "No live passkeys to remove.");
+            writeln!(w, "No live passkeys to remove.")?;
         }
         for passkey in &self.0.removed {
             writeln!(
