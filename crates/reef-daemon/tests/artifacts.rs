@@ -1835,7 +1835,7 @@ async fn remote_and_access() {
     assert_eq!(joined(&messages), blob);
 
     // The web listener serves reads to a session, and refuses uploads.
-    let session = daemon.client.create_web_session(false).await.unwrap();
+    let session = daemon.client.create_web_session(false, "").await.unwrap();
     let token = session
         .session_url
         .split_once("#session=")

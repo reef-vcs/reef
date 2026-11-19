@@ -42,6 +42,19 @@ pub(crate) struct InUse {
     key: Key,
 }
 
+impl InUse {
+    /// The session's id as callers see it: the first 16 hex digits of its
+    /// token's digest, which names it in records and logs without the
+    /// token.
+    pub(crate) fn session_id(&self) -> String {
+        use std::fmt::Write as _;
+        self.key[..8].iter().fold(String::new(), |mut out, b| {
+            let _ = write!(out, "{b:02x}");
+            out
+        })
+    }
+}
+
 impl Drop for InUse {
     fn drop(&mut self) {
         let mut sessions = self.sessions.lock();

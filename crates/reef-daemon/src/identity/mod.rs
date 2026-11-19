@@ -16,11 +16,15 @@
 //! On one uid a certificate proves only that the daemon's user, or
 //! something running as that user, asked for it (ADR 0027, S-58). What an
 //! identity does distinguish is other local users, remote callers (whose
-//! linked token decides the identity), and, after R3.43, a present human.
+//! linked token decides the identity), and a present human: a person's
+//! passkey ([`passkeys`]) approving one sign-off ([`approvals`]) gives its
+//! key presence `user_verified` (R3.43, ADR 0085).
 
+pub mod approvals;
 pub mod audit;
 pub mod authority;
 pub mod issue;
+pub mod passkeys;
 pub mod read;
 pub mod retention;
 pub mod sigstore;
@@ -39,6 +43,7 @@ use crate::db::{Db, DbError, IdentityRow, META_DEFAULT_IDENTITY_ID};
 use crate::error::{Advice, Advise};
 use crate::model::Timestamp;
 
+pub use approvals::ApprovalEnd;
 pub use authority::{AuthorityError, Current};
 pub use issue::Refusal;
 
@@ -254,6 +259,115 @@ pub enum IdentityError {
         /// The id.
         id: String,
     },
+    /// A passkey change that needs an existing passkey's assertion and
+    /// has none: `PASSKEY_REQUIRED` (R3.43).
+    #[error(
+        "identity {identity} has a passkey, so {what} needs an assertion by one of its passkeys"
+    )]
+    PasskeyRequired {
+        /// The identity's name.
+        identity: String,
+        /// The change.
+        what: &'static str,
+    },
+    /// A passkey ceremony that failed a check:
+    /// `PASSKEY_ASSERTION_INVALID` (R3.43).
+    #[error("the passkey's {check} check failed: {message}")]
+    PasskeyInvalid {
+        /// `type`, `challenge`, `origin`, `rp`, `flags`, `signature`,
+        /// `counter` or `passkey`.
+        check: &'static str,
+        /// What was found.
+        message: String,
+    },
+    /// A registration of a live passkey's credential or public key:
+    /// `PASSKEY_EXISTS` (R3.43).
+    #[error("passkey {id} has this credential or public key already")]
+    PasskeyExists {
+        /// The live passkey's id.
+        id: String,
+    },
+    /// No live passkey has the id: `PASSKEY_NOT_FOUND` (R3.43).
+    #[error("no live passkey is {id:?}")]
+    PasskeyNotFound {
+        /// The id.
+        id: String,
+    },
+    /// A passkey or approval write through the remote listener:
+    /// `PASSKEY_OVER_REMOTE` (R3.43).
+    #[error(
+        "{method} is refused through the remote listener: a passkey works only at the web UI's origin"
+    )]
+    PasskeyOverRemote {
+        /// The RPC.
+        method: &'static str,
+    },
+    /// A passkey registration or removal on the socket:
+    /// `PASSKEY_NEEDS_WEB` (R3.43).
+    #[error("{method} needs the web UI: a passkey ceremony runs in a browser")]
+    PasskeyNeedsWeb {
+        /// The RPC.
+        method: &'static str,
+    },
+    /// A passkey's key of an algorithm Reef does not verify:
+    /// `PASSKEY_ALGORITHM` (R3.43).
+    #[error("{message}")]
+    PasskeyAlgorithm {
+        /// The COSE algorithm given.
+        algorithm: i64,
+        /// What is wrong.
+        message: String,
+    },
+    /// A passkey field out of bounds: `INVALID_PASSKEY` (R3.43).
+    #[error("{field}: {message}")]
+    InvalidPasskey {
+        /// `label`, or `identity` for a reset that names none.
+        field: &'static str,
+        /// What is wrong.
+        message: String,
+    },
+    /// An identity with its limit of live passkeys: `TOO_MANY_PASSKEYS`
+    /// (R3.43).
+    #[error("identity {identity} has {limit} live passkeys, the limit")]
+    TooManyPasskeys {
+        /// The identity's name.
+        identity: String,
+        /// The limit.
+        limit: usize,
+    },
+    /// No held approval has the id: `APPROVAL_NOT_FOUND` (R3.43).
+    #[error(
+        "the daemon holds no approval {id:?}: never requested, dropped by a restart, or ended a while ago"
+    )]
+    ApprovalNotFound {
+        /// The id.
+        id: String,
+    },
+    /// A resolution of an approval no longer pending: `APPROVAL_EXPIRED`,
+    /// `APPROVAL_DECLINED` or `APPROVAL_RESOLVED` (R3.43).
+    #[error("approval {id} {}", match end {
+        ApprovalEnd::Expired => "expired",
+        ApprovalEnd::Declined => "was declined",
+        ApprovalEnd::Approved => "is approved already",
+    })]
+    ApprovalEnded {
+        /// The id.
+        id: String,
+        /// How it ended.
+        end: ApprovalEnd,
+    },
+    /// An approve on the socket: `APPROVAL_NEEDS_WEB` (R3.43).
+    #[error("approval {id} is approved only with a passkey, in the web UI")]
+    ApprovalNeedsWeb {
+        /// The id.
+        id: String,
+    },
+    /// Too many approvals pending: `TOO_MANY_APPROVALS` (R3.43).
+    #[error("{limit} approvals are pending already, the limit")]
+    TooManyApprovals {
+        /// The limit that was reached.
+        limit: usize,
+    },
     /// The authority key could not be loaded, made or written.
     #[error(transparent)]
     Authority(#[from] AuthorityError),
@@ -277,22 +391,35 @@ impl Classify for IdentityError {
             | Self::InvalidProof { .. }
             | Self::AmbiguousAuthority { .. }
             | Self::InvalidBundle(_)
-            | Self::InvalidMatch { .. } => ErrorKind::InvalidArgument,
+            | Self::InvalidMatch { .. }
+            | Self::PasskeyInvalid { .. }
+            | Self::PasskeyAlgorithm { .. }
+            | Self::InvalidPasskey { .. } => ErrorKind::InvalidArgument,
             Self::NoDefault { .. }
             | Self::IsDefault { .. }
             | Self::AuthorityIsCurrent { .. }
             | Self::Revoked { .. }
             | Self::TooMany { .. }
             | Self::Unmatched { .. }
-            | Self::SigstoreUnavailable { .. } => ErrorKind::Conflict,
-            Self::Exists { .. } | Self::KeyExists { .. } | Self::MatchExists { .. } => {
-                ErrorKind::AlreadyExists
-            }
+            | Self::SigstoreUnavailable { .. }
+            | Self::PasskeyRequired { .. }
+            | Self::TooManyPasskeys { .. }
+            | Self::ApprovalEnded { .. }
+            | Self::TooManyApprovals { .. } => ErrorKind::Conflict,
+            Self::Exists { .. }
+            | Self::KeyExists { .. }
+            | Self::MatchExists { .. }
+            | Self::PasskeyExists { .. } => ErrorKind::AlreadyExists,
             Self::NotFound { .. }
             | Self::KeyNotFound { .. }
             | Self::AuthorityNotFound { .. }
-            | Self::MatchNotFound { .. } => ErrorKind::NotFound,
-            Self::Refused { .. } => ErrorKind::PermissionDenied,
+            | Self::MatchNotFound { .. }
+            | Self::PasskeyNotFound { .. }
+            | Self::ApprovalNotFound { .. } => ErrorKind::NotFound,
+            Self::Refused { .. }
+            | Self::PasskeyOverRemote { .. }
+            | Self::PasskeyNeedsWeb { .. }
+            | Self::ApprovalNeedsWeb { .. } => ErrorKind::PermissionDenied,
             Self::Authority(error) => error.kind(),
             Self::Db(error) => error.kind(),
             Self::Task(_) => ErrorKind::Internal,
@@ -301,6 +428,7 @@ impl Classify for IdentityError {
 }
 
 impl Advise for IdentityError {
+    #[expect(clippy::too_many_lines, reason = "one arm per error")]
     fn advice(&self) -> Option<Advice> {
         Some(match self {
             Self::InvalidName { .. } => Advice::hint(
@@ -393,6 +521,72 @@ impl Advise for IdentityError {
             ),
             Self::MatchNotFound { .. } => Advice::hint(
                 "`reef identity show <identity>` lists an identity's OIDC matches with their ids.",
+            ),
+            Self::PasskeyRequired { .. } => Advice::hint(
+                "Approve it with one of the identity's passkeys in the web UI. A passkey that is lost is replaced after a reset on the daemon's machine: reef identity passkey reset <identity>.",
+            ),
+            Self::PasskeyInvalid { check, .. } => Advice::hint(match *check {
+                "challenge" => {
+                    "Start the ceremony again from the web UI: a registration challenge is single use, lasts 5 minutes and belongs to the session that started it, and an approval's challenge is its own."
+                }
+                "origin" => {
+                    "Run the ceremony in the web UI that `reef ui` opens, at http://localhost:<its port>; a page at any other origin is refused."
+                }
+                "flags" => {
+                    "The authenticator must verify you (a fingerprint, a face or a PIN), not only see a touch."
+                }
+                "counter" => {
+                    "The passkey's sign count did not go up, as a cloned authenticator's would not: check the passkey, and remove it if it is not yours alone."
+                }
+                "passkey" => {
+                    "Use a live passkey of the identity: `reef identity passkey list` lists them."
+                }
+                _ => "Send the browser's bytes exactly as it returned them.",
+            }),
+            Self::PasskeyExists { .. } => Advice::hint(
+                "This passkey is registered already: `reef identity passkey list` lists the live ones.",
+            ),
+            Self::PasskeyNotFound { .. } => Advice::run(
+                "List the live passkeys to find its id.",
+                ["reef", "identity", "passkey", "list"],
+            ),
+            Self::PasskeyOverRemote { .. } => Advice::hint(
+                "Passkeys and approvals work only in the web UI on the daemon's machine (`reef ui`): the remote listener has no origin a passkey works at.",
+            ),
+            Self::PasskeyNeedsWeb { .. } => Advice::run(
+                "Add or remove a passkey on the web UI's Passkeys page.",
+                ["reef", "ui"],
+            ),
+            Self::PasskeyAlgorithm { .. } => Advice::hint(
+                "Register a passkey of ES256, EdDSA or RS256, as every platform authenticator offers, and send getPublicKey()'s bytes with getPublicKeyAlgorithm().",
+            ),
+            Self::InvalidPasskey { field, .. } => Advice::hint(if *field == "identity" {
+                "Name the identity whose passkeys to reset: `reef identity list` lists them."
+            } else {
+                "Give the passkey a label of 1 to 64 bytes with no control characters, such as \"MacBook Touch ID\"."
+            }),
+            Self::TooManyPasskeys { .. } => {
+                Advice::hint("Remove a passkey the identity no longer uses first.")
+            }
+            Self::ApprovalNotFound { .. } => Advice::hint(
+                "Request the approval again: approvals live 2 minutes in the daemon's memory, and a restart drops them.",
+            ),
+            Self::ApprovalEnded { end, .. } => Advice::hint(match end {
+                ApprovalEnd::Expired => {
+                    "Request the approval again, and approve it within 2 minutes."
+                }
+                ApprovalEnd::Declined => {
+                    "The person declined it: request it again only if they ask for it."
+                }
+                ApprovalEnd::Approved => {
+                    "It is approved already, or being approved: GetApproval returns its key."
+                }
+            }),
+            Self::ApprovalNeedsWeb { .. } => Advice::hint(
+                "Approve it on the web UI's approval page with a passkey; the socket can only decline.",
+            ),
+            Self::TooManyApprovals { .. } => Advice::hint(
+                "Wait for pending approvals to be approved, declined or expire (2 minutes).",
             ),
             Self::Authority(error) => return error.advice(),
             Self::Db(error) => return error.advice(),
@@ -521,6 +715,50 @@ impl IdentityError {
                 vec![("identity", identity.clone())],
             ),
             Self::MatchNotFound { id } => (reason::OIDC_MATCH_NOT_FOUND, vec![("id", id.clone())]),
+            Self::PasskeyRequired { identity, .. } => (
+                reason::PASSKEY_REQUIRED,
+                vec![("identity", identity.clone())],
+            ),
+            Self::PasskeyInvalid { check, .. } => (
+                reason::PASSKEY_ASSERTION_INVALID,
+                vec![("check", (*check).to_owned())],
+            ),
+            Self::PasskeyExists { id } => (reason::PASSKEY_EXISTS, vec![("id", id.clone())]),
+            Self::PasskeyNotFound { id } => (reason::PASSKEY_NOT_FOUND, vec![("id", id.clone())]),
+            Self::PasskeyOverRemote { method } => (
+                reason::PASSKEY_OVER_REMOTE,
+                vec![("method", (*method).to_owned())],
+            ),
+            Self::PasskeyNeedsWeb { method } => (
+                reason::PASSKEY_NEEDS_WEB,
+                vec![("method", (*method).to_owned())],
+            ),
+            Self::PasskeyAlgorithm { algorithm, .. } => (
+                reason::PASSKEY_ALGORITHM,
+                vec![("algorithm", algorithm.to_string())],
+            ),
+            Self::InvalidPasskey { field, .. } => (
+                reason::INVALID_PASSKEY,
+                vec![("field", (*field).to_owned())],
+            ),
+            Self::TooManyPasskeys { identity, limit } => (
+                reason::TOO_MANY_PASSKEYS,
+                vec![("identity", identity.clone()), ("limit", limit.to_string())],
+            ),
+            Self::ApprovalNotFound { id } => (reason::APPROVAL_NOT_FOUND, vec![("id", id.clone())]),
+            Self::ApprovalEnded { id, end } => (
+                match end {
+                    ApprovalEnd::Expired => reason::APPROVAL_EXPIRED,
+                    ApprovalEnd::Declined => reason::APPROVAL_DECLINED,
+                    ApprovalEnd::Approved => reason::APPROVAL_RESOLVED,
+                },
+                vec![("id", id.clone())],
+            ),
+            Self::ApprovalNeedsWeb { id } => (reason::APPROVAL_NEEDS_WEB, vec![("id", id.clone())]),
+            Self::TooManyApprovals { limit } => (
+                reason::TOO_MANY_APPROVALS,
+                vec![("limit", limit.to_string())],
+            ),
             Self::InvalidKeyId { .. } | Self::Authority(_) | Self::Db(_) | Self::Task(_) => {
                 return None;
             }
@@ -550,6 +788,10 @@ pub struct Identities {
     limit: AtomicUsize,
     /// `[sigstore]` and its trusted root (R3.42).
     sigstore: sigstore::Keyless,
+    /// Registration challenges and the lock of passkey changes (R3.43).
+    passkeys: passkeys::Passkeys,
+    /// Approvals, in memory (R3.43).
+    approvals: approvals::Approvals,
 }
 
 impl std::fmt::Debug for Identities {
@@ -637,6 +879,8 @@ impl Identities {
             settings: config.file.session_keys.clone(),
             limit: AtomicUsize::new(MAX_SESSION_KEYS),
             sigstore: sigstore::Keyless::load(&config.file.sigstore),
+            passkeys: passkeys::Passkeys::default(),
+            approvals: approvals::Approvals::default(),
         })
     }
 

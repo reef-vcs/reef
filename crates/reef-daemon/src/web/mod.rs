@@ -11,19 +11,24 @@
 //! over the socket, kept as digests, never persisted, so a daemon restart
 //! ends them all. Launch files (`launch`) hand a token to a browser
 //! without a command line.
+//!
+//! The listener serves READ methods and a short allowlist of writes
+//! (`rules`, R3.43): passkeys, approvals, and evidence a passkey approved.
+//! A request that passes carries a [`Caller`] naming its session.
 
 pub(crate) mod assets;
 pub(crate) mod body;
 pub(crate) mod gate;
 mod launch;
+pub(crate) mod rules;
 pub(crate) mod session;
 
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll, ready};
 use std::time::{Duration, Instant};
 
@@ -106,13 +111,20 @@ pub enum WebError {
     /// A web listener request without a live session.
     #[error("no live web UI session")]
     SessionInvalid,
-    /// A web listener request for a method that is not `ACCESS_READ`.
-    #[error("the web UI serves read RPCs only; {method} is {access}")]
+    /// A web listener request for a method that is neither `ACCESS_READ`
+    /// nor on the allowlist (`rules::TABLE`).
+    #[error("the web UI serves read RPCs and its allowlist of writes; {method} is {access}")]
     AccessDenied {
         /// The method's path.
         method: String,
         /// `write`, `admin` or `unknown`.
         access: &'static str,
+    },
+    /// A `CreateWebSession` path that is not one (R3.43).
+    #[error("{path:?} is not a path of the web UI")]
+    InvalidPath {
+        /// The path.
+        path: String,
     },
 }
 
@@ -123,6 +135,7 @@ impl Classify for WebError {
             Self::Unavailable { .. } => ErrorKind::Unavailable,
             Self::LaunchFile { .. } => ErrorKind::Internal,
             Self::SessionInvalid | Self::AccessDenied { .. } => ErrorKind::PermissionDenied,
+            Self::InvalidPath { .. } => ErrorKind::InvalidArgument,
         }
     }
 }
@@ -144,7 +157,10 @@ impl Advise for WebError {
                 ["reef", "ui"],
             )),
             Self::AccessDenied { .. } => Some(Advice::hint(
-                "The web UI serves read RPCs only; use the CLI for this.",
+                "The web UI serves read RPCs and an allowlist of writes (passkeys, approvals, and evidence a passkey approved); use the CLI for this.",
+            )),
+            Self::InvalidPath { .. } => Some(Advice::hint(
+                "Give a path of the web UI starting with /, of letters, digits and /._-, such as /approve/apr_0123456789abcdef, or none.",
             )),
             Self::LaunchFile { .. } => None,
         }
@@ -158,11 +174,45 @@ struct Bound {
     url: String,
 }
 
+/// Who called through the web listener (R3.43): the gate puts it in every
+/// request it passes, where a client cannot set it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Caller {
+    /// The session: the first 16 hex digits of its token's digest.
+    pub session: String,
+}
+
 /// The web UI: its sessions, and its listener once bound.
 #[derive(Debug)]
 pub struct WebUi {
     bound: tokio::sync::Mutex<Option<Bound>>,
     sessions: Arc<Sessions>,
+    /// `http://localhost:<port>`, once bound: the one origin a passkey
+    /// ceremony is accepted from.
+    origin: OnceLock<String>,
+}
+
+/// The longest path `CreateWebSession` opens.
+const MAX_PATH_BYTES: usize = 256;
+
+/// Whether `path` is a path of the app to open: empty, or `/` and
+/// letters, digits and `/._-`, with no empty, `.` or `..` segment after
+/// the first `/`.
+fn is_app_path(path: &str) -> bool {
+    if path.is_empty() {
+        return true;
+    }
+    let Some(rest) = path.strip_prefix('/') else {
+        return false;
+    };
+    path.len() <= MAX_PATH_BYTES
+        && rest
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"/._-".contains(&b))
+        && (rest.is_empty()
+            || rest
+                .split('/')
+                .all(|segment| !matches!(segment, "" | "." | "..")))
 }
 
 impl WebUi {
@@ -170,15 +220,27 @@ impl WebUi {
         WebUi {
             bound: tokio::sync::Mutex::new(None),
             sessions: Arc::new(Sessions::new(limits)),
+            origin: OnceLock::new(),
         }
     }
 
+    /// `http://localhost:<port>` once the listener is bound.
+    pub fn origin(&self) -> Option<&str> {
+        self.origin.get().map(String::as_str)
+    }
+
     /// `CreateWebSession`: binds the listener if needed, mints a session,
-    /// and writes its launch file if asked.
+    /// and writes its launch file if asked, opening the app at `path`.
     pub(crate) async fn create_session(
         state: &Arc<AppState>,
         launch_file: bool,
+        path: &str,
     ) -> Result<CreateWebSessionResponse, WebError> {
+        if !is_app_path(path) {
+            return Err(WebError::InvalidPath {
+                path: path.to_owned(),
+            });
+        }
         let ui = &state.config.file.ui;
         if !ui.enabled {
             return Err(WebError::Disabled);
@@ -199,7 +261,8 @@ impl WebUi {
         for path in ended {
             launch::remove(&path);
         }
-        let session_url = format!("{url}#session={token}");
+        let page = path.strip_prefix('/').unwrap_or_default();
+        let session_url = format!("{url}{page}#session={token}");
         let launch_path = if launch_file {
             let dir = launch_dir.clone();
             let page = session_url.clone();
@@ -267,6 +330,7 @@ async fn bind(state: &Arc<AppState>) -> Result<Bound, WebError> {
     })?;
     let loopback = Loopback::bind(port).await?;
     let authority = format!("localhost:{}", loopback.port);
+    let _ = state.web.origin.set(format!("http://{authority}"));
     let gate = Arc::new(gate::Gate {
         origin: format!("http://{authority}"),
         authority: authority.clone(),
@@ -488,5 +552,39 @@ impl Stream for Capped {
                 open: Arc::clone(&self.open),
             })));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_app_path;
+
+    #[test]
+    fn app_paths() {
+        for good in [
+            "",
+            "/",
+            "/approve/apr_0123456789abcdef",
+            "/passkeys",
+            "/repos/abc/smartlog",
+        ] {
+            assert!(is_app_path(good), "{good}");
+        }
+        for bad in [
+            "approve",
+            "//evil.example",
+            "/a//b",
+            "/a/../b",
+            "/./a",
+            "/a?x=1",
+            "/a#b",
+            "/a b",
+            "/a%2f",
+            "/a/",
+            "\\evil",
+        ] {
+            assert!(!is_app_path(bad), "{bad}");
+        }
+        assert!(!is_app_path(&format!("/{}", "a".repeat(256))));
     }
 }

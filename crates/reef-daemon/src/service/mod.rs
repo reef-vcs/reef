@@ -116,6 +116,12 @@ pub(crate) fn remote_of<T>(request: &tonic::Request<T>) -> Option<&crate::remote
     request.extensions().get::<crate::remote::Caller>()
 }
 
+/// The web UI caller of `request`, if it came through the web listener
+/// (R3.43).
+pub(crate) fn web_of<T>(request: &tonic::Request<T>) -> Option<&crate::web::Caller> {
+    request.extensions().get::<crate::web::Caller>()
+}
+
 /// The operation `op_id` of `repo` that a handler just caused, read back in
 /// full with its effects (R2.02); `None` when it recorded none (`op_id`
 /// empty or absent). Effects that cannot be computed are left unset.

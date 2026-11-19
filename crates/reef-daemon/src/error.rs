@@ -426,6 +426,9 @@ fn web_reason(error: &WebError) -> Option<(&'static str, BTreeMap<String, String
             reason::WEB_ACCESS_DENIED,
             meta(&[("method", method.clone()), ("access", (*access).to_owned())]),
         ),
+        WebError::InvalidPath { path } => {
+            (reason::INVALID_WEB_PATH, meta(&[("path", path.clone())]))
+        }
         _ => return None,
     })
 }

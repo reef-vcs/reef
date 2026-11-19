@@ -811,6 +811,38 @@ fn cel_reads_a_keys_passkey() {
     );
 }
 
+// R3.43: CEL reads a key's effective presence, so a rule of its own cannot
+// count an unpinned passkey as a verified person.
+#[test]
+fn cel_reads_effective_presence() {
+    let rule_text = "[[rule]]\nname = \"verified\"\nexpr = 'evidence.exists(e, e.key.presence == \"user_verified\")'\n";
+    let unpinned = policy(rule_text);
+    let pinned = policy(&format!("{rule_text}[passkeys]\nalice = [\"{PASSKEY}\"]\n"));
+    let mut e = signoff("s1", "alice", ALICE_ID, 1);
+    e.key.presence = "user_verified".to_owned();
+    e.key.passkey = PASSKEY.to_owned();
+    let changed = input(&["a"], vec![e]);
+    assert_eq!(
+        rule(&unpinned.evaluate(&changed), "verified").status,
+        Status::Unsatisfied
+    );
+    assert_eq!(
+        rule(&pinned.evaluate(&changed), "verified").status,
+        Status::Satisfied
+    );
+    // Effective presence is a fixed point: a key already normalized reads
+    // the same.
+    for policy in [&unpinned, &pinned] {
+        let key = &changed.evidence[0].key;
+        let once = policy.presence(key).unwrap();
+        let normalized = Key {
+            presence: once.as_str().to_owned(),
+            ..key.clone()
+        };
+        assert_eq!(policy.presence(&normalized), Some(once));
+    }
+}
+
 fn resolved(tier: &str, approval: bool) -> Resolution {
     Resolution {
         assignment: "asg_0000000000000001".to_owned(),

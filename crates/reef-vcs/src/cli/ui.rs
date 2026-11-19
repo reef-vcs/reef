@@ -134,7 +134,7 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<(), CliError> {
     // opens nothing can still hand its path to the user.
     let response = ctx
         .client
-        .create_web_session(!args.print)
+        .create_web_session(!args.print, "")
         .await
         .map_err(CliError::Daemon)?;
     let launch_path = (!response.launch_path.is_empty()).then(|| response.launch_path.clone());

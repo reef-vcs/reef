@@ -83,6 +83,27 @@ pub struct EvidenceRow {
     pub added_by_agent: Option<String>,
     /// The remote token of the adding request (R2.08).
     pub remote_token_id: Option<String>,
+    /// The web UI session of the adding request (R3.43).
+    pub web_session: Option<String>,
+}
+
+/// What [`Db::add_evidence`] did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AddedEvidence {
+    /// The object is stored (or was), read back.
+    Added {
+        /// Whether it was new.
+        inserted: Inserted,
+        /// The row as stored.
+        stored: Box<StoredEvidence>,
+    },
+    /// Nothing: the signing key already signed another object (R3.43).
+    Spent {
+        /// That object's repository.
+        repo_id: String,
+        /// Its id.
+        evidence_id: String,
+    },
 }
 
 /// An evidence row with its key's public key, as reads return it.
@@ -144,7 +165,7 @@ pub struct EvidenceFilter {
 
 const COLUMNS: &str = "e.repo_id, e.id, e.envelope, e.format, e.tree_id, e.kind, e.result, \
      e.target, e.key_id, e.started_at, e.finished_at, e.added_at, e.added_by_agent, \
-     e.remote_token_id, k.public_key";
+     e.remote_token_id, k.public_key, e.web_session";
 
 /// The evidence rows and their keys: a row whose key is missing still reads.
 const FROM: &str = "evidence e LEFT JOIN evidence_keys k ON k.id = e.key_id";
@@ -196,6 +217,7 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<StoredEvidence> {
             added_at: Timestamp(integer_at(row, 11)?),
             added_by_agent: text_at(row, 12)?,
             remote_token_id: text_at(row, 13)?,
+            web_session: text_at(row, 15)?,
         },
         public_key: bytes_at(row, 14)?,
     })
@@ -279,8 +301,8 @@ pub fn insert_evidence_in(
         tx.execute(
             "INSERT INTO evidence(repo_id, id, envelope, format, tree_id, kind, result, target,
                                   key_id, started_at, finished_at, added_at, added_by_agent,
-                                  remote_token_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                                  remote_token_id, web_session)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 row.repo_id,
                 row.id,
@@ -296,6 +318,7 @@ pub fn insert_evidence_in(
                 row.added_at,
                 row.added_by_agent,
                 row.remote_token_id,
+                row.web_session,
             ],
         )?;
     }
@@ -371,21 +394,59 @@ impl Db {
     /// names (`artifacts`, digests; R3.02), in one transaction, which also
     /// reads the row back: a GC deleting it meanwhile can neither split the
     /// add nor make its answer fail.
+    ///
+    /// With `spend`, the signing key signs this one object (R3.43): its
+    /// session key row is marked spent by it in the same transaction, and
+    /// a key already spent by another object adds nothing and returns
+    /// [`AddedEvidence::Spent`] with that object's repository and id.
     pub fn add_evidence(
         &self,
         key: &EvidenceKeyRow,
         row: &EvidenceRow,
         link: Option<&EvidenceLinkRow>,
         artifacts: &[String],
-    ) -> Result<(Inserted, StoredEvidence), DbError> {
+        spend: bool,
+    ) -> Result<AddedEvidence, DbError> {
         self.in_transaction(|tx| {
+            if spend {
+                let marked = tx.execute(
+                    "UPDATE session_keys SET spent_repo_id = ?2, spent_evidence_id = ?3
+                     WHERE key_id = ?1
+                       AND (spent_evidence_id IS NULL
+                            OR (spent_repo_id = ?2 AND spent_evidence_id = ?3))",
+                    params![key.id, row.repo_id, row.id],
+                )?;
+                if marked == 0 {
+                    let by: Option<(String, String)> = tx
+                        .query_row(
+                            "SELECT spent_repo_id, spent_evidence_id FROM session_keys
+                             WHERE key_id = ?1",
+                            [&key.id],
+                            |found| {
+                                Ok((
+                                    text_at(found, 0)?.unwrap_or_default(),
+                                    text_at(found, 1)?.unwrap_or_default(),
+                                ))
+                            },
+                        )
+                        .optional()?;
+                    let (repo_id, evidence_id) = by.unwrap_or_default();
+                    return Ok(AddedEvidence::Spent {
+                        repo_id,
+                        evidence_id,
+                    });
+                }
+            }
             let inserted = add_evidence_in(tx, key, row, link, artifacts)?;
             let stored =
                 evidence_in(tx, row.repo_id, &row.id)?.ok_or_else(|| DbError::NotFound {
                     what: WHAT,
                     id: row.id.clone(),
                 })?;
-            Ok((inserted, stored))
+            Ok(AddedEvidence::Added {
+                inserted,
+                stored: Box::new(stored),
+            })
         })
     }
 
@@ -720,6 +781,7 @@ pub(crate) mod tests {
             added_at: Timestamp(added_at),
             added_by_agent: Some("agent".into()),
             remote_token_id: None,
+            web_session: None,
         }
     }
 
@@ -750,6 +812,55 @@ pub(crate) mod tests {
             db.links_of(record.id, &["e1", "e2"]).unwrap(),
             [("e1".to_owned(), vec!["c1".to_owned()])].into()
         );
+    }
+
+    // R3.43 test 7: a passkey-approved key signs one evidence object. The
+    // same object again is an idempotent add; another, in any repository,
+    // adds nothing and names the one the key signed.
+    #[test]
+    fn a_spent_key_signs_nothing_else() {
+        let db = Db::open_in_memory().unwrap();
+        let first_repo = repo("aaaa000000000001", "/src/app");
+        let second_repo = repo("aaaa000000000002", "/src/mirror");
+        db.insert_repository(&first_repo).unwrap();
+        db.insert_repository(&second_repo).unwrap();
+        db.with(|conn| {
+            conn.execute_batch(
+                "INSERT INTO identities(id, name, kind, created_at) VALUES ('idn_1', 'alice', 'person', 1);
+                 INSERT INTO identity_authorities(id, algorithm, public_key, host, created_at)
+                   VALUES ('a1', 'ed25519', x'00', 'host', 1);
+                 INSERT INTO sessions(id, identity_id, actor, created_at, channel)
+                   VALUES ('ses_1', 'idn_1', 'human', 1, 'web');
+                 INSERT INTO session_keys(key_id, session_id, identity_id, authority_id, actor,
+                     presence, custody, certificate, not_before, not_after, issued_at)
+                   VALUES ('k1', 'ses_1', 'idn_1', 'a1', 'human', 'user_verified', 'client',
+                     x'00', 1, 2, 1);",
+            )
+        })
+        .unwrap();
+        let add = |repo_id, id: &str| {
+            db.add_evidence(&key("k1"), &row(repo_id, id, 100), None, &[], true)
+                .unwrap()
+        };
+        assert!(matches!(
+            add(first_repo.id, "e1"),
+            AddedEvidence::Added { inserted, .. } if inserted.created
+        ));
+        assert!(matches!(
+            add(first_repo.id, "e1"),
+            AddedEvidence::Added { inserted, .. } if !inserted.created
+        ));
+        for (repo_id, id) in [(first_repo.id, "e2"), (second_repo.id, "e1")] {
+            assert_eq!(
+                add(repo_id, id),
+                AddedEvidence::Spent {
+                    repo_id: "aaaa000000000001".to_owned(),
+                    evidence_id: "e1".to_owned(),
+                },
+                "{repo_id} {id}"
+            );
+        }
+        assert_eq!(db.evidence_counts().unwrap().0, 1);
     }
 
     // R3.01 review F6: re-adding a verified row over a changed one repairs

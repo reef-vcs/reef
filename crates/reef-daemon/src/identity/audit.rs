@@ -111,3 +111,58 @@ pub(crate) fn oidc_changed(action: &'static str, row: &crate::db::OidcMatchRow, 
         "OIDC match changed"
     );
 }
+
+/// A passkey added, removed or reset away (R3.43); a reset is a warning,
+/// since it is the way back from a passkey the person did not add.
+pub(crate) fn passkey_changed(
+    action: &'static str,
+    row: &crate::db::PasskeyRow,
+    web_session: Option<&str>,
+) {
+    if action == "reset" {
+        tracing::warn!(
+            target: "reef_daemon::identity::audit",
+            action,
+            passkey_id = %row.id,
+            identity_id = %row.identity_id,
+            fingerprint = %row.fingerprint,
+            label = %row.label,
+            "passkey removed by a reset"
+        );
+        return;
+    }
+    tracing::info!(
+        target: "reef_daemon::identity::audit",
+        action,
+        passkey_id = %row.id,
+        identity_id = %row.identity_id,
+        fingerprint = %row.fingerprint,
+        label = %row.label,
+        web_session = web_session.unwrap_or_default(),
+        "passkey changed"
+    );
+}
+
+/// An approval requested, approved, declined or expired (R3.43).
+pub(crate) fn approval(
+    action: &'static str,
+    approval: &super::approvals::Approval,
+    web_session: Option<&str>,
+) {
+    tracing::info!(
+        target: "reef_daemon::identity::audit",
+        action,
+        approval_id = %approval.id,
+        identity_id = %approval.identity.id,
+        identity = %approval.identity.name,
+        key_id = %approval.public_key.id(),
+        change_id = %approval.approves.change,
+        statement_sha256 = %approval.approves.statement,
+        kind = %approval.index.kind,
+        requested_through = approval.requester.channel.name(),
+        agent = approval.requester.agent.as_deref().unwrap_or_default(),
+        workspace = approval.requester.workspace.as_deref().unwrap_or_default(),
+        web_session = web_session.unwrap_or_default(),
+        "approval"
+    );
+}

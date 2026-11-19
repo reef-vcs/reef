@@ -42,6 +42,7 @@ mod landing_pushes;
 pub(crate) mod landings;
 mod leases;
 pub(crate) mod lifecycle;
+mod passkeys;
 mod provenance;
 mod reclaims;
 mod remote_tokens;
@@ -59,8 +60,8 @@ pub use conflict_assignments::{
     TierColumns,
 };
 pub use evidence::{
-    EVIDENCE_ID_LEN, EvidenceFilter, EvidenceKeyRow, EvidenceLinkRow, EvidenceRow, Inserted,
-    LIVE_PINNED, PINNED, StoredEvidence, add_evidence_in, insert_evidence_in,
+    AddedEvidence, EVIDENCE_ID_LEN, EvidenceFilter, EvidenceKeyRow, EvidenceLinkRow, EvidenceRow,
+    Inserted, LIVE_PINNED, PINNED, StoredEvidence, add_evidence_in, insert_evidence_in,
 };
 pub use identity::{
     AuthorityRow, IdentityRow, InTheWay, Inserted as KeyInserted, KeyRecords, OidcMatchRow,
@@ -71,6 +72,7 @@ pub use jobs::{
     insert_job_evidence_in, insert_job_in, job_evidence_in, job_in, next_job_evidence_seq_in,
     open_job_by_spec_in, open_job_count_in, queued_jobs_in, repository_exists_in, update_job_in,
 };
+pub use passkeys::{PasskeyInserted, PasskeyRow};
 pub use provenance::{
     DeclaredColumns, ProvenanceFilter, ProvenanceRow, ProvenanceSessionRow, StoredProvenance,
 };
@@ -100,7 +102,8 @@ pub use lifecycle::{
 /// `0021_landing_stacks` (R3.10), `0023_automatic_landing` (R3.45;
 /// `0022` is #262's), `0025_help_requests` (R3.32) and
 /// `0026_resolution_tiers` (R3.28, numbered after R3.32's, which merged
-/// first; `0024` is unused).
+/// first; `0024` is unused) and `0028_passkeys` (R3.43; `0027` is
+/// R3.11's).
 /// They are independent of each other, so a database may have a later one
 /// without an earlier one; see [`migrate`].
 const MIGRATIONS: &[(&str, &str)] = &[
@@ -184,6 +187,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0026_resolution_tiers",
         include_str!("migrations/0026_resolution_tiers.sql"),
+    ),
+    (
+        "0028_passkeys",
+        include_str!("migrations/0028_passkeys.sql"),
     ),
 ];
 
@@ -963,7 +970,8 @@ mod tests {
                 "0021_landing_stacks",
                 "0023_automatic_landing",
                 "0025_help_requests",
-                "0026_resolution_tiers"
+                "0026_resolution_tiers",
+                "0028_passkeys"
             ]
         );
         // A newer daemon applied a migration this binary does not have, without
@@ -1016,7 +1024,8 @@ mod tests {
                 "0021_landing_stacks",
                 "0023_automatic_landing",
                 "0025_help_requests",
-                "0026_resolution_tiers"
+                "0026_resolution_tiers",
+                "0028_passkeys"
             ]
         );
         let repo = "aaaa000000000001".parse().unwrap();
@@ -1472,6 +1481,68 @@ mod tests {
             })
             .unwrap();
         assert_eq!(attempts, [("asg_1".to_owned(), 3), ("asg_2".to_owned(), 1)]);
+    }
+
+    // R3.43 test 12: a database migrated up to `0026_resolution_tiers`
+    // gains `0028_passkeys`: an empty `passkeys` table, and the new columns
+    // of `session_keys` and `evidence` unset on the rows it had.
+    #[test]
+    fn a_schema_before_passkeys_gains_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reef.sqlite3");
+        let conn = Connection::open(&path).unwrap();
+        let before = MIGRATIONS
+            .iter()
+            .position(|(name, _)| *name == "0028_passkeys")
+            .unwrap();
+        assert_eq!(MIGRATIONS[before - 1].0, "0026_resolution_tiers");
+        for (index, (name, sql)) in MIGRATIONS[..before].iter().enumerate() {
+            conn.execute_batch(sql).unwrap();
+            conn.execute(
+                "INSERT INTO meta(key, value) VALUES (?1, '0')",
+                [format!("{META_MIGRATION_PREFIX}{name}")],
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", i64::try_from(index + 1).unwrap())
+                .unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO identities(id, name, kind, created_at) VALUES ('idn_1', 'alice', 'person', 1);
+             INSERT INTO identity_authorities(id, algorithm, public_key, host, created_at)
+               VALUES ('a1', 'ed25519', x'00', 'host', 1);
+             INSERT INTO sessions(id, identity_id, actor, created_at, channel)
+               VALUES ('ses_1', 'idn_1', 'human', 1, 'socket');
+             INSERT INTO session_keys(key_id, session_id, identity_id, authority_id, actor,
+                 presence, custody, certificate, not_before, not_after, issued_at)
+               VALUES ('k1', 'ses_1', 'idn_1', 'a1', 'human', 'none', 'client', x'00', 1, 2, 1);
+             INSERT INTO evidence_keys(id, algorithm, public_key, first_seen_at)
+               VALUES ('k1', 'ed25519', x'00', 1);
+             INSERT INTO evidence(repo_id, id, envelope, format, tree_id, kind, result, key_id,
+                 started_at, finished_at, added_at)
+               VALUES ('aaaa000000000001', 'e1', x'00', 1, 't', 'test', 'pass', 'k1', 1, 1, 1);",
+        )
+        .unwrap();
+        drop(conn);
+
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.schema_version().unwrap(), SCHEMA_VERSION);
+        assert_eq!(
+            db.with(applied_migrations)
+                .unwrap()
+                .get(before)
+                .map(String::as_str),
+            Some("0028_passkeys")
+        );
+        assert_eq!(db.passkeys(None, true).unwrap(), []);
+        let key = db.session_keys_by_id(&["k1"]).unwrap().pop().unwrap();
+        assert_eq!(
+            (key.passkey_id, key.approval_id, key.web_session),
+            (None, None, None)
+        );
+        let web_session: Option<String> = db
+            .with(|conn| conn.query_row("SELECT web_session FROM evidence", [], |r| r.get(0)))
+            .unwrap();
+        assert_eq!(web_session, None);
     }
 
     // R1.18: a restore into another state directory moves every path under

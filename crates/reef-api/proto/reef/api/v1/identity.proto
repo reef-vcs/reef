@@ -30,6 +30,7 @@ package reef.api.v1;
 import "google/protobuf/duration.proto";
 import "google/protobuf/timestamp.proto";
 import "reef/api/v1/options.proto";
+import "reef/api/v1/remote.proto";
 
 // Operator identities, the daemon's issuing authorities, and the session
 // keys they certify.
@@ -247,6 +248,150 @@ service IdentityService {
     option (reef.api.v1.access) = ACCESS_ADMIN;
     option idempotency_level = IDEMPOTENT;
   }
+  // An identity's passkeys (R3.43, ADR 0085), or every identity's when
+  // `identity` is empty: live ones, oldest first, and removed ones too with
+  // `include_removed`. A passkey verifies a person for sign-offs; policy
+  // counts it only where the destination's `[passkeys]` pins its
+  // fingerprint.
+  //
+  // Errors: NOT_FOUND with reason IDENTITY_NOT_FOUND (metadata `name`);
+  // INVALID_ARGUMENT for a negative `page_size`, or with reason
+  // INVALID_PAGE_TOKEN.
+  rpc ListPasskeys(ListPasskeysRequest) returns (ListPasskeysResponse) {
+    option (reef.api.v1.access) = ACCESS_READ;
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  // Starts adding a passkey to a person identity (R3.43): a registration
+  // challenge, 32 random bytes, single use, valid for 5 minutes and only
+  // for the web UI session that asked. Pass the response's fields to
+  // `navigator.credentials.create` (RP ID `rp_id`, user verification
+  // required, attestation `none`), then the result to RegisterPasskey.
+  // Only through the web UI's listener: a ceremony needs a browser at
+  // `http://localhost:<port>`.
+  //
+  // Errors: NOT_FOUND with reason IDENTITY_NOT_FOUND (metadata `name`);
+  // FAILED_PRECONDITION with reason IDENTITY_REVOKED (metadata `name`,
+  // `revoked_at`), DEFAULT_IDENTITY_UNAVAILABLE (metadata `configured`,
+  // `problem`), or TOO_MANY_PASSKEYS (metadata `identity`, `limit`) when the
+  // identity has 32 live passkeys; PERMISSION_DENIED with reason
+  // SESSION_KEY_REFUSED (metadata `rule` `human_for_ci`) for a `ci`
+  // identity, PASSKEY_NEEDS_WEB on the socket, or PASSKEY_OVER_REMOTE
+  // through the remote listener.
+  rpc StartPasskeyRegistration(StartPasskeyRegistrationRequest) returns (StartPasskeyRegistrationResponse) {
+    option (reef.api.v1.access) = ACCESS_WRITE;
+  }
+  // Adds the passkey a registration created (R3.43). The daemon checks the
+  // client data (type `webauthn.create`, the challenge this web UI session
+  // started, the origin `http://localhost:<the listener's port>`), the
+  // authenticator data (SHA-256 of `localhost`, user present and user
+  // verified, attested credential data), and the public key (ES256, EdDSA
+  // or RS256). When the identity already has a live passkey, `approval`
+  // must be a user-verified assertion by one of them over the challenge
+  // SHA-256(PAE("application/vnd.reef-vcs.passkey-change", "add\n" +
+  // base64url(registration challenge) + "\n")), which the start returned as
+  // `add_challenge`. Only through the web UI's listener. Records no
+  // operation.
+  //
+  // Errors: INVALID_ARGUMENT with reason PASSKEY_ASSERTION_INVALID (metadata
+  // `check`: `type`, `challenge`, `origin`, `rp`, `flags`, `signature`,
+  // `counter` or `passkey`, for the registration or for `approval`), or
+  // PASSKEY_ALGORITHM (metadata `algorithm`) for a key that is not ES256,
+  // EdDSA or RS256, or not one of its algorithm, or with reason
+  // INVALID_PASSKEY (metadata `field` `label`) for a label that is not 1 to
+  // 64 bytes of text; FAILED_PRECONDITION with reason PASSKEY_REQUIRED
+  // without `approval` when the identity has a passkey, or TOO_MANY_PASSKEYS;
+  // ALREADY_EXISTS with reason PASSKEY_EXISTS (metadata `id`) for a credential
+  // or public key already live; PERMISSION_DENIED with reason
+  // PASSKEY_NEEDS_WEB or PASSKEY_OVER_REMOTE.
+  rpc RegisterPasskey(RegisterPasskeyRequest) returns (RegisterPasskeyResponse) {
+    option (reef.api.v1.access) = ACCESS_WRITE;
+  }
+  // Removes a passkey (R3.43), approved by a user-verified assertion of one
+  // of its identity's live passkeys (itself included) over the challenge
+  // SHA-256(PAE("application/vnd.reef-vcs.passkey-change", "remove\n" + id +
+  // "\n")). Keys it certified stay as they are; ResetPasskeys revokes them.
+  // Only through the web UI's listener.
+  //
+  // Errors: NOT_FOUND with reason PASSKEY_NOT_FOUND (metadata `id`) for an
+  // id no live passkey has; INVALID_ARGUMENT with reason
+  // PASSKEY_ASSERTION_INVALID (metadata `check`); FAILED_PRECONDITION with
+  // reason PASSKEY_REQUIRED without `assertion`; PERMISSION_DENIED with
+  // reason PASSKEY_NEEDS_WEB or PASSKEY_OVER_REMOTE.
+  rpc RemovePasskey(RemovePasskeyRequest) returns (RemovePasskeyResponse) {
+    option (reef.api.v1.access) = ACCESS_WRITE;
+  }
+  // Removes every live passkey of an identity and revokes every unexpired
+  // key they certified, from now (R3.43): the way back when a passkey is
+  // lost, or one was added that the person did not add. Logged loudly.
+  //
+  // Errors: NOT_FOUND with reason IDENTITY_NOT_FOUND (metadata `name`);
+  // INVALID_ARGUMENT with reason INVALID_PASSKEY (metadata `field`
+  // `identity`) for an empty `identity`.
+  rpc ResetPasskeys(ResetPasskeysRequest) returns (ResetPasskeysResponse) {
+    option (reef.api.v1.access) = ACCESS_ADMIN;
+    option idempotency_level = IDEMPOTENT;
+  }
+  // Asks a person to approve one sign-off with a passkey (R3.43): a fresh
+  // session key the caller generated (its proof of possession as for
+  // IssueSessionKey, with the actor `human` and an empty session), the
+  // in-toto statement it will sign, and the revision it is for. The daemon
+  // parses the statement as AddEvidence does and checks that its subject is
+  // the revision's tree. The approval lives 2 minutes, in memory only: a
+  // daemon restart drops it. A person approves it on the web UI's
+  // `/approve/<id>` page (ResolveApproval); GetApproval waits for that.
+  // Through the socket or the web UI's listener.
+  //
+  // Errors: INVALID_ARGUMENT with reason INVALID_SESSION_KEY_REQUEST
+  // (metadata `field`: `public_key` or `proof`, with `key_id` and
+  // `authority_key_id`), or INVALID_EVIDENCE (metadata `check`, `field`)
+  // for a statement AddEvidence would refuse; NOT_FOUND with reason
+  // IDENTITY_NOT_FOUND (metadata `name`), REPO_NOT_FOUND, WORKSPACE_NOT_FOUND
+  // or REVISION_NOT_FOUND; FAILED_PRECONDITION with reason
+  // EVIDENCE_TREE_MISMATCH (metadata `tree_id`, `commit_id`,
+  // `commit_tree_id`), CONFLICTED_REVISION (metadata `commit_id`),
+  // IDENTITY_REVOKED, DEFAULT_IDENTITY_UNAVAILABLE, or TOO_MANY_APPROVALS
+  // (metadata `limit`) with 8 pending for the identity or 256 in all;
+  // ALREADY_EXISTS with reason SESSION_KEY_EXISTS (metadata `key_id`,
+  // `state`); PERMISSION_DENIED with reason SESSION_KEY_REFUSED (metadata
+  // `rule` `human_for_ci`), or PASSKEY_OVER_REMOTE through the remote
+  // listener.
+  rpc RequestApproval(RequestApprovalRequest) returns (RequestApprovalResponse) {
+    option (reef.api.v1.access) = ACCESS_WRITE;
+  }
+  // One approval (R3.43). With `wait`, it returns once the approval is no
+  // longer pending (approved, with its certificate; declined; or expired),
+  // or when `wait` or the approval's expiry ends, whichever is first.
+  //
+  // Errors: NOT_FOUND with reason APPROVAL_NOT_FOUND (metadata `id`) for an
+  // id the daemon does not hold: never requested, dropped by a restart, or
+  // ended over 2 minutes ago; INVALID_ARGUMENT for a negative `wait`.
+  rpc GetApproval(GetApprovalRequest) returns (GetApprovalResponse) {
+    option (reef.api.v1.access) = ACCESS_READ;
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  // Approves a pending approval with a passkey, or declines it (R3.43).
+  // Approve: `approve` is a user-verified assertion by a live passkey of
+  // the approval's identity over the approval's `challenge`, from the
+  // origin `http://localhost:<the listener's port>`, with a sign count above
+  // the passkey's last (or both zero); the daemon then certifies the key
+  // for 2 minutes with presence `user_verified`, the assertion in the
+  // certificate, and records the passkey, the approval and this web UI
+  // session on it. Approve only through the web UI's listener; decline
+  // there or on the socket.
+  //
+  // Errors: NOT_FOUND with reason APPROVAL_NOT_FOUND (metadata `id`);
+  // FAILED_PRECONDITION with reason APPROVAL_EXPIRED, APPROVAL_DECLINED or
+  // APPROVAL_RESOLVED (metadata `id`) for one no longer pending,
+  // IDENTITY_REVOKED, or TOO_MANY_SESSION_KEYS; INVALID_ARGUMENT with reason
+  // PASSKEY_ASSERTION_INVALID (metadata `check`), or for no resolution;
+  // PERMISSION_DENIED with reason APPROVAL_NEEDS_WEB for an approve on the
+  // socket, or PASSKEY_OVER_REMOTE through the remote listener; UNAVAILABLE
+  // with reason AUTHORITY_UNAVAILABLE. An authority rotated since the
+  // request makes the challenge stale: INVALID_ARGUMENT with reason
+  // PASSKEY_ASSERTION_INVALID (`check` `challenge`); request again.
+  rpc ResolveApproval(ResolveApprovalRequest) returns (ResolveApprovalResponse) {
+    option (reef.api.v1.access) = ACCESS_WRITE;
+  }
 }
 
 // What an operator identity is.
@@ -280,9 +425,13 @@ enum SessionPresence {
   // Not reported.
   SESSION_PRESENCE_UNSPECIFIED = 0;
   // Not established: the daemon's user, or anything running as that user,
-  // asked for the key. Every key R3.03 issues has it; R3.43 adds
-  // USER_VERIFIED.
+  // asked for the key. Every key IssueSessionKey issues has it.
   SESSION_PRESENCE_NONE = 1;
+  // A person approved this key's one sign-off with a user-verified passkey
+  // assertion, which the certificate carries (R3.43, ADR 0085): only keys
+  // issued through ResolveApproval, for the actor `human`. Policy counts it
+  // only for a passkey the destination's policy pins.
+  SESSION_PRESENCE_USER_VERIFIED = 2;
 }
 
 // Where a session key's private half lives.
@@ -500,6 +649,40 @@ message SessionKey {
   // A keyless key's Sigstore certificate (R3.42); unset otherwise, and
   // when the bundle does not verify at this read.
   SigstoreCertificate sigstore = 21;
+  // A `user_verified` key's passkey (R3.43): its fingerprint from the
+  // certificate, and its id and label from the daemon's records when it
+  // has one with that fingerprint; unset otherwise.
+  PasskeyRef passkey = 22;
+  // What a `user_verified` key's one assertion approves (R3.43), from the
+  // certificate; unset otherwise.
+  Approves approves = 23;
+  // The web UI session that resolved the approval it was issued through
+  // (R3.43); unset for a key issued any other way.
+  WebCaller web_session = 24;
+  // The approval it was issued through (R3.43), `apr_` and 16 hex digits;
+  // empty for a key issued any other way.
+  string approval_id = 25;
+}
+
+// A passkey, as a `user_verified` key names it (R3.43).
+message PasskeyRef {
+  // `pk_` and 16 hex digits; empty when the daemon has no record of it.
+  string id = 1;
+  // The label the person gave it; empty when the daemon has no record.
+  string label = 2;
+  // SHA-256 of its DER SubjectPublicKeyInfo, lowercase hex: what a
+  // policy's `[passkeys]` pins.
+  string fingerprint = 3;
+}
+
+// The one sign-off a `user_verified` key may sign (R3.43).
+message Approves {
+  // SHA-256 of the evidence statement's payload (the in-toto statement's
+  // bytes), lowercase hex.
+  string statement_sha256 = 1;
+  // The change the evidence is added for: a full change id, 32 lowercase
+  // hex digits.
+  string change_id = 2;
 }
 
 // What a verifier sees about the key that signed an evidence object.
@@ -780,4 +963,320 @@ message RevokeOidcMatchResponse {
   OidcMatch match = 1;
   // The keys bound through it, newest first, up to 1,000.
   repeated string key_ids = 2;
+}
+
+// A passkey registered to a person identity (R3.43).
+message Passkey {
+  // `pk_` and 16 lowercase hex digits; never reused.
+  string id = 1;
+  // The identity's id.
+  string identity_id = 2;
+  // The identity's name.
+  string identity = 3;
+  // The label the person gave it, such as "MacBook Touch ID".
+  string label = 4;
+  // SHA-256 of `public_key`, lowercase hex: what a policy's `[passkeys]`
+  // pins.
+  string fingerprint = 5;
+  // The WebAuthn credential id.
+  bytes credential_id = 6;
+  // Its DER SubjectPublicKeyInfo.
+  bytes public_key = 7;
+  // Its COSE algorithm: -7 (ES256), -8 (EdDSA) or -257 (RS256).
+  sint32 algorithm = 8;
+  // The WebAuthn RP ID: `localhost`.
+  string rp_id = 9;
+  // The authenticator's AAGUID, 32 lowercase hex digits; all zeros when it
+  // gives none.
+  string aaguid = 10;
+  // The last sign count an assertion reported; 0 for an authenticator
+  // that keeps none.
+  uint32 sign_count = 11;
+  // When it was added.
+  google.protobuf.Timestamp created_at = 12;
+  // The web UI session it was added through.
+  WebCaller created_web_session = 13;
+  // When an accepted assertion last used it; unset if never.
+  google.protobuf.Timestamp last_used_at = 14;
+  // When it was removed; unset while live.
+  google.protobuf.Timestamp removed_at = 15;
+  // Why: `removed` (RemovePasskey, with its reason when given) or `reset`
+  // (ResetPasskeys); empty while live.
+  string removed_reason = 16;
+  // The web UI session that removed it; unset for a reset, or while live.
+  WebCaller removed_web_session = 17;
+}
+
+// A WebAuthn assertion (`navigator.credentials.get`), as its bytes (R3.43).
+message PasskeyAssertion {
+  // `rawId`: which passkey made it.
+  bytes credential_id = 1;
+  // `response.authenticatorData`.
+  bytes authenticator_data = 2;
+  // `response.clientDataJSON`.
+  bytes client_data_json = 3;
+  // `response.signature`.
+  bytes signature = 4;
+}
+
+// List passkeys.
+message ListPasskeysRequest {
+  // One identity's, by name or id; empty for every identity's.
+  string identity = 1;
+  // Also removed passkeys.
+  bool include_removed = 2;
+  // Passkeys per page: 0 means 100, more than 1,000 means 1,000, and a
+  // negative value is INVALID_ARGUMENT.
+  int32 page_size = 3;
+  // The previous page's `next_page_token`; empty for the first page.
+  string page_token = 4;
+}
+
+// Passkeys.
+message ListPasskeysResponse {
+  // By identity id, then oldest added first.
+  repeated Passkey passkeys = 1;
+  // Empty on the last page.
+  string next_page_token = 2;
+}
+
+// Start adding a passkey.
+message StartPasskeyRegistrationRequest {
+  // A person identity's name or id; empty for the default identity.
+  string identity = 1;
+}
+
+// A registration challenge and what `navigator.credentials.create` needs.
+message StartPasskeyRegistrationResponse {
+  // The challenge: 32 bytes, single use.
+  bytes challenge = 1;
+  // When it stops being accepted: 5 minutes from now.
+  google.protobuf.Timestamp expires_at = 2;
+  // The RP ID: `localhost`.
+  string rp_id = 3;
+  // The identity's id; its UTF-8 bytes are the WebAuthn user handle.
+  string identity_id = 4;
+  // The identity's name.
+  string identity = 5;
+  // The WebAuthn `user.name` and `user.displayName`: `Reef: <identity>`,
+  // since a passkey picker lists every `localhost` app's credentials
+  // together.
+  string user_name = 6;
+  // The COSE algorithms accepted, in order of preference: -8, -7, -257.
+  repeated sint32 algorithms = 7;
+  // The credential ids of the identity's live passkeys, to exclude from
+  // registration and to allow for `add_challenge`'s assertion.
+  repeated bytes credential_ids = 8;
+  // Whether RegisterPasskey needs `approval`: the identity has a live
+  // passkey.
+  bool needs_approval = 9;
+  // The challenge that assertion signs, derived from `challenge` (see
+  // RegisterPasskey); set only with `needs_approval`.
+  bytes add_challenge = 10;
+}
+
+// Add the passkey a registration created.
+message RegisterPasskeyRequest {
+  // The challenge StartPasskeyRegistration returned.
+  bytes challenge = 1;
+  // A label for it: 1 to 64 bytes, no control characters.
+  string label = 2;
+  // `response.clientDataJSON` of the registration.
+  bytes client_data_json = 3;
+  // `response.getAuthenticatorData()`: with attested credential data,
+  // whose credential id is the passkey's.
+  bytes authenticator_data = 4;
+  // `response.getPublicKey()`: the DER SubjectPublicKeyInfo.
+  bytes public_key = 5;
+  // `response.getPublicKeyAlgorithm()`: the COSE algorithm.
+  sint32 algorithm = 6;
+  // When the identity has a live passkey: one's assertion over the
+  // start's `add_challenge`.
+  PasskeyAssertion approval = 7;
+}
+
+// An added passkey.
+message RegisterPasskeyResponse {
+  // The passkey.
+  Passkey passkey = 1;
+}
+
+// Remove a passkey.
+message RemovePasskeyRequest {
+  // Its id.
+  string id = 1;
+  // An assertion by one of its identity's live passkeys over the removal
+  // challenge (see RemovePasskey).
+  PasskeyAssertion assertion = 2;
+  // Why, recorded with the removal; empty for none.
+  string reason = 3;
+}
+
+// A removed passkey.
+message RemovePasskeyResponse {
+  // The passkey, with `removed_at` set.
+  Passkey passkey = 1;
+}
+
+// Remove all of an identity's passkeys.
+message ResetPasskeysRequest {
+  // The identity's name or id; required.
+  string identity = 1;
+  // Why, recorded with each removal; empty for none.
+  string reason = 2;
+}
+
+// What a reset removed and revoked.
+message ResetPasskeysResponse {
+  // The passkeys it removed; empty when the identity had none live.
+  repeated Passkey removed = 1;
+  // The unexpired session keys those passkeys certified, now revoked.
+  repeated string revoked_key_ids = 2;
+}
+
+// Where an approval stands.
+enum ApprovalState {
+  // Not reported.
+  APPROVAL_STATE_UNSPECIFIED = 0;
+  // Waiting for a person's passkey.
+  APPROVAL_STATE_PENDING = 1;
+  // Approved: `key` holds the certified key.
+  APPROVAL_STATE_APPROVED = 2;
+  // Declined.
+  APPROVAL_STATE_DECLINED = 3;
+  // Expired while pending.
+  APPROVAL_STATE_EXPIRED = 4;
+}
+
+// A request for a person's verified approval of one sign-off (R3.43).
+message Approval {
+  // `apr_` and 16 lowercase hex digits.
+  string id = 1;
+  // Where it stands.
+  ApprovalState state = 2;
+  // The identity it signs as: its id.
+  string identity_id = 3;
+  // Its name.
+  string identity = 4;
+  // The session key's id.
+  string key_id = 5;
+  // The session the key will be certified in: `ses_` and 16 hex digits,
+  // chosen at the request.
+  string session_id = 6;
+  // The authority that will certify it: its key id, current at the
+  // request.
+  string authority_key_id = 7;
+  // What the assertion approves.
+  Approves approves = 8;
+  // The WebAuthn challenge a passkey signs to approve:
+  // SHA-256(PAE("application/vnd.reef-vcs.presence-approval",
+  // "reef-presence-approval/v1\n" + authority_key_id + "\n" + key_id + "\n" +
+  // identity_id + "\nhuman\n" + session_id + "\n" +
+  // approves.statement_sha256 + "\n" + approves.change_id + "\n")).
+  bytes challenge = 9;
+  // The RP ID: `localhost`.
+  string rp_id = 10;
+  // The credential ids of the identity's live passkeys, for
+  // `allowCredentials`; empty when it has none.
+  repeated bytes credential_ids = 11;
+  // The statement's kind, such as `signoff`.
+  string kind = 12;
+  // Its result: `pass`, `fail` or `error`.
+  string result = 13;
+  // Its target; empty for none.
+  string target = 14;
+  // Its subject: the tree.
+  string tree_id = 15;
+  // The repository's id.
+  string repo_id = 16;
+  // The commit the revision resolved to.
+  string commit_id = 17;
+  // The change, 32 lowercase hex digits; also `approves.change_id`.
+  string change_id = 18;
+  // The in-toto statement's bytes, which the key signs.
+  bytes statement = 19;
+  // Who asked: `socket` or `web`.
+  string requested_through = 20;
+  // The asking request's `reef-agent`; empty for none.
+  string requested_by_agent = 21;
+  // The workspace the request named; empty for none.
+  string requested_workspace = 22;
+  // The web UI session that asked; unset on the socket.
+  WebCaller requested_web_session = 23;
+  // When it was requested.
+  google.protobuf.Timestamp created_at = 24;
+  // When it expires, 2 minutes after: unless approved by then, it ends.
+  google.protobuf.Timestamp expires_at = 25;
+  // When it was approved, declined or expired; unset while pending.
+  google.protobuf.Timestamp resolved_at = 26;
+  // The certified key, with its public key and certificate; set only when
+  // approved.
+  SessionKey key = 27;
+  // The passkey that approved it; set only when approved.
+  PasskeyRef passkey = 28;
+  // The web UI session that approved or declined it; unset otherwise.
+  WebCaller resolved_web_session = 29;
+  // Why it was declined, as the decliner said; empty otherwise.
+  string declined_reason = 30;
+}
+
+// Ask a person to approve one sign-off.
+message RequestApprovalRequest {
+  // A person identity's name or id; empty for the default identity.
+  string identity = 1;
+  // The repository; may be empty when `workspace` is named.
+  string repo = 2;
+  // The workspace `@` refers to in `revision`; empty for none.
+  string workspace = 3;
+  // The change the evidence is for, resolved at the head without a
+  // snapshot; required. Its tree must be the statement's subject.
+  string revision = 4;
+  // The in-toto statement the key will sign, as its exact bytes.
+  bytes statement = 5;
+  // DER SubjectPublicKeyInfo of a fresh ed25519 key the caller generated.
+  bytes public_key = 6;
+  // The key's proof of possession, as for IssueSessionKey, with `identity`
+  // as sent, the actor `human` and an empty session.
+  bytes proof = 7;
+}
+
+// A requested approval.
+message RequestApprovalResponse {
+  // The approval, pending.
+  Approval approval = 1;
+}
+
+// Get an approval.
+message GetApprovalRequest {
+  // Its id.
+  string id = 1;
+  // Wait up to this long for it to stop being pending; unset or zero
+  // returns at once. Bounded by the approval's expiry.
+  google.protobuf.Duration wait = 2;
+}
+
+// An approval.
+message GetApprovalResponse {
+  // The approval.
+  Approval approval = 1;
+}
+
+// Approve or decline an approval.
+message ResolveApprovalRequest {
+  // Its id.
+  string id = 1;
+  // How; required.
+  oneof resolution {
+    // An assertion over the approval's `challenge` by a live passkey of
+    // its identity.
+    PasskeyAssertion approve = 2;
+    // Decline it, with this reason (empty for none).
+    string decline = 3;
+  }
+}
+
+// A resolved approval.
+message ResolveApprovalResponse {
+  // The approval, approved (with its key) or declined.
+  Approval approval = 1;
 }

@@ -34,7 +34,7 @@ use reef_evidence::sigstore::{SigstoreCertified, TrustedRoot, check_sigstore_bun
 use reef_evidence::{KeyId, PublicKey};
 
 use crate::db::{
-    AuthorityRow, Db, DbError, IdentityRow, OidcMatchRow, RevocationRow, SessionKeyRow,
+    AuthorityRow, Db, DbError, IdentityRow, OidcMatchRow, PasskeyRow, RevocationRow, SessionKeyRow,
 };
 use crate::model::Timestamp;
 use crate::service::convert::timestamp;
@@ -68,6 +68,9 @@ pub struct ReadKey {
     /// The identity the certificate names (the column's when it is
     /// invalid), if there is such a record.
     pub identity: Option<IdentityRow>,
+    /// A `user_verified` key's passkey (R3.43): the daemon's record the
+    /// row names, when its fingerprint is the certificate's.
+    pub passkey: Option<PasskeyRow>,
 }
 
 fn revocation(row: &RevocationRow) -> Revocation {
@@ -167,6 +170,15 @@ pub fn read_keys(
         .filter_map(|row| row.oidc_id.as_deref())
         .collect();
     let matches = db.oidc_matches_by_id(&oidc_ids.into_iter().collect::<Vec<_>>())?;
+    let passkey_ids: BTreeSet<&str> = rows
+        .iter()
+        .filter_map(|row| row.passkey_id.as_deref())
+        .collect();
+    let passkeys: HashMap<String, PasskeyRow> = db
+        .passkeys_by_id(&passkey_ids.into_iter().collect::<Vec<_>>())?
+        .into_iter()
+        .map(|row| (row.id.clone(), row))
+        .collect();
     let lookup = |id: &KeyId| {
         authorities
             .get(id.as_str())
@@ -262,6 +274,14 @@ pub fn read_keys(
                 ),
                 _ => (None, None),
             };
+            let passkey = binding
+                .as_ref()
+                .and_then(|binding| binding.presence.evidence())
+                .and_then(|evidence| {
+                    let row = passkeys.get(row.passkey_id.as_deref()?)?;
+                    (row.fingerprint == evidence.passkey.fingerprint().as_str())
+                        .then(|| row.clone())
+                });
             // An invalid certificate's columns are not believed: only the
             // key's own revocation, the daemon's record of that row, is.
             let reported = if binding.is_some() {
@@ -278,6 +298,7 @@ pub fn read_keys(
                 revocations,
                 revocation: reported,
                 identity,
+                passkey,
             }
         })
         .collect())
@@ -326,9 +347,11 @@ pub fn kind_message(kind: Option<IdentityKind>) -> v1::IdentityKind {
     }
 }
 
-fn presence_message(presence: Option<Presence>) -> v1::SessionPresence {
+/// `presence` in the API.
+pub fn presence_message(presence: Option<Presence>) -> v1::SessionPresence {
     match presence {
         Some(Presence::None) => v1::SessionPresence::None,
+        Some(Presence::UserVerified) => v1::SessionPresence::UserVerified,
         None => v1::SessionPresence::Unspecified,
     }
 }
@@ -390,7 +413,31 @@ pub fn session_key_message(read: &ReadKey, with_bytes: bool) -> v1::SessionKey {
         message.set_actor(actor_message(Some(binding.actor)));
         message.agent = binding.agent.clone().unwrap_or_default();
         message.session_id.clone_from(&binding.session);
-        message.set_presence(presence_message(Some(binding.presence)));
+        message.set_presence(presence_message(Some(binding.presence.kind())));
+        if let Some(evidence) = binding.presence.evidence() {
+            message.passkey = Some(v1::PasskeyRef {
+                id: read
+                    .passkey
+                    .as_ref()
+                    .map(|row| row.id.clone())
+                    .unwrap_or_default(),
+                label: read
+                    .passkey
+                    .as_ref()
+                    .map(|row| row.label.clone())
+                    .unwrap_or_default(),
+                fingerprint: evidence.passkey.fingerprint().to_string(),
+            });
+            message.approves = Some(v1::Approves {
+                statement_sha256: evidence.approves.statement.clone(),
+                change_id: evidence.approves.change.clone(),
+            });
+            message.web_session = row
+                .web_session
+                .clone()
+                .map(|session| v1::WebCaller { session });
+            message.approval_id = row.approval_id.clone().unwrap_or_default();
+        }
         message.set_custody(custody_message(Some(binding.custody)));
         message.set_issuer_kind(issuer_kind_message(binding.issuer.kind));
         message.authority_key_id = binding.issuer.key_id.to_string();

@@ -340,7 +340,7 @@ impl Identities {
                 token_name,
                 ..
             } => (Some(token_id.clone()), Some(token_name.clone())),
-            Channel::Socket => (None, None),
+            Channel::Socket | Channel::Web { .. } => (None, None),
         };
         let row = SessionKeyRow {
             key_id: key_id.clone(),
@@ -359,6 +359,9 @@ impl Identities {
             revocation: None,
             issuer_kind: IssuerKind::Sigstore.as_str().to_owned(),
             oidc_id: Some(matched.id.clone()),
+            passkey_id: None,
+            approval_id: None,
+            web_session: None,
         };
         let limit = self.limit();
         let mut inserted = self

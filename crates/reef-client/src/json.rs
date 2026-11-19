@@ -5059,11 +5059,13 @@ pub fn session_actor_of(name: &str) -> Option<v1::SessionActor> {
         .find(|actor| session_actor_name(*actor as i32) == Some(name))
 }
 
-/// A presence's name: `none` (R3.03); `None` when unspecified.
+/// A presence's name: `none` (R3.03) or `user_verified` (R3.43); `None`
+/// when unspecified.
 pub fn session_presence_name(presence: i32) -> Option<&'static str> {
     let name = match v1::SessionPresence::try_from(presence) {
         Ok(v1::SessionPresence::Unspecified) => return None,
         Ok(v1::SessionPresence::None) => "none",
+        Ok(v1::SessionPresence::UserVerified) => "user_verified",
         Err(_) => UNKNOWN,
     };
     Some(name)

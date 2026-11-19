@@ -202,6 +202,7 @@ fn store(
             job.repo_id,
             object.agent.clone(),
             object.remote_token_id.clone(),
+            None,
             added,
         );
         let inserted = add_evidence_in(tx, &key, &row, None, &digests)?;

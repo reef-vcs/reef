@@ -46,7 +46,7 @@ pub use reef::daemon::v0;
 /// The revision of `reef.api.v1` this build serves. It increases by one with
 /// every change to the schema, and [`API_DIGEST`] changes with it; v1 only
 /// grows (ADR 0029). `GetDaemonStatus` reports it.
-pub const API_REVISION: u32 = 40;
+pub const API_REVISION: u32 = 41;
 
 /// blake3 of the v1 descriptors without comments, one per revision, oldest
 /// first: entry `n - 1` is revision `n`'s. A schema change appends one entry
@@ -182,6 +182,14 @@ pub const API_DIGESTS: &[&str] = &[
     // `conflict_block_reason`, `INSTRUCTION_CAUSE_CONFLICT_UNBLOCKED` and
     // `HelpInput.while_blocked`.
     "e1aad57ca00df1495275268f2556d9154a4827ce2f7677a7c73538193d89b5c7",
+    // R3.43: `SESSION_PRESENCE_USER_VERIFIED`, `SessionKey.passkey`,
+    // `approves`, `web_session` and `approval_id`, `PasskeyRef`, `Approves`,
+    // `Passkey`, `PasskeyAssertion`, `ApprovalState`, `Approval`,
+    // `ListPasskeys`, `StartPasskeyRegistration`, `RegisterPasskey`,
+    // `RemovePasskey`, `ResetPasskeys`, `RequestApproval`, `GetApproval`,
+    // `ResolveApproval`, `WebCaller`, `Evidence.web_session` and
+    // `CreateWebSessionRequest.path`. Revision 42 once R3.11's 41 lands.
+    "b1881a5d1a2fb35521ff8d21e1b46743082992852586e64b3957f0f751b3042a",
 ];
 
 /// blake3 of the v1 descriptors without comments, as of [`API_REVISION`]:
@@ -424,9 +432,12 @@ pub mod error {
     pub const WEB_UI_UNAVAILABLE: &str = "WEB_UI_UNAVAILABLE";
     /// A web listener request without a live session's token (R2.18).
     pub const WEB_SESSION_INVALID: &str = "WEB_SESSION_INVALID";
-    /// A web listener request for a method that is not `ACCESS_READ` (R2.18).
-    /// Metadata: `method`, `access` (`write`, `admin` or `unknown`).
+    /// A web listener request for a method that is neither `ACCESS_READ` nor
+    /// on its allowlist of writes (R2.18, R3.43). Metadata: `method`,
+    /// `access` (`write`, `admin` or `unknown`).
     pub const WEB_ACCESS_DENIED: &str = "WEB_ACCESS_DENIED";
+    /// A `CreateWebSession` path that is not one (R3.43). Metadata: `path`.
+    pub const INVALID_WEB_PATH: &str = "INVALID_WEB_PATH";
     /// A remote listener request without a live token: none, malformed,
     /// unknown, expired or revoked (R2.08). Metadata: `state` (`unknown`,
     /// `expired` or `revoked`; the last two only to a caller holding the
@@ -607,6 +618,60 @@ pub mod error {
     pub const OIDC_MATCH_EXISTS: &str = "OIDC_MATCH_EXISTS";
     /// No OIDC match has the id (R3.42). Metadata: `id`.
     pub const OIDC_MATCH_NOT_FOUND: &str = "OIDC_MATCH_NOT_FOUND";
+    /// A passkey change that needs an existing passkey's assertion and has
+    /// none: a later add, or a removal (R3.43).
+    pub const PASSKEY_REQUIRED: &str = "PASSKEY_REQUIRED";
+    /// A passkey ceremony that failed a check (R3.43). Metadata: `check`
+    /// (`type`, `challenge`, `origin`, `rp`, `flags`, `signature`,
+    /// `counter` or `passkey`).
+    pub const PASSKEY_ASSERTION_INVALID: &str = "PASSKEY_ASSERTION_INVALID";
+    /// A registration whose credential or public key is a live passkey's
+    /// already (R3.43). Metadata: `id`.
+    pub const PASSKEY_EXISTS: &str = "PASSKEY_EXISTS";
+    /// No live passkey has the id (R3.43). Metadata: `id`.
+    pub const PASSKEY_NOT_FOUND: &str = "PASSKEY_NOT_FOUND";
+    /// A passkey or approval write through the remote listener, which has
+    /// no origin a passkey works at (R3.43; R3.40). Metadata: `method`.
+    pub const PASSKEY_OVER_REMOTE: &str = "PASSKEY_OVER_REMOTE";
+    /// A passkey registration or removal on the socket: a ceremony needs the
+    /// web UI (R3.43). Metadata: `method`.
+    pub const PASSKEY_NEEDS_WEB: &str = "PASSKEY_NEEDS_WEB";
+    /// A passkey whose public key is not ES256, `EdDSA` or RS256, or not one
+    /// of the algorithm given (R3.43). Metadata: `algorithm`.
+    pub const PASSKEY_ALGORITHM: &str = "PASSKEY_ALGORITHM";
+    /// A passkey's label that is not 1 to 64 bytes of text, or a reset
+    /// that names no identity (R3.43). Metadata: `field` (`label` or
+    /// `identity`).
+    pub const INVALID_PASSKEY: &str = "INVALID_PASSKEY";
+    /// An identity with its limit of live passkeys (R3.43). Metadata:
+    /// `identity`, `limit`.
+    pub const TOO_MANY_PASSKEYS: &str = "TOO_MANY_PASSKEYS";
+    /// No approval the daemon holds has the id: never requested, dropped
+    /// by a restart, or ended a while ago (R3.43). Metadata: `id`.
+    pub const APPROVAL_NOT_FOUND: &str = "APPROVAL_NOT_FOUND";
+    /// An approval that expired before a passkey approved it (R3.43).
+    /// Metadata: `id`.
+    pub const APPROVAL_EXPIRED: &str = "APPROVAL_EXPIRED";
+    /// An approval a person declined (R3.43). Metadata: `id`.
+    pub const APPROVAL_DECLINED: &str = "APPROVAL_DECLINED";
+    /// A resolution of an approval already approved (R3.43). Metadata:
+    /// `id`.
+    pub const APPROVAL_RESOLVED: &str = "APPROVAL_RESOLVED";
+    /// An approve on the socket: only a passkey in the web UI approves
+    /// (R3.43). Metadata: `id`.
+    pub const APPROVAL_NEEDS_WEB: &str = "APPROVAL_NEEDS_WEB";
+    /// An identity with 8 pending approvals, or a daemon with 256 (R3.43).
+    /// Metadata: `limit`.
+    pub const TOO_MANY_APPROVALS: &str = "TOO_MANY_APPROVALS";
+    /// Evidence signed by a passkey-approved key that is not the statement
+    /// or the change it approves, or through the web UI evidence signed by
+    /// any other key (R3.43). Metadata: `field` (`statement`, `change` or
+    /// `presence`).
+    pub const PRESENCE_STATEMENT_MISMATCH: &str = "PRESENCE_STATEMENT_MISMATCH";
+    /// A second evidence object signed by a passkey-approved key, which
+    /// signs one (R3.43). Metadata: `key_id`, `evidence_id` (the one it
+    /// signed).
+    pub const SESSION_KEY_SPENT: &str = "SESSION_KEY_SPENT";
     /// A provenance declaration, or a provenance listing's filter, out of
     /// its bounds (R3.04). Metadata: `field` (`model`, `harness`, `task`,
     /// `instruction_sha256`, `client_session`, `identity`, `actor` or
@@ -1138,8 +1203,10 @@ mod tests {
         // as ADR 0057 amends it, a session key, which changes no jj view;
         // and, as ADR 0059 amends it, executor jobs, which are daemon
         // metadata, not jj state; and, as ADR 0066 amends it, a keyless
-        // session key's registration, which changes no jj view either.
-        const EXCEPT: [&str; 13] = [
+        // session key's registration, which changes no jj view either; and,
+        // as ADR 0085 amends it, passkeys and approvals, which are identity
+        // records and memory, not jj state.
+        const EXCEPT: [&str; 18] = [
             "RenewLease",
             "ReportPresence",
             "ClearPresence",
@@ -1153,6 +1220,11 @@ mod tests {
             "ClaimJob",
             "UpdateJob",
             "CompleteJob",
+            "StartPasskeyRegistration",
+            "RegisterPasskey",
+            "RemovePasskey",
+            "RequestApproval",
+            "ResolveApproval",
         ];
         for method in methods_of(&pool()) {
             if access(&path(&method)) != Some(v1::Access::Write) || EXCEPT.contains(&method.name())

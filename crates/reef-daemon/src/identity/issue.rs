@@ -13,10 +13,17 @@
 //! | Caller | `person` | `ci` | `human` |
 //! | --- | --- | --- | --- |
 //! | The socket | any live one; empty is the default | `ci_over_socket` | allowed, `presence: none` |
+//! | The web UI (approvals only, R3.43) | any live one | refused | always, `presence: user_verified` |
 //! | A remote token linked to X | X only (`token_identity_mismatch`) | X only | `human_over_remote` |
 //! | A remote token with no link | `token_not_linked` | `token_not_linked` | refused |
 //!
 //! and `human` for a `ci` identity is `human_for_ci`.
+//!
+//! `Identities::certify_key` is the second half every daemon-certified
+//! key goes through: the certificate, then the session and the key in one
+//! transaction. `IssueSessionKey` reaches it from a request's proof, and an
+//! approved approval (R3.43, `super::approvals`) with a passkey's
+//! assertion as the certificate's presence evidence.
 //!
 //! [`Identities::issue_held`] issues the daemon's own keys for provenance
 //! (R3.04, ADR 0058): the same rules and certificate, with `custody:
@@ -28,8 +35,8 @@ use std::time::Duration;
 
 use reef_api::v1::{self, IssueSessionKeyRequest};
 use reef_evidence::session::{
-    Actor, Binding, Custody, IdentityKind, IdentityRef, Issuer, IssuerKind, Presence, ProofFor,
-    certify, verify_proof,
+    Actor, Binding, Custody, IdentityKind, IdentityRef, Issuer, IssuerKind, Presence,
+    PresenceProof, ProofFor, certify, verify_proof,
 };
 use reef_evidence::{KeyId, PublicKey};
 
@@ -134,6 +141,13 @@ impl Refusal {
 pub enum Channel {
     /// The socket: every client is the daemon's user.
     Socket,
+    /// The web UI's listener (R3.43), with a session: only approvals issue
+    /// through it.
+    Web {
+        /// The web UI session, by the first 16 hex digits of its token's
+        /// digest.
+        session: String,
+    },
     /// The remote listener, with a token.
     Remote {
         /// The token's id.
@@ -146,11 +160,21 @@ pub enum Channel {
 }
 
 impl Channel {
-    /// What a session records of it: `socket`, or the remote token's id.
+    /// What a session records of it: `socket`, `web`, or the remote
+    /// token's id.
     pub fn name(&self) -> &str {
         match self {
             Channel::Socket => "socket",
+            Channel::Web { .. } => "web",
             Channel::Remote { token_id, .. } => token_id,
+        }
+    }
+
+    /// The web UI session, through the web UI's listener.
+    pub fn web_session(&self) -> Option<&str> {
+        match self {
+            Channel::Web { session } => Some(session),
+            _ => None,
         }
     }
 }
@@ -212,6 +236,42 @@ pub fn invalid_from(
             Ok(at)
         }
     }
+}
+
+/// The session a certified key goes in.
+#[derive(Clone, Debug)]
+pub(crate) enum SessionFor {
+    /// A renewal: the session continued.
+    Continue(SessionRow),
+    /// A new session, with this id.
+    New(String),
+}
+
+/// A key to certify, its request's checks done ([`Identities::certify_key`]).
+#[derive(Debug)]
+pub(crate) struct Issuance {
+    /// The session key.
+    pub(crate) public_key: PublicKey,
+    /// The identity it is for, live, allowed by the channel's rules.
+    pub(crate) identity: IdentityRow,
+    /// What it is declared for.
+    pub(crate) actor: Actor,
+    /// The requesting agent's label.
+    pub(crate) agent: Option<String>,
+    /// Its session.
+    pub(crate) session: SessionFor,
+    /// Its presence, with a passkey's evidence for `user_verified`.
+    pub(crate) presence: PresenceProof,
+    /// How long the certificate is valid.
+    pub(crate) lifetime: Duration,
+    /// Where it was asked for.
+    pub(crate) channel: Channel,
+    /// The authority key id the request was addressed to.
+    pub(crate) audience: String,
+    /// The passkey that approved it (R3.43).
+    pub(crate) passkey_id: Option<String>,
+    /// The approval it was issued through (R3.43).
+    pub(crate) approval_id: Option<String>,
 }
 
 /// A key the daemon holds in memory for a workspace's provenance session
@@ -288,7 +348,7 @@ impl Identities {
     /// The identity a request through `channel` gets a key for.
     fn identity_for(&self, channel: &Channel, named: &str) -> Result<IdentityRow, IdentityError> {
         match channel {
-            Channel::Socket => self.find(named),
+            Channel::Socket | Channel::Web { .. } => self.find(named),
             Channel::Remote { linked: None, .. } => Err(IdentityError::Refused {
                 rule: Refusal::TokenNotLinked,
             }),
@@ -311,7 +371,6 @@ impl Identities {
 
     /// `IssueSessionKey`: certifies the request's key for the identity its
     /// channel allows; see the module documentation.
-    #[expect(clippy::too_many_lines, reason = "the issuance steps, in their order")]
     pub async fn issue(
         &self,
         request: IssueSessionKeyRequest,
@@ -327,39 +386,15 @@ impl Identities {
             });
         }
         // 1. The key and the proof, on the blocking pool.
-        let (der, proof, named) = (
-            request.public_key.clone(),
-            request.proof.clone(),
-            request.identity.clone(),
-        );
-        let session_for_proof = session_sent.clone();
-        // The proof is addressed to the current authority; the signature
-        // below checks that it still is.
-        let audience = self.current_authority().id;
-        let audience_for_proof = audience.clone();
-        let public_key = tokio::task::spawn_blocking(move || {
-            let key =
-                PublicKey::from_spki(&der).map_err(|invalid| IdentityError::InvalidRequest {
-                    field: "public_key",
-                    message: invalid.to_string(),
-                })?;
-            let authority = KeyId::parse(&audience_for_proof).unwrap_or_else(|| KeyId::of(&[]));
-            let proof_for = ProofFor {
-                authority: &authority,
-                identity: &named,
+        let (public_key, audience) = self
+            .proven_key(
+                request.public_key.clone(),
+                request.proof.clone(),
+                request.identity.clone(),
                 actor,
-                session: &session_for_proof,
-            };
-            if !verify_proof(&key, &proof_for, &proof) {
-                return Err(IdentityError::InvalidProof {
-                    key_id: key.id().to_string(),
-                    authority_key_id: audience_for_proof,
-                });
-            }
-            Ok(key)
-        })
-        .await
-        .map_err(|error| task(&error))??;
+                session_sent.clone(),
+            )
+            .await?;
         let lifetime = self.lifetime_of(request.lifetime.as_ref())?;
         // 2. The rules.
         let identity = self.identity_for(&channel, &request.identity)?;
@@ -398,48 +433,127 @@ impl Identities {
             Some(session)
         };
         // 3. A fresh key.
+        self.check_fresh(public_key.id().as_str())?;
+        let session = match session {
+            Some(session) => SessionFor::Continue(session),
+            None => SessionFor::New(self.unused_session_id()?),
+        };
+        self.certify_key(Issuance {
+            public_key,
+            identity,
+            actor,
+            agent,
+            session,
+            presence: PresenceProof::None,
+            lifetime,
+            channel,
+            audience,
+            passkey_id: None,
+            approval_id: None,
+        })
+        .await
+    }
+
+    /// The session key `der` (a DER `SubjectPublicKeyInfo`), once `proof`
+    /// verifies as its proof of possession for `named`, `actor` and
+    /// `session` as sent, addressed to the current authority, whose key id
+    /// is returned beside it: the audience a certificate is later refused
+    /// for if the authority rotated. On the blocking pool.
+    pub(crate) async fn proven_key(
+        &self,
+        der: Vec<u8>,
+        proof: Vec<u8>,
+        named: String,
+        actor: Actor,
+        session: String,
+    ) -> Result<(PublicKey, String), IdentityError> {
+        let audience = self.current_authority().id;
+        let audience_for_proof = audience.clone();
+        let key = tokio::task::spawn_blocking(move || {
+            let key =
+                PublicKey::from_spki(&der).map_err(|invalid| IdentityError::InvalidRequest {
+                    field: "public_key",
+                    message: invalid.to_string(),
+                })?;
+            let authority = KeyId::parse(&audience_for_proof).unwrap_or_else(|| KeyId::of(&[]));
+            let proof_for = ProofFor {
+                authority: &authority,
+                identity: &named,
+                actor,
+                session: &session,
+            };
+            if !verify_proof(&key, &proof_for, &proof) {
+                return Err(IdentityError::InvalidProof {
+                    key_id: key.id().to_string(),
+                    authority_key_id: audience_for_proof,
+                });
+            }
+            Ok(key)
+        })
+        .await
+        .map_err(|error| task(&error))??;
+        Ok((key, audience))
+    }
+
+    /// `SESSION_KEY_EXISTS` unless `key_id` is new: neither certified nor
+    /// used to sign evidence as a bare key.
+    pub(crate) fn check_fresh(&self, key_id: &str) -> Result<(), IdentityError> {
+        let state = match self.db.key_state(key_id)? {
+            None => return Ok(()),
+            Some(true) => "certified",
+            Some(false) => "used",
+        };
+        Err(IdentityError::KeyExists {
+            key_id: key_id.to_owned(),
+            state,
+        })
+    }
+
+    /// Certifies `issuance`'s key, its request's checks done: the
+    /// certificate, signed by the current authority unless it is no longer
+    /// `issuance.audience` (`InvalidProof`), then the session (when new) and
+    /// the key in one transaction under the identity's limit, logged, and
+    /// read back as any read does.
+    #[expect(clippy::too_many_lines, reason = "the issuance steps, in their order")]
+    pub(crate) async fn certify_key(&self, issuance: Issuance) -> Result<ReadKey, IdentityError> {
+        let Issuance {
+            public_key,
+            identity,
+            actor,
+            agent,
+            session,
+            presence,
+            lifetime,
+            channel,
+            audience,
+            passkey_id,
+            approval_id,
+        } = issuance;
         let key_id = public_key.id().to_string();
-        match self.db.key_state(&key_id)? {
-            Some(true) => {
-                return Err(IdentityError::KeyExists {
-                    key_id,
-                    state: "certified",
-                });
-            }
-            Some(false) => {
-                return Err(IdentityError::KeyExists {
-                    key_id,
-                    state: "used",
-                });
-            }
-            None => {}
-        }
-        // 4. The limit is counted in the insert's transaction (step 6).
+        // The limit is counted in the insert's transaction.
         let now = Timestamp::now();
         let limit = self.limit();
-        // 5. The certificate.
-        let new_session = match &session {
-            Some(_) => None,
-            None => Some(SessionRow {
-                id: self.unused_session_id()?,
-                identity_id: identity.id.clone(),
-                actor: actor.as_str().to_owned(),
-                agent: agent.clone(),
-                created_at: now,
-                channel: channel.name().to_owned(),
-                revocation: None,
-            }),
+        let (session_id, new_session) = match session {
+            SessionFor::Continue(session) => (session.id, None),
+            SessionFor::New(id) => (
+                id.clone(),
+                Some(SessionRow {
+                    id,
+                    identity_id: identity.id.clone(),
+                    actor: actor.as_str().to_owned(),
+                    agent: agent.clone(),
+                    created_at: now,
+                    channel: channel.name().to_owned(),
+                    revocation: None,
+                }),
+            ),
         };
-        let session_id = session
-            .as_ref()
-            .or(new_session.as_ref())
-            .map(|session| session.id.clone())
-            .unwrap_or_default();
         let kind = IdentityKind::parse(&identity.kind).unwrap_or(IdentityKind::Person);
         let not_after = Timestamp(
             now.0
                 .saturating_add(crate::model::duration_millis(lifetime)),
         );
+        let presence_name = presence.kind().as_str().to_owned();
         let authority = Arc::clone(&self.authority);
         let host = self.host.clone();
         let binding = Binding {
@@ -452,7 +566,7 @@ impl Identities {
             actor,
             agent: agent.clone(),
             session: session_id.clone(),
-            presence: Presence::None,
+            presence,
             custody: Custody::Client,
             not_before_ms: now.0,
             not_after_ms: not_after.0,
@@ -467,7 +581,8 @@ impl Identities {
             let mut binding = binding;
             let current = authority.read().unwrap_or_else(PoisonError::into_inner);
             if current.row.id != audience {
-                // Rotated since the proof was checked: it names the old one.
+                // Rotated since the request was checked: it names the old
+                // one.
                 return Err(IdentityError::InvalidProof {
                     key_id: key_id_for_proof,
                     authority_key_id: current.row.id.clone(),
@@ -483,14 +598,14 @@ impl Identities {
         })
         .await
         .map_err(|error| task(&error))??;
-        // 6. The session and the key, in one transaction.
+        // The session and the key, in one transaction.
         let (token_id, token_name) = match &channel {
             Channel::Remote {
                 token_id,
                 token_name,
                 ..
             } => (Some(token_id.clone()), Some(token_name.as_str())),
-            Channel::Socket => (None, None),
+            Channel::Socket | Channel::Web { .. } => (None, None),
         };
         let row = SessionKeyRow {
             key_id: key_id.clone(),
@@ -498,7 +613,7 @@ impl Identities {
             identity_id: identity.id.clone(),
             authority_id,
             actor: actor.as_str().to_owned(),
-            presence: Presence::None.as_str().to_owned(),
+            presence: presence_name,
             custody: Custody::Client.as_str().to_owned(),
             certificate,
             not_before: now,
@@ -509,6 +624,9 @@ impl Identities {
             revocation: None,
             issuer_kind: IssuerKind::ReefDaemon.as_str().to_owned(),
             oidc_id: None,
+            passkey_id,
+            approval_id,
+            web_session: channel.web_session().map(str::to_owned),
         };
         match self
             .db
@@ -530,7 +648,6 @@ impl Identities {
             Err(error) => return Err(error.into()),
         }
         audit::issued(&row, &identity.name, token_name);
-        // 7. The record and the certificate, read back as any read does.
         self.read(vec![row])
             .await?
             .pop()
@@ -623,7 +740,7 @@ impl Identities {
                 actor,
                 agent: agent.map(str::to_owned),
                 session: session_id.to_owned(),
-                presence: Presence::None,
+                presence: PresenceProof::None,
                 custody: Custody::Daemon,
                 not_before_ms: now.0,
                 not_after_ms: not_after.0,
@@ -658,6 +775,9 @@ impl Identities {
             revocation: None,
             issuer_kind: IssuerKind::ReefDaemon.as_str().to_owned(),
             oidc_id: None,
+            passkey_id: None,
+            approval_id: None,
+            web_session: None,
         };
         let limit = self.limit();
         match self
@@ -690,7 +810,7 @@ impl Identities {
         )
     }
 
-    fn unused_session_id(&self) -> Result<String, DbError> {
+    pub(crate) fn unused_session_id(&self) -> Result<String, DbError> {
         loop {
             let id = new_id("ses_");
             if !self.db.session_id_taken(&id)? {

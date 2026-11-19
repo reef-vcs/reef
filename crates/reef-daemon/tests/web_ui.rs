@@ -1,7 +1,7 @@
 //! The web UI's loopback listener (R2.18, tests 1 to 14; R3.43 test 11, its
-//! `localhost` origin on both loopback families): sessions, the gate's rules
-//! and headers, assets, gRPC-web streams, launch files, and the listener's
-//! limits. Test daemons serve the placeholder assets through
+//! `localhost` origin on both loopback families, and test 10, its allowlist
+//! of writes): sessions, the gate's rules and headers, assets, gRPC-web
+//! streams, launch files, and the listener's limits. Test daemons serve the placeholder assets through
 //! the full gate (`web::Limits::assets_built`).
 
 #![allow(
@@ -58,7 +58,7 @@ const HEADERS: &[&str] = &[
 ];
 
 async fn session(client: &Client, launch_file: bool) -> CreateWebSessionResponse {
-    client.create_web_session(launch_file).await.unwrap()
+    client.create_web_session(launch_file, "").await.unwrap()
 }
 
 fn token_of(session: &CreateWebSessionResponse) -> String {
@@ -321,7 +321,11 @@ async fn session_binds_lazily() {
             config.web.assets_built = built;
         })
         .await;
-        let error = daemon.client.create_web_session(true).await.unwrap_err();
+        let error = daemon
+            .client
+            .create_web_session(true, "")
+            .await
+            .unwrap_err();
         let status = status_of(&error);
         assert_eq!(status.code(), Code::FailedPrecondition);
         assert_eq!(reason(status), expected);
@@ -433,14 +437,32 @@ async fn api_needs_a_session() {
     assert_eq!(status.version, env!("CARGO_PKG_VERSION"));
 }
 
+/// The writes the web listener passes (R3.43): passkeys, approvals, and
+/// evidence a passkey approved. Every other WRITE and every ADMIN method is
+/// refused.
+const WEB_WRITES: [&str; 6] = [
+    "/reef.api.v1.IdentityService/StartPasskeyRegistration",
+    "/reef.api.v1.IdentityService/RegisterPasskey",
+    "/reef.api.v1.IdentityService/RemovePasskey",
+    "/reef.api.v1.IdentityService/RequestApproval",
+    "/reef.api.v1.IdentityService/ResolveApproval",
+    "/reef.api.v1.EvidenceService/AddEvidence",
+];
+
+// R3.43 test 10 (R2.18 test 5's `only_read_rpcs` before it): every v1
+// method is passed or refused exactly as its access and the allowlist say.
 #[tokio::test(flavor = "multi_thread")]
-async fn only_read_rpcs() {
+async fn web_rpcs_follow_the_table() {
     let daemon = TestDaemon::start().await;
     let web = session(&daemon.client, false).await;
     let at = authority_of(&web);
     let token = token_of(&web);
     let bearer = format!("Bearer {token}");
     let mut paths: Vec<&str> = reef_api::methods().collect();
+    for write in WEB_WRITES {
+        assert!(paths.contains(&write), "{write} is a v1 method");
+        assert_eq!(reef_api::access(write), Some(v1::Access::Write), "{write}");
+    }
     paths.extend(["/reef.daemon.v0.Daemon/Status", "/reef.api.v1.Nope/Nope"]);
     for path in paths {
         // The head only: `SubscribeOperations` and `SubscribePresence` are
@@ -470,11 +492,11 @@ async fn only_read_rpcs() {
             let status = Status::with_details(Code::Unknown, "", bytes.into());
             reef_daemon::error::detail_of(&status)
         });
-        let read = reef_api::access(path) == Some(v1::Access::Read);
+        let passed = reef_api::access(path) == Some(v1::Access::Read) || WEB_WRITES.contains(&path);
         let refused = detail
             .as_ref()
             .is_some_and(|d| d.reason == "WEB_ACCESS_DENIED");
-        assert_eq!(refused, !read, "{path}");
+        assert_eq!(refused, !passed, "{path}");
         assert!(
             detail
                 .as_ref()
@@ -494,11 +516,86 @@ async fn only_read_rpcs() {
     }
     // Through tonic: a session cannot mint sessions.
     let status = daemon_service(&web, Some(&token))
-        .create_web_session(v1::CreateWebSessionRequest { launch_file: true })
+        .create_web_session(v1::CreateWebSessionRequest {
+            launch_file: true,
+            path: String::new(),
+        })
         .await
         .unwrap_err();
     assert_eq!(reason(&status), "WEB_ACCESS_DENIED");
     assert_eq!(metadata(&status, "access"), "admin");
+}
+
+// R3.43: a session can open a page of the app, such as an approval; a path
+// that is not one is refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn session_urls_open_a_path() {
+    let daemon = TestDaemon::start().await;
+    let page = daemon
+        .client
+        .create_web_session(false, "/approve/apr_0123456789abcdef")
+        .await
+        .unwrap();
+    let (before, token) = page.session_url.split_once("#session=").unwrap();
+    assert_eq!(before, format!("{}approve/apr_0123456789abcdef", page.url));
+    assert_eq!(token.len(), 43);
+    for bad in ["approve", "//evil.example", "/a/../b", "/a?x"] {
+        let error = daemon
+            .client
+            .create_web_session(false, bad)
+            .await
+            .unwrap_err();
+        let status = status_of(&error);
+        assert_eq!(status.code(), Code::InvalidArgument, "{bad}");
+        assert_eq!(reason(status), "INVALID_WEB_PATH", "{bad}");
+    }
+}
+
+// R3.43 test 10: what runs the user's git credentials or tools, or issues a
+// key bound to nothing, stays off the web listener.
+#[tokio::test(flavor = "multi_thread")]
+async fn web_cannot_publish() {
+    use reef_api::v1::git_service_client::GitServiceClient;
+    use reef_api::v1::identity_service_client::IdentityServiceClient;
+    use reef_api::v1::landing_service_client::LandingServiceClient;
+    use reef_api::v1::workspace_service_client::WorkspaceServiceClient;
+    let daemon = TestDaemon::start().await;
+    let page = session(&daemon.client, false).await;
+    let token = token_of(&page);
+    let denied = |status: Status| {
+        assert_eq!(reason(&status), "WEB_ACCESS_DENIED", "{status:?}");
+        metadata(&status, "method")
+    };
+    let (service, origin) = web(&page, Some(&token));
+    let publish = GitServiceClient::with_origin(service, origin)
+        .publish_change(v1::PublishChangeRequest::default())
+        .await
+        .unwrap_err();
+    assert_eq!(denied(publish), "/reef.api.v1.GitService/PublishChange");
+    let (service, origin) = web(&page, Some(&token));
+    let push = LandingServiceClient::with_origin(service, origin)
+        .push_landed(v1::PushLandedRequest::default())
+        .await
+        .unwrap_err();
+    assert_eq!(denied(push), "/reef.api.v1.LandingService/PushLanded");
+    let (service, origin) = web(&page, Some(&token));
+    let create = WorkspaceServiceClient::with_origin(service, origin)
+        .create_workspace(CreateWorkspaceRequest::default())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        denied(create),
+        "/reef.api.v1.WorkspaceService/CreateWorkspace"
+    );
+    let (service, origin) = web(&page, Some(&token));
+    let issue = IdentityServiceClient::with_origin(service, origin)
+        .issue_session_key(v1::IssueSessionKeyRequest::default())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        denied(issue),
+        "/reef.api.v1.IdentityService/IssueSessionKey"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -901,7 +998,11 @@ async fn bind_failure_is_reported() {
         config.file.ui.listen = listen;
     })
     .await;
-    let error = daemon.client.create_web_session(false).await.unwrap_err();
+    let error = daemon
+        .client
+        .create_web_session(false, "")
+        .await
+        .unwrap_err();
     let status = status_of(&error);
     assert_eq!(status.code(), Code::Unavailable);
     assert_eq!(reason(status), "WEB_UI_UNAVAILABLE");
@@ -929,7 +1030,11 @@ async fn a_fixed_port_held_on_ipv6_fails() {
         config.file.ui.listen = format!("127.0.0.1:{port}");
     })
     .await;
-    let error = daemon.client.create_web_session(false).await.unwrap_err();
+    let error = daemon
+        .client
+        .create_web_session(false, "")
+        .await
+        .unwrap_err();
     let status = status_of(&error);
     assert_eq!(reason(status), "WEB_UI_UNAVAILABLE");
     assert_eq!(metadata(status, "address"), address);

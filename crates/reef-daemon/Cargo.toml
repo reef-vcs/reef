@@ -153,5 +153,7 @@ criterion.workspace = true
 hyper-util = { workspace = true, features = ["client-legacy", "http1", "http2", "tokio"] }
 http-body-util.workspace = true
 tonic-web.workspace = true
+# R3.43: a software authenticator drives passkey ceremonies in tests/passkeys.rs.
+reef-evidence = { workspace = true, features = ["sigstore", "testing"] }
 # The remote listener's tests (R2.08): raw HTTP/1.1 and HTTP/2 over TLS.
 hyper = { workspace = true, features = ["client", "http1", "http2"] }

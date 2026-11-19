@@ -125,7 +125,7 @@ pub struct SessionKeyRow {
     pub authority_id: String,
     /// `human`, `agent` or `executor`.
     pub actor: String,
-    /// `none`.
+    /// `none` or `user_verified`.
     pub presence: String,
     /// `client` or `daemon`.
     pub custody: String,
@@ -148,6 +148,12 @@ pub struct SessionKeyRow {
     pub issuer_kind: String,
     /// The OIDC match a keyless key was bound through.
     pub oidc_id: Option<String>,
+    /// The passkey that approved a `user_verified` key (R3.43).
+    pub passkey_id: Option<String>,
+    /// The approval a `user_verified` key was issued through (R3.43).
+    pub approval_id: Option<String>,
+    /// The web UI session that approved it (R3.43).
+    pub web_session: Option<String>,
 }
 
 /// What stopped [`Db::insert_identity_with_oidc`].
@@ -272,7 +278,7 @@ fn session_from(row: &Row<'_>) -> rusqlite::Result<SessionRow> {
 const KEY_COLUMNS: &str = "k.key_id, k.session_id, k.identity_id, k.authority_id, k.actor, \
      k.presence, k.custody, k.certificate, k.not_before, k.not_after, k.issued_at, \
      k.issued_by_agent, k.remote_token_id, k.revoked_at, k.invalid_from, k.revoke_reason, \
-     k.issuer_kind, k.oidc_id";
+     k.issuer_kind, k.oidc_id, k.passkey_id, k.approval_id, k.web_session";
 
 fn key_from(row: &Row<'_>) -> rusqlite::Result<SessionKeyRow> {
     Ok(SessionKeyRow {
@@ -292,6 +298,9 @@ fn key_from(row: &Row<'_>) -> rusqlite::Result<SessionKeyRow> {
         revocation: revocation_at(row, 13)?,
         issuer_kind: text_at(row, 16)?.unwrap_or_default(),
         oidc_id: text_at(row, 17)?,
+        passkey_id: text_at(row, 18)?,
+        approval_id: text_at(row, 19)?,
+        web_session: text_at(row, 20)?,
     })
 }
 
@@ -671,8 +680,10 @@ impl Db {
                 "INSERT INTO session_keys(key_id, session_id, identity_id, authority_id, actor,
                                           presence, custody, certificate, not_before, not_after,
                                           issued_at, issued_by_agent, remote_token_id,
-                                          issuer_kind, oidc_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                                          issuer_kind, oidc_id, passkey_id, approval_id,
+                                          web_session)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
+                         ?17, ?18)
                  ON CONFLICT(key_id) DO NOTHING",
                 params![
                     key.key_id,
@@ -690,6 +701,9 @@ impl Db {
                     key.remote_token_id,
                     key.issuer_kind,
                     key.oidc_id,
+                    key.passkey_id,
+                    key.approval_id,
+                    key.web_session,
                 ],
             )?;
             if inserted == 0 {
@@ -1174,6 +1188,9 @@ pub(crate) mod tests {
             revocation: None,
             issuer_kind: "reef-daemon".into(),
             oidc_id: None,
+            passkey_id: None,
+            approval_id: None,
+            web_session: None,
         }
     }
 

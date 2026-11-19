@@ -733,6 +733,38 @@ pub(super) const NOT_TOOLS: &[(&str, &str)] = &[
         "ADMIN is never an MCP tool: the daemon's user runs it with `reef identity oidc` (R3.42)",
     ),
     (
+        "/reef.api.v1.IdentityService/ListPasskeys",
+        "passkeys are a person's: `reef identity passkey list` and the web UI read them; tools/list is at its budget (#116) (R3.43)",
+    ),
+    (
+        "/reef.api.v1.IdentityService/StartPasskeyRegistration",
+        "agents never register passkeys: a person does, in the web UI (R3.43)",
+    ),
+    (
+        "/reef.api.v1.IdentityService/RegisterPasskey",
+        "agents never register passkeys: a person does, in the web UI (R3.43)",
+    ),
+    (
+        "/reef.api.v1.IdentityService/RemovePasskey",
+        "agents never remove passkeys: a person does, in the web UI, with a passkey (R3.43)",
+    ),
+    (
+        "/reef.api.v1.IdentityService/ResetPasskeys",
+        "ADMIN is never an MCP tool: the daemon's user runs `reef identity passkey reset` (R3.43)",
+    ),
+    (
+        "/reef.api.v1.IdentityService/RequestApproval",
+        "a verified sign-off is a person's: `reef evidence add --verified` or the web UI's Sign off asks, never an agent's tool call (R3.43)",
+    ),
+    (
+        "/reef.api.v1.IdentityService/GetApproval",
+        "read by `reef evidence add --verified` and the web UI's approval page, which wait on it (R3.43)",
+    ),
+    (
+        "/reef.api.v1.IdentityService/ResolveApproval",
+        "agents never approve: a person approves in the web UI with a passkey (R3.43)",
+    ),
+    (
         "/reef.api.v1.ChangeService/ListProposals",
         "an agent runs `reef proposal list`; wait_for_operations with kind transition follows a proposal",
     ),

@@ -500,6 +500,11 @@ fn key_of(identity: Option<&v1::KeyIdentity>, key_id: &str) -> input::Key {
                 .as_str_name(),
             "SESSION_PRESENCE_",
         ),
+        passkey: key
+            .passkey
+            .as_ref()
+            .map(|passkey| passkey.fingerprint.clone())
+            .unwrap_or_default(),
         custody: word(
             v1::KeyCustody::try_from(key.custody)
                 .unwrap_or_default()

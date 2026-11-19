@@ -4,8 +4,9 @@
 //! in every evidence read, revocation, tampered rows, and GC, backup,
 //! restore and forget.
 //!
-//! The web listener's refusal of every method that is not READ, the new
-//! ones included, is `web_ui.rs`'s `only_read_rpcs`; the remote listener's
+//! The web listener's refusal of every method that is neither READ nor on
+//! its allowlist is `web_ui.rs`'s `web_rpcs_follow_the_table`; the remote
+//! listener's
 //! by scope is `remote.rs`'s `scopes_cover_every_method`.
 
 #![allow(

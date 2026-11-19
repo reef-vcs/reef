@@ -451,7 +451,8 @@ impl Policy {
     /// `user_verified` only when its certificate says so and its passkey is
     /// pinned in `[passkeys]` for its identity, by id or by name; otherwise
     /// `none`. `None` for a presence this Reef does not know, which meets no
-    /// requirement.
+    /// requirement. Evaluation sets every key's `presence` to this before
+    /// any rule reads it, and it is the same for a key so set.
     pub fn presence(&self, key: &Key) -> Option<Presence> {
         let pinned = |identity: &str| {
             !identity.is_empty()
@@ -666,6 +667,18 @@ impl Policy {
         input.provenance.sort_by(|a, b| {
             (a.recorded_at, a.sequence, &a.id).cmp(&(b.recorded_at, b.sequence, &b.id))
         });
+        // Every rule, CEL's included, reads a key's effective presence: an
+        // unpinned passkey's `user_verified` reads `none`.
+        for key in input
+            .evidence
+            .iter_mut()
+            .map(|e| &mut e.key)
+            .chain(input.provenance.iter_mut().map(|record| &mut record.key))
+        {
+            if let Some(presence) = self.presence(key) {
+                presence.as_str().clone_into(&mut key.presence);
+            }
+        }
         for e in &mut input.evidence {
             e.attestors.clear();
             e.artifacts
