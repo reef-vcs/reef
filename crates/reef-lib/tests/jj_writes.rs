@@ -871,7 +871,7 @@ async fn revert_refusals() {
     let on = fx.wc("reef-2").unwrap();
     let on = fx.get(&on.hex().parse().unwrap()).await;
     let described = fx.describe(&on, "renamed").await.unwrap();
-    let plan = undo::plan_revert(&fx.head(), &described.op_id)
+    let plan = undo::plan_revert(&fx.head(), &described.op_id, false)
         .await
         .unwrap();
     assert!(plan.workspaces.contains(&"reef-2".to_owned()), "{plan:?}");
@@ -1810,5 +1810,14 @@ async fn carry_check_follows_only_a_dependencys_rewrite() {
             moved: vec![hex_change(&s)],
             renamed: true,
         }
+    );
+    // A recorded commit garbage collection took is a verdict, not an error
+    // (R3.11 second review, finding 2).
+    let collected: CommitIdHex = "ab".repeat(20).parse().unwrap();
+    assert_eq!(
+        carry_check(&head, &collected, &hex(&y2), &[])
+            .await
+            .unwrap(),
+        CarryCheck::Not(NotCarried::Gone)
     );
 }

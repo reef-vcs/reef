@@ -319,6 +319,10 @@ pub struct PendingSnapshot<'a> {
     /// For a carried scan, each file its check-out would overwrite or
     /// remove, as the scan left it.
     stamps: Vec<(PathBuf, Option<Stamp>)>,
+    /// The tree the scan read on disk.
+    scanned: MergedTree,
+    /// The workspace's root.
+    root: PathBuf,
 }
 
 /// Why a scan walked every tracked file rather than the paths given to
@@ -424,7 +428,9 @@ impl PendingSnapshot<'_> {
     /// write's own and any conflicted. Returns the files it updated, added
     /// or removed. A file among them that changed on disk since the scan is
     /// [`SnapshotError::ChangedAfterScan`], with nothing checked out: jj's
-    /// check-out would overwrite it unread.
+    /// check-out would overwrite it unread. A commit merged again when it
+    /// was committed ([`onto_moved`]) has paths the scan took no stamp of:
+    /// each must still hold, byte for byte, what the scan read.
     pub async fn check_out_carried(
         &mut self,
         repo: &ReadonlyRepo,
@@ -438,9 +444,67 @@ impl PendingSnapshot<'_> {
         {
             return Err(SnapshotError::ChangedAfterScan(path.display().to_string()));
         }
+        if let Some(path) = self.changed_unstamped(&commit.tree()).await? {
+            return Err(SnapshotError::ChangedAfterScan(path.display().to_string()));
+        }
         self.updated_files = check_out(&mut self.locked, &commit).await?;
         self.checked_out = true;
         Ok(self.updated_files)
+    }
+
+    /// The first file the check-out of `merged` would overwrite or remove,
+    /// with no stamp, that no longer holds what the scan read. The
+    /// check-out diffs from the locked working copy's tree: the scanned
+    /// tree after a full scan, but the tree before the scan after a
+    /// narrowed one, whose paths are then checked too.
+    async fn changed_unstamped(
+        &mut self,
+        merged: &MergedTree,
+    ) -> Result<Option<PathBuf>, BackendError> {
+        let stamped: std::collections::HashSet<&Path> =
+            self.stamps.iter().map(|(path, _)| path.as_path()).collect();
+        let store = self.scanned.store();
+        let mut seen = std::collections::HashSet::new();
+        let mut diff = self.scanned.diff(merged, &EverythingMatcher);
+        while let Some(entry) = diff.next().await {
+            let before = entry.values?.before;
+            // jj's check-out skips a file it does not track.
+            if !before.is_present() {
+                continue;
+            }
+            let path = entry.path.to_fs_path_unchecked(&self.root);
+            if !stamped.contains(path.as_path())
+                && !holds(store, &entry.path, &before, &path).await?
+            {
+                return Ok(Some(path));
+            }
+            seen.insert(entry.path);
+        }
+        if self.narrowed.is_none() {
+            return Ok(None);
+        }
+        let old = self.locked.locked_wc().old_tree().clone();
+        let mut diff = old.diff(merged, &EverythingMatcher);
+        while let Some(entry) = diff.next().await {
+            entry.values?;
+            if seen.contains(&entry.path) {
+                continue;
+            }
+            let path = entry.path.to_fs_path_unchecked(&self.root);
+            if stamped.contains(path.as_path()) {
+                continue;
+            }
+            let scanned = self.scanned.path_value(&entry.path).await?;
+            let holds = if scanned.is_present() {
+                holds(store, &entry.path, &scanned, &path).await?
+            } else {
+                std::fs::symlink_metadata(&path).is_err()
+            };
+            if !holds {
+                return Ok(Some(path));
+            }
+        }
+        Ok(None)
     }
 
     /// New files the scan left untracked, by repository-relative path.
@@ -649,6 +713,48 @@ pub async fn commit_snapshot(
         repo,
         write,
         commit: commit_start.elapsed(),
+    })
+}
+
+/// `plan` recorded on `moved` instead of its `rewrite_of`: an ancestor's
+/// snapshot rebased `rewrite_of` onto `moved`, in the same change, after
+/// the scan (#91). The tree is the three-way merge of `moved`'s and the
+/// plan's over `rewrite_of`'s, so the scan's edits and the rebase both
+/// stay; where they touch the same lines, the commit has jj's conflict and
+/// the check-out writes its markers. The plan is then carried
+/// ([`SnapshotPlan::carried`]): its commit has files that are not on disk
+/// yet, which [`PendingSnapshot::check_out_carried`] writes.
+pub async fn onto_moved(
+    head: &ReadonlyRepo,
+    plan: &SnapshotPlan,
+    moved: &CommitIdHex,
+) -> Result<SnapshotPlan, SnapshotError> {
+    let was = commit_by_hex(head, &plan.rewrite_of).await?;
+    let now = commit_by_hex(head, moved).await?;
+    let scanned = MergedTree::new(
+        Arc::clone(head.store()),
+        plan.tree_ids.clone(),
+        plan.labels.clone(),
+    );
+    let merged = MergedTree::merge(Merge::from_vec(vec![
+        (now.tree(), format!("{} (rebased)", now.conflict_label())),
+        (was.tree(), format!("{} (scanned)", was.conflict_label())),
+        (scanned, "working copy".to_owned()),
+    ]))
+    .await?;
+    let (tree_ids, labels) = merged.tree_ids_and_labels();
+    Ok(SnapshotPlan {
+        workspace_name: plan.workspace_name.clone(),
+        rewrite_of: moved.clone(),
+        tree_ids: tree_ids.clone(),
+        labels: labels.clone(),
+        divergent: false,
+        recover: None,
+        carried: Some(plan.carried.clone().unwrap_or_else(|| ScannedTree {
+            tree_ids: plan.tree_ids.clone(),
+            labels: plan.labels.clone(),
+        })),
+        started_on: None,
     })
 }
 
@@ -1032,6 +1138,8 @@ impl Repo {
             full_reason,
             checked_out: false,
             stamps,
+            scanned: new_tree,
+            root,
         })
     }
 
@@ -1222,6 +1330,49 @@ async fn overwritten(
         }
     }
     Ok(stamps)
+}
+
+/// Whether `disk` holds `value`, `path`'s value in the scanned tree: a
+/// file with the same bytes, or a symlink to the same target. Anything else
+/// (a conflict, a directory, a submodule) reads as changed, which only
+/// costs a merge at the next snapshot.
+async fn holds(
+    store: &Arc<jj_lib::store::Store>,
+    path: &jj_lib::repo_path::RepoPath,
+    value: &jj_lib::backend::MergedTreeValue,
+    disk: &Path,
+) -> Result<bool, BackendError> {
+    use futures::AsyncReadExt as _;
+    use jj_lib::backend::TreeValue;
+    let Ok(metadata) = std::fs::symlink_metadata(disk) else {
+        return Ok(false);
+    };
+    match value.as_resolved() {
+        Some(Some(TreeValue::File { id, .. })) if metadata.is_file() => {
+            let Ok(on_disk) = std::fs::read(disk) else {
+                return Ok(false);
+            };
+            let mut reader = store.read_file(path, id).await?;
+            let mut stored = Vec::with_capacity(on_disk.len());
+            reader
+                .read_to_end(&mut stored)
+                .await
+                .map_err(|error| BackendError::ReadFile {
+                    path: path.to_owned(),
+                    id: id.clone(),
+                    source: error.into(),
+                })?;
+            Ok(stored == on_disk)
+        }
+        Some(Some(TreeValue::Symlink(id))) if metadata.is_symlink() => {
+            let Ok(target) = std::fs::read_link(disk) else {
+                return Ok(false);
+            };
+            let stored = store.read_symlink(path, id).await?;
+            Ok(target.to_str() == Some(stored.as_str()))
+        }
+        _ => Ok(false),
+    }
 }
 
 /// Whether the locked working copy is stale against `repo`, by jj's

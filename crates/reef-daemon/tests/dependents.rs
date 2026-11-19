@@ -126,6 +126,77 @@ async fn bookmark(repo: &SyntheticRepo, name: &str, commit: &str) {
     .unwrap();
 }
 
+/// Deletes a local bookmark from outside the daemon, as `jj bookmark
+/// delete`.
+async fn delete_bookmark(repo: &SyntheticRepo, name: &str) {
+    let (root, name) = (repo.root.clone(), name.to_owned());
+    tokio::task::spawn_blocking(move || {
+        use jj_lib::default_backend_factories::{
+            default_backend_factories, default_working_copy_factories,
+        };
+        use jj_lib::op_store::RefTarget;
+        use jj_lib::ref_name::RefName;
+        let settings = test_settings();
+        let workspace = jj_lib::default_backend_factories::default_workspace_loader_factory()
+            .create(&root)
+            .unwrap()
+            .load(
+                &settings,
+                &default_backend_factories(),
+                &default_working_copy_factories(),
+            )
+            .unwrap();
+        let repo = pollster::block_on(workspace.repo_loader().load_at_head(None)).unwrap();
+        let mut tx = repo.start_transaction();
+        tx.repo_mut()
+            .set_local_bookmark_target(RefName::new(&name), RefTarget::absent());
+        pollster::block_on(tx.commit("bookmark delete")).unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+/// Makes `change`'s commit divergent from outside the daemon: another
+/// visible commit with the same change id, on the same parents.
+async fn duplicate_change(repo: &SyntheticRepo, commit: &str) {
+    let (root, commit) = (repo.root.clone(), commit.to_owned());
+    tokio::task::spawn_blocking(move || {
+        use jj_lib::backend::CommitId;
+        use jj_lib::default_backend_factories::{
+            default_backend_factories, default_working_copy_factories,
+        };
+        use jj_lib::repo::Repo as _;
+        let settings = test_settings();
+        let workspace = jj_lib::default_backend_factories::default_workspace_loader_factory()
+            .create(&root)
+            .unwrap()
+            .load(
+                &settings,
+                &default_backend_factories(),
+                &default_working_copy_factories(),
+            )
+            .unwrap();
+        let repo = pollster::block_on(workspace.repo_loader().load_at_head(None)).unwrap();
+        let old = pollster::block_on(
+            repo.store()
+                .get_commit_async(&CommitId::try_from_hex(&commit).unwrap()),
+        )
+        .unwrap();
+        let mut tx = repo.start_transaction();
+        let _dup = pollster::block_on(
+            tx.repo_mut()
+                .new_commit(old.parent_ids().to_vec(), old.tree())
+                .set_change_id(old.change_id().clone())
+                .set_description("a duplicate")
+                .write(),
+        )
+        .unwrap();
+        pollster::block_on(tx.commit("duplicate")).unwrap();
+    })
+    .await
+    .unwrap();
+}
+
 /// `main` with the policy on a base commit, holding `f.txt`.
 async fn setup(client: &Client, repo: &SyntheticRepo) -> v1::Change {
     client
@@ -727,5 +798,394 @@ async fn moving_off_skips_every_declined_change() {
     assert_eq!(missing.change_id, a.change_id);
     assert_eq!(missing.move_change_id, c.change_id);
     assert_eq!(missing.move_onto, "main");
+    daemon.stop().await;
+}
+
+/// `count` proposals on `on`, each then edited by its own agent: amended,
+/// so the carry follower can never carry them.
+async fn amended_by_their_owners(client: &Client, repo: &str, on: &str, count: usize) {
+    for i in 0..count {
+        let path = format!("j{i}.txt");
+        let own = commit_on(client, repo, on, &[(&path, "j\n")]).await;
+        client
+            .transition_change(transition(repo, &own.change_id, State::Proposed, false))
+            .await
+            .unwrap();
+        client
+            .edit_files(EditFilesRequest {
+                repo: repo.to_owned(),
+                target: Some(edit_files_request::Target::Revision(own.commit_id.clone())),
+                edits: vec![FileEdit {
+                    path,
+                    action: Some(file_edit::Action::Content(b"j2\n".to_vec())),
+                    executable: None,
+                }],
+                ..EditFilesRequest::default()
+            })
+            .await
+            .unwrap();
+    }
+}
+
+/// Amends `commit` with a new file `path`, rebasing what is above it.
+async fn amend(client: &Client, repo: &str, commit: &str, path: &str) {
+    client
+        .edit_files(EditFilesRequest {
+            repo: repo.to_owned(),
+            target: Some(edit_files_request::Target::Revision(commit.to_owned())),
+            edits: vec![FileEdit {
+                path: path.to_owned(),
+                action: Some(file_edit::Action::Content(b"amended\n".to_vec())),
+                executable: None,
+            }],
+            ..EditFilesRequest::default()
+        })
+        .await
+        .unwrap();
+}
+
+/// Z, A on Z, B on A: B proposed as a stack, A declined.
+async fn declined_in_the_middle(
+    client: &Client,
+    repo: &SyntheticRepo,
+) -> (v1::Change, v1::Change, v1::Change, v1::Change) {
+    let main = setup(client, repo).await;
+    let z = commit_on(client, &repo.id, &main.commit_id, &[("z.txt", "z\n")]).await;
+    let a = commit_on(client, &repo.id, &z.commit_id, &[("a.txt", "a\n")]).await;
+    let b = commit_on(client, &repo.id, &a.commit_id, &[("b.txt", "b\n")]).await;
+    client
+        .transition_change(transition(&repo.id, &b.change_id, State::Proposed, true))
+        .await
+        .unwrap();
+    client
+        .transition_change(transition(&repo.id, &a.change_id, State::Declined, false))
+        .await
+        .unwrap();
+    (main, z, a, b)
+}
+
+// R3.11 second review, finding 3: more proposals amended by their own
+// agents than one look checks, all newer than a declined change, do not
+// let a stack proposal put the declined change back in review once a
+// rewrite below it moved it, nor let its dependent land on it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_declined_change_stays_out_behind_proposals_amended_by_their_owners() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let (main, z, a, b) = declined_in_the_middle(client, &repo).await;
+    amended_by_their_owners(client, &repo.id, &main.commit_id, 64).await;
+    // Z's owner amends it and proposes it again.
+    amend(client, &repo.id, &z.commit_id, "z2.txt").await;
+    client
+        .transition_change(transition(&repo.id, &z.change_id, State::Proposed, false))
+        .await
+        .unwrap();
+
+    let proposing = client
+        .transition_change(transition(&repo.id, &b.change_id, State::Proposed, true))
+        .await
+        .unwrap_err();
+    assert_eq!(reason(&proposing).0, "MEMBER_LEFT_REVIEW");
+    assert_eq!(
+        lifecycle(client, &repo.id, &a.change_id).await.state(),
+        State::Declined
+    );
+    let landing = client
+        .land_change(LandChangeRequest {
+            repo: repo.id.clone(),
+            revision: b.change_id.clone(),
+            ..LandChangeRequest::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(reason(&landing).0, "DEPENDENCY_LEFT_REVIEW");
+    daemon.stop().await;
+}
+
+// R3.11 second review, finding 3: a carry check that cannot carry is made
+// once, so the next look reaches the proposals behind it.
+#[tokio::test(flavor = "multi_thread")]
+async fn carry_checks_that_cannot_carry_are_made_once() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let (main, z, a, b) = declined_in_the_middle(client, &repo).await;
+    amended_by_their_owners(client, &repo.id, &main.commit_id, 64).await;
+    amend(client, &repo.id, &z.commit_id, "z2.txt").await;
+
+    let state = std::sync::Arc::downgrade(daemon.handle.state());
+    let id = repo.id.parse().unwrap();
+    for _ in 0..2 {
+        reef_daemon::lifecycle::carry::carry_now(&state, id)
+            .await
+            .unwrap();
+    }
+    let a_now = change(client, &repo.id, &a.change_id).await;
+    assert_eq!(
+        a_now.lifecycle.unwrap().commit_id,
+        a_now.commit_id,
+        "A is carried"
+    );
+    assert!(
+        !lifecycle(client, &repo.id, &b.change_id).await.amended,
+        "B is carried"
+    );
+    daemon.stop().await;
+}
+
+// R3.11 second review, finding 2: garbage collection that takes one
+// proposal's recorded commit stops neither the other carries nor the
+// missing-dependency reads.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_collected_commit_does_not_stop_carries_or_holds() {
+    let (daemon, repo) = TestDaemon::with_synthetic_repo_and(Preset::Small, |config| {
+        no_automatic_snapshots(config);
+        config.file.history.enabled = false;
+        config.file.gc.undo_window = Duration::ZERO;
+    })
+    .await;
+    daemon.handle.state().manager.scheduler().pause_watcher();
+    let client = &daemon.client;
+    let main = setup(client, &repo).await;
+    let a = commit_on(client, &repo.id, &main.commit_id, &[("a.txt", "a\n")]).await;
+    let b = commit_on(client, &repo.id, &a.commit_id, &[("b.txt", "b\n")]).await;
+    client
+        .transition_change(transition(&repo.id, &b.change_id, State::Proposed, true))
+        .await
+        .unwrap();
+    client
+        .transition_change(transition(&repo.id, &a.change_id, State::Declined, false))
+        .await
+        .unwrap();
+    let x = commit_on(client, &repo.id, &main.commit_id, &[("x.txt", "x\n")]).await;
+    let y = commit_on(client, &repo.id, &x.commit_id, &[("y.txt", "y\n")]).await;
+    client
+        .transition_change(transition(&repo.id, &y.change_id, State::Proposed, false))
+        .await
+        .unwrap();
+    // W, withdrawn and then revised by its owner: its recorded commit is
+    // garbage once the undo window is over.
+    let revised = commit_on(client, &repo.id, &main.commit_id, &[("w.txt", "w\n")]).await;
+    client
+        .transition_change(transition(
+            &repo.id,
+            &revised.change_id,
+            State::Proposed,
+            false,
+        ))
+        .await
+        .unwrap();
+    client
+        .transition_change(transition(
+            &repo.id,
+            &revised.change_id,
+            State::Withdrawn,
+            false,
+        ))
+        .await
+        .unwrap();
+    amend(client, &repo.id, &revised.commit_id, "w2.txt").await;
+    let held = async |client: &Client| {
+        conflicts(client, &repo.id)
+            .await
+            .iter()
+            .filter(|conflict| conflict.kind() == ConflictKind::MissingDependency)
+            .count()
+    };
+    assert_eq!(held(client).await, 1, "B is held by A");
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    client.collect_garbage(&repo.id, false).await.unwrap();
+    // A new daemon has checked nothing yet.
+    let daemon = daemon.restart().await;
+    daemon.handle.state().manager.scheduler().pause_watcher();
+    let client = &daemon.client;
+    assert_eq!(held(client).await, 1, "B is still held by A");
+
+    amend(client, &repo.id, &x.change_id, "x2.txt").await;
+    eventually("Y is carried across X's amend", || async {
+        !lifecycle(client, &repo.id, &y.change_id).await.amended
+    })
+    .await;
+    daemon.stop().await;
+}
+
+// R3.11 second review, findings 4 and 7: a supersede that moved its
+// dependents can be undone, in one operation that puts them back; its
+// carries name the successor, for its children's children too.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_supersede_that_moved_dependents_is_undone() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let main = setup(client, &repo).await;
+    let a = commit_on(client, &repo.id, &main.commit_id, &[("a.txt", "a\n")]).await;
+    let b = commit_on(client, &repo.id, &a.commit_id, &[("b.txt", "b\n")]).await;
+    let c = commit_on(client, &repo.id, &b.commit_id, &[("c.txt", "c\n")]).await;
+    let a2 = commit_on(client, &repo.id, &main.commit_id, &[("a.txt", "a2\n")]).await;
+    client
+        .transition_change(transition(&repo.id, &c.change_id, State::Proposed, true))
+        .await
+        .unwrap();
+    let superseded = client
+        .transition_change(TransitionChangeRequest {
+            superseded_by: a2.change_id.clone(),
+            ..transition(&repo.id, &a.change_id, State::Superseded, false)
+        })
+        .await
+        .unwrap();
+    for carried in [&b, &c] {
+        let last = lifecycle(client, &repo.id, &carried.change_id)
+            .await
+            .last
+            .unwrap();
+        let dependency = last.dependency.clone().unwrap();
+        assert_eq!(dependency.change_id, a2.change_id, "{last:?}");
+        assert_eq!(dependency.event(), DependencyEvent::Superseded);
+    }
+
+    let op = superseded.operation.unwrap().id;
+    client
+        .undo_operation(v1::UndoOperationRequest {
+            repo: repo.id.clone(),
+            operation_id: op,
+            ..v1::UndoOperationRequest::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        lifecycle(client, &repo.id, &a.change_id).await.state(),
+        State::Proposed
+    );
+    assert_eq!(
+        change(client, &repo.id, &b.change_id)
+            .await
+            .parent_change_ids,
+        vec![a.change_id.clone()]
+    );
+    daemon.stop().await;
+}
+
+// R3.11 second review, finding 5: a dependent whose stack cannot be read
+// (its destination is gone) keeps its dependency assignment open.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unread_stack_closes_no_assignment() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let main = setup(client, &repo).await;
+    let a = commit_on(client, &repo.id, &main.commit_id, &[("a.txt", "a\n")]).await;
+    let b = commit_on(client, &repo.id, &a.commit_id, &[("b.txt", "b\n")]).await;
+    client
+        .transition_change(transition(&repo.id, &b.change_id, State::Proposed, true))
+        .await
+        .unwrap();
+    client
+        .transition_change(transition(&repo.id, &a.change_id, State::Declined, false))
+        .await
+        .unwrap();
+    let open = async || {
+        conflicts(client, &repo.id).await;
+        assignments(client, &repo.id)
+            .await
+            .into_iter()
+            .filter(|row| {
+                row.kind() == ConflictKind::MissingDependency
+                    && row.state() != v1::ConflictAssignmentState::Closed
+            })
+            .count()
+    };
+    assert_eq!(open().await, 1, "B's dependency assignment is open");
+    delete_bookmark(&repo, "main").await;
+    // Another operation, so the daemon reads the repository again.
+    commit_on(client, &repo.id, &main.commit_id, &[("o.txt", "o\n")]).await;
+    assert_eq!(
+        open().await,
+        1,
+        "a stack that cannot be read closes nothing"
+    );
+    daemon.stop().await;
+}
+
+// R3.11 second review, finding 6: a carry of a held dependent, or of the
+// declined change below it, is not a new decline: its agent is not told
+// again, and the conflict is the same.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_carry_does_not_repeat_the_missing_dependency_instruction() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let (_, z, _, b) = declined_in_the_middle(client, &repo).await;
+    eventually("B is told once", || async {
+        instructions(client, &repo.id, &b.change_id).await.len() == 1
+    })
+    .await;
+    // Its agent finished with it.
+    let told = instructions(client, &repo.id, &b.change_id).await;
+    client
+        .update_instruction(v1::UpdateInstructionRequest {
+            repo: repo.id.clone(),
+            id: told[0].id.clone(),
+            to: v1::InstructionState::Cancelled.into(),
+            ..v1::UpdateInstructionRequest::default()
+        })
+        .await
+        .unwrap();
+    let missing_id = async || {
+        conflicts(client, &repo.id)
+            .await
+            .into_iter()
+            .find(|conflict| conflict.kind() == ConflictKind::MissingDependency)
+            .map(|conflict| conflict.id)
+    };
+    let before = missing_id().await;
+    let carried = lifecycle(client, &repo.id, &b.change_id).await.commit_id;
+    amend(client, &repo.id, &z.commit_id, "z2.txt").await;
+    eventually("B is carried", || async {
+        let now = lifecycle(client, &repo.id, &b.change_id).await;
+        now.commit_id != carried && !now.amended
+    })
+    .await;
+    // The follower looks again after the carry's own operation.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(instructions(client, &repo.id, &b.change_id).await.len(), 1);
+    assert!(before.is_some());
+    assert_eq!(missing_id().await, before);
+    daemon.stop().await;
+}
+
+// R3.11 second review, F3: a declined change that becomes divergent still
+// holds the proposal above it: its missing dependency and assignment stay.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_divergent_declined_change_still_holds() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let main = setup(client, &repo).await;
+    let a = commit_on(client, &repo.id, &main.commit_id, &[("a.txt", "a\n")]).await;
+    let b = commit_on(client, &repo.id, &a.commit_id, &[("b.txt", "b\n")]).await;
+    client
+        .transition_change(transition(&repo.id, &b.change_id, State::Proposed, true))
+        .await
+        .unwrap();
+    client
+        .transition_change(transition(&repo.id, &a.change_id, State::Declined, false))
+        .await
+        .unwrap();
+    let held = async || {
+        let missing = conflicts(client, &repo.id)
+            .await
+            .iter()
+            .filter(|conflict| conflict.kind() == ConflictKind::MissingDependency)
+            .count();
+        let open = assignments(client, &repo.id)
+            .await
+            .into_iter()
+            .filter(|row| {
+                row.kind() == ConflictKind::MissingDependency
+                    && row.state() != v1::ConflictAssignmentState::Closed
+            })
+            .count();
+        (missing, open)
+    };
+    assert_eq!(held().await, (1, 1));
+    duplicate_change(&repo, &a.commit_id).await;
+    // Another operation, so the daemon reads the repository again.
+    commit_on(client, &repo.id, &main.commit_id, &[("o.txt", "o\n")]).await;
+    assert_eq!(held().await, (1, 1), "B is still held by A");
     daemon.stop().await;
 }

@@ -85,6 +85,10 @@ pub enum Write {
     Undo {
         /// A full operation id or a unique prefix.
         operation: String,
+        /// The inverse of the transitions it recorded, recorded in the same
+        /// operation: a supersede that moved its dependents (R3.11). Only
+        /// the daemon's lifecycle undo sets them.
+        transitions: Vec<TransitionRecord>,
     },
     /// Land a queued change on its destination bookmark (R3.13): rebase
     /// it onto the bookmark's head when needed, give workspaces on it a new
@@ -826,11 +830,16 @@ async fn plan(
             })
         }
         Write::Rebase { .. } => plan_rebase(head, write, workspace, agent).await,
-        Write::Undo { operation } => {
+        Write::Undo {
+            operation,
+            transitions,
+        } => {
             let repo = head.refresh().await?;
             let op = oplog::resolve_operation(&repo, operation).await?;
             let op_id = oplog::entry(&op).id;
-            let mut workspaces = undo::plan_revert(&repo, &op_id).await?.workspaces;
+            let mut workspaces = undo::plan_revert(&repo, &op_id, !transitions.is_empty())
+                .await?
+                .workspaces;
             if let Some(name) = jj_name
                 && !workspaces.iter().any(|known| known == name)
             {
@@ -1095,12 +1104,16 @@ async fn commit(
             written.op_id = Some(abandoned.op_id);
             written.abandoned = Some(found.commit_id);
         }
-        Write::Undo { operation } => {
+        Write::Undo {
+            operation,
+            transitions,
+        } => {
             let undone = match &target.undone {
                 Some(undone) => undone.clone(),
                 None => oplog::entry(&oplog::resolve_operation(&repo, operation).await?).id,
             };
             meta.description = format!("{}{undone}", oplog::REVERT_PREFIX);
+            meta.transitions.clone_from(transitions);
             written.op_id = head.repo.revert_operation(&undone, &meta).await?;
         }
         Write::Land {

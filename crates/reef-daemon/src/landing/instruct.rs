@@ -16,6 +16,7 @@ use crate::daemon::AppState;
 use crate::lifecycle::Actor;
 use crate::model::RepoId;
 use reef_lib::error::ErrorChain;
+use reef_lib::jj::lifecycle::TransitionCause;
 
 /// What automatic landing gave up on, each with its own sentence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -139,9 +140,8 @@ pub(crate) async fn send(
         state,
         repo,
         change,
-        text,
-        expected,
-        super::batch::AGENT,
+        (text, expected),
+        (super::batch::AGENT, None),
         &format!("{outcome:?}"),
     )
     .await;
@@ -149,21 +149,27 @@ pub(crate) async fn send(
 
 /// Writes the daemon's instruction `text` on `change` as `agent`, about
 /// `expected` (its commit; empty for the visible one), unless it has one
-/// with the same text since its latest transition, or one still unfinished
-/// (S-229). Shared with R3.11's dependents. Failures are logged: an
-/// instruction never stops its caller.
+/// with the same text since its latest transition (a carry across a
+/// rewrite below it does not count, R3.11) and since `after`, the event it
+/// tells of, or one still unfinished (S-229). Shared with R3.11's
+/// dependents. Failures are logged: an instruction never stops its caller.
 pub(crate) async fn write(
     state: &std::sync::Arc<AppState>,
     repo: RepoId,
     change: &str,
-    text: String,
-    expected: String,
-    agent: &str,
+    (text, expected): (String, String),
+    (agent, after): (&str, Option<crate::model::Timestamp>),
     what: &str,
 ) {
-    let row = state.db.lifecycle_row(repo, change).ok().flatten();
     // One per proposal: a re-proposal (a new transition) may be told again.
-    let since = row.map_or(crate::model::Timestamp(0), |row| row.updated_at);
+    let since = state
+        .db
+        .last_transition(repo, change, TransitionCause::Dependency.as_str())
+        .ok()
+        .flatten()
+        .and_then(|row| row.recorded_at)
+        .unwrap_or(crate::model::Timestamp(0))
+        .max(after.unwrap_or(crate::model::Timestamp(0)));
     let digest = reef_policy::sha256_hex(text.as_bytes());
     match state.db.daemon_instructions(repo, change, since, &digest) {
         Ok((false, false)) => {}

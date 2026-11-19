@@ -361,15 +361,15 @@ pub async fn find_transitions(
 }
 
 /// The operation `text` names (a full id or a unique prefix) when it
-/// records lifecycle transitions and changes nothing in the view: the
-/// operations the daemon undoes in its own records. `None` otherwise,
-/// including when `text` resolves to nothing (the view's undo reports
-/// that), and for an operation that also changed the view, which the view's
-/// undo refuses.
-pub async fn transition_only_operation(
+/// records lifecycle transitions: the operations the daemon undoes in its
+/// own records, with whether it also changed the view (a supersede that
+/// moved its dependents, R3.11), which the undo then reverts in the same
+/// operation. `None` otherwise, including when `text` resolves to nothing
+/// (the view's undo reports that).
+pub async fn transition_operation(
     repo: &ReadonlyRepo,
     text: &str,
-) -> Option<super::oplog::OpEntry> {
+) -> Option<(super::oplog::OpEntry, bool)> {
     let op = super::oplog::resolve_operation(repo, text).await.ok()?;
     if !op.metadata().attributes.contains_key(ATTR_LIFECYCLE) {
         return None;
@@ -378,7 +378,7 @@ pub async fn transition_only_operation(
         return None;
     };
     let parent = repo.loader().load_operation(parent).await.ok()?;
-    (parent.view_id() == op.view_id()).then(|| super::oplog::entry(&op))
+    Some((super::oplog::entry(&op), parent.view_id() != op.view_id()))
 }
 
 /// Whether `repo`'s view has the local bookmark `name`, not conflicted.
@@ -512,7 +512,15 @@ pub enum NotCarried {
     Parents,
     /// Its own diff or description is not the recorded commit's.
     OwnEdit,
+    /// The recorded commit is not in the store: garbage collection took it.
+    Gone,
 }
+
+/// [`carry_check`]'s verdicts that do not carry, by the recorded and the
+/// visible commit: each holds as long as the renamed (superseded) changes
+/// it was given stay the same, so a caller that remembers them checks each
+/// pair once.
+pub type Verdicts = std::collections::HashMap<(CommitIdHex, CommitIdHex), NotCarried>;
 
 /// Whether the proposal recorded at `recorded` is carried to `visible`, its
 /// change's commit now (R3.11, ADR 0084): `visible`'s parents are commits
@@ -529,7 +537,11 @@ pub async fn carry_check(
     renamed: &[(ChangeIdHex, ChangeIdHex)],
 ) -> Result<CarryCheck, BackendError> {
     let store = repo.store();
-    let old = store.get_commit_async(&recorded.to_id()).await?;
+    let old = match store.get_commit_async(&recorded.to_id()).await {
+        Ok(old) => old,
+        Err(BackendError::ObjectNotFound { .. }) => return Ok(CarryCheck::Not(NotCarried::Gone)),
+        Err(error) => return Err(error),
+    };
     let new = store.get_commit_async(&visible.to_id()).await?;
     if old.parent_ids().len() != new.parent_ids().len() {
         return Ok(CarryCheck::Not(NotCarried::Parents));
@@ -599,17 +611,24 @@ pub struct Carries {
     pub conflicted: Vec<Carried>,
     /// It stopped at its limit.
     pub more: bool,
+    /// The verdicts it reached that were not known, each with its change.
+    pub verdicts: Vec<(ChangeIdHex, (CommitIdHex, CommitIdHex), NotCarried)>,
+    /// Every pair of a recorded and another visible commit it looked at.
+    pub moved: Vec<(CommitIdHex, CommitIdHex)>,
 }
 
 /// Of `proposals` (each change with its recorded commit), those whose
 /// change has one visible commit, another than the recorded one, to which
 /// [`carry_check`] carries the proposal (`renamed`: superseded parent
 /// changes and their successors), and those a rewrite below them left
-/// conflicted. Looks at no more than `max` proposals that moved.
+/// conflicted. A pair `known` holds costs no check. Checks no more than
+/// `max` proposals that moved (S-247): a check that cannot carry is made
+/// once, and known after, so the ones that can are never starved.
 pub async fn carries(
     repo: &std::sync::Arc<ReadonlyRepo>,
     proposals: &[(ChangeIdHex, CommitIdHex)],
     renamed: &[(ChangeIdHex, ChangeIdHex)],
+    known: &Verdicts,
     max: usize,
 ) -> Result<Carries, BackendError> {
     let mut found = Carries::default();
@@ -629,12 +648,24 @@ pub async fn carries(
         if visible == *recorded {
             continue;
         }
-        if checked == max {
-            found.more = true;
-            return Ok(found);
-        }
-        checked += 1;
-        match carry_check(repo, recorded, &visible, renamed).await? {
+        let pair = (recorded.clone(), visible.clone());
+        found.moved.push(pair.clone());
+        let verdict = match known.get(&pair) {
+            Some(not) => CarryCheck::Not(not.clone()),
+            None if checked == max => {
+                found.more = true;
+                continue;
+            }
+            None => {
+                checked += 1;
+                let verdict = carry_check(repo, recorded, &visible, renamed).await?;
+                if let CarryCheck::Not(not) = &verdict {
+                    found.verdicts.push((change.clone(), pair, not.clone()));
+                }
+                verdict
+            }
+        };
+        match verdict {
             CarryCheck::Carried { moved, renamed } => found.carried.push(Carried {
                 change: change.clone(),
                 visible,
@@ -662,51 +693,92 @@ pub struct Above {
     /// review at, or at that commit rebased with their own diff unchanged
     /// (a rewrite below them), each with its visible commit.
     pub left: Vec<(ChangeIdHex, CommitIdHex)>,
+    /// The heads with more than one visible commit (divergent), or whose
+    /// commits could not be resolved, and every head when a change of
+    /// `left` could not be resolved: whether they are above one is not
+    /// known.
+    pub unread: Vec<ChangeIdHex>,
+    /// The verdicts it reached that were not known, each with its change.
+    pub verdicts: Vec<(ChangeIdHex, (CommitIdHex, CommitIdHex), NotCarried)>,
 }
 
 /// Of `heads` (changes), those whose visible commit has a proper ancestor
 /// in `left` (changes with the commit they were declined or withdrawn at)
 /// that is still out of review: its visible commit is that commit, or
-/// [`carry_check`] carries it there, since a rebase by a rewrite below it
-/// is not a revision by its owner (R3.11). The stack reads that follow
-/// need only these heads.
+/// [`carry_check`] carries it there (`renamed`, `known`: as for
+/// [`carries`]), since a rebase by a rewrite below it is not a revision by
+/// its owner (R3.11). The stack reads that follow need only these heads.
 pub async fn above_any(
     repo: &std::sync::Arc<ReadonlyRepo>,
     heads: &[ChangeIdHex],
     left: &[(ChangeIdHex, CommitIdHex)],
+    (renamed, known): (&[(ChangeIdHex, ChangeIdHex)], &Verdicts),
 ) -> Result<Above, BackendError> {
-    let visible = async |change: &ChangeIdHex| -> Option<jj_lib::backend::CommitId> {
-        let targets = repo.resolve_change_id(&change.to_id()).await.ok()??;
-        let ids: Vec<_> = targets
-            .visible_with_offsets()
-            .map(|(_, id)| id.clone())
-            .collect();
-        match ids.as_slice() {
-            [one] => Some(one.clone()),
-            _ => None,
+    let all_visible = async |change: &ChangeIdHex| -> Result<Vec<jj_lib::backend::CommitId>, ()> {
+        let Ok(targets) = repo.resolve_change_id(&change.to_id()).await else {
+            return Err(());
+        };
+        Ok(targets
+            .into_iter()
+            .flat_map(|targets| {
+                targets
+                    .visible_with_offsets()
+                    .map(|(_, id)| id.clone())
+                    .collect::<Vec<_>>()
+            })
+            .collect())
+    };
+    let visible = async |change: &ChangeIdHex| -> Result<Option<jj_lib::backend::CommitId>, ()> {
+        match all_visible(change).await?.as_slice() {
+            [] => Ok(None),
+            [one] => Ok(Some(one.clone())),
+            _ => Err(()),
         }
     };
     let mut found = Above::default();
+    let mut unreadable = false;
     for (change, commit) in left {
-        let Some(now) = visible(change).await else {
+        // A divergent change is still out at any of its commits that is
+        // the one it left at, or that commit rebased below.
+        let Ok(commits) = all_visible(change).await else {
+            unreadable = true;
             continue;
         };
-        let now_hex = CommitIdHex::of(&now);
-        let still = now == commit.to_id()
-            || matches!(
-                carry_check(repo, commit, &now_hex, &[]).await?,
-                CarryCheck::Carried { .. }
-            );
-        if still {
-            found.left.push((change.clone(), now_hex));
+        for now in commits {
+            let now_hex = CommitIdHex::of(&now);
+            let pair = (commit.clone(), now_hex.clone());
+            let still = now == commit.to_id()
+                || match known.get(&pair) {
+                    Some(_) => false,
+                    None => match carry_check(repo, commit, &now_hex, renamed).await? {
+                        CarryCheck::Carried { .. } => true,
+                        CarryCheck::Not(not) => {
+                            found.verdicts.push((change.clone(), pair, not));
+                            false
+                        }
+                    },
+                };
+            if still {
+                found.left.push((change.clone(), now_hex));
+            }
         }
+    }
+    // What is above a change that could not be read is not known.
+    if unreadable {
+        found.unread.extend(heads.iter().cloned());
+        return Ok(found);
     }
     if found.left.is_empty() {
         return Ok(found);
     }
     for head in heads {
-        let Some(id) = visible(head).await else {
-            continue;
+        let id = match visible(head).await {
+            Ok(Some(id)) => id,
+            Ok(None) => continue,
+            Err(()) => {
+                found.unread.push(head.clone());
+                continue;
+            }
         };
         for (_, below) in &found.left {
             let below = below.to_id();

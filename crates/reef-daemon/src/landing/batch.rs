@@ -2110,8 +2110,14 @@ async fn land_prefix_part(
             .map_err(LandingError::from)
             .and_then(|()| {
                 row.commit_id.clone_from(&commit);
-                crate::lifecycle::commit_written_transition(state, repo, &row, &op_id, recorded_at)
-                    .map_err(LandingError::from)
+                crate::lifecycle::commit_written_transition(
+                    state,
+                    repo,
+                    (&row, None),
+                    &op_id,
+                    recorded_at,
+                )
+                .map_err(LandingError::from)
             });
         if let Err(error) = committed {
             tracing::warn!(repo = %repo, change_id = %row.change_id, error = %ErrorChain(&error), "cannot record a landed change; the next start does");

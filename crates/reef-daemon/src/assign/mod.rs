@@ -1352,17 +1352,12 @@ fn dependencies(
     state: &AppState,
     repo: RepoId,
     open: &[AssignmentRow],
-    held: &HashMap<
-        String,
-        (
-            crate::lifecycle::dependents::Missing,
-            crate::db::LifecycleRow,
-        ),
-    >,
+    read: &crate::lifecycle::dependents::Held,
     now: Timestamp,
 ) -> Result<Vec<Change>, AssignError> {
     let daemon = Caller::daemon();
     let mut changes = Vec::new();
+    let held = &read.held;
     for (change, (missing, _)) in held {
         let conflict_id = crate::lifecycle::dependents::conflict_id(change, missing);
         let commit = missing_commit(state, repo, change);
@@ -1441,7 +1436,11 @@ fn dependencies(
             }
         }
     }
-    for row in open.iter().filter(|row| !held.contains_key(&row.change_id)) {
+    // A proposal whose stack could not be read is left as it is.
+    for row in open
+        .iter()
+        .filter(|row| !held.contains_key(&row.change_id) && !read.unread.contains(&row.change_id))
+    {
         let lifecycle = state.db.lifecycle_row(repo, &row.change_id)?;
         let reason = match lifecycle.as_ref().map(|row| row.state.as_str()) {
             Some("proposed" | "queued") => Reason::Resolved,

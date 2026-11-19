@@ -102,11 +102,14 @@ async fn comment_operation(target: &super::reading::Target, text: &str) -> Optio
         .flatten()
 }
 
-/// The operation `text` names when it records lifecycle transitions and
-/// nothing else (R3.09), which the daemon undoes in its own records; `None`
-/// otherwise, including when it does not resolve or also changed the view
-/// (the view's undo reports or refuses those).
-async fn lifecycle_operation(target: &super::reading::Target, text: &str) -> Option<OpEntry> {
+/// The operation `text` names when it records lifecycle transitions
+/// (R3.09), which the daemon undoes in its own records, with whether it also
+/// changed the view (R3.11); `None` otherwise, including when it does not
+/// resolve (the view's undo reports that).
+async fn lifecycle_operation(
+    target: &super::reading::Target,
+    text: &str,
+) -> Option<(OpEntry, bool)> {
     use futures::FutureExt as _;
     let text = text.to_owned();
     target
@@ -114,7 +117,7 @@ async fn lifecycle_operation(target: &super::reading::Target, text: &str) -> Opt
         .call_async(move |head| {
             async move {
                 let repo = head.refresh().await.ok()?;
-                reef_lib::jj::lifecycle::transition_only_operation(&repo, &text).await
+                reef_lib::jj::lifecycle::transition_operation(&repo, &text).await
             }
             .boxed_local()
         })
@@ -125,13 +128,14 @@ async fn lifecycle_operation(target: &super::reading::Target, text: &str) -> Opt
 
 /// `UndoOperation` of an operation that recorded lifecycle transitions
 /// (R3.09): the named workspace snapshotted first, as every undo does, then
-/// the inverse transitions.
+/// the inverse transitions, with the view reverted too when the operation
+/// changed it (`view`, R3.11).
 async fn undo_transitions(
     state: &Arc<AppState>,
     target: &super::reading::Target,
     agent: Option<String>,
     remote: Option<(String, String)>,
-    entry: &OpEntry,
+    (entry, view): (&OpEntry, bool),
 ) -> Result<Response<UndoOperationResponse>, Status> {
     let snapshot = super::reading::snapshot_first(
         state,
@@ -148,7 +152,7 @@ async fn undo_transitions(
         target.workspace.clone(),
         agent.clone(),
         remote,
-        entry.id.clone(),
+        (entry.id.clone(), view),
     )
     .await
     .map_err(status)?;
@@ -575,11 +579,12 @@ impl OperationService for OperationsHandler {
                 why: "it records comments; cancel an instruction with `reef comment cancel` instead",
             }));
         }
-        if let Some(entry) = lifecycle_operation(&target, &request.operation_id).await {
-            return undo_transitions(state, &target, agent, remote, &entry).await;
+        if let Some((entry, view)) = lifecycle_operation(&target, &request.operation_id).await {
+            return undo_transitions(state, &target, agent, remote, (&entry, view)).await;
         }
         let write = crate::workspace::Write::Undo {
             operation: request.operation_id,
+            transitions: Vec::new(),
         };
         let (rewritten, operation) = super::changes::write_change(
             state,

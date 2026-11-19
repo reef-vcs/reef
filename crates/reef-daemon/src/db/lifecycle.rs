@@ -524,6 +524,29 @@ impl Db {
         .map(small)
     }
 
+    /// `change`'s latest committed transition with another cause than
+    /// `except_cause`.
+    pub fn last_transition(
+        &self,
+        repo: RepoId,
+        change: &str,
+        except_cause: &str,
+    ) -> Result<Option<TransitionRow>, DbError> {
+        self.with(|conn| {
+            conn.query_row(
+                &format!(
+                    "SELECT {TRANSITION_COLUMNS} FROM lifecycle_transitions
+                     WHERE repo_id = ?1 AND change_id = ?2 AND status = 'committed'
+                       AND cause != ?3
+                     ORDER BY seq DESC LIMIT 1"
+                ),
+                params![repo, change, except_cause],
+                transition_from_row,
+            )
+            .optional()
+        })
+    }
+
     /// The committed transition `id`.
     pub fn transition(&self, repo: RepoId, id: &str) -> Result<Option<TransitionRow>, DbError> {
         self.with(|conn| {

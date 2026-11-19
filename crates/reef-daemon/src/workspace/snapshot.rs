@@ -565,12 +565,18 @@ impl Manager {
                     .into()),
                     None => pipeline.run(repo, head, permit),
                 };
-                if ran.is_err()
-                    && !pipeline.committed.get()
-                    && let Some(carry) = carry
-                {
-                    // Unused: nothing was committed. A re-merge's carry
-                    // (see `record`) is set only after a commit.
+                // Unused: nothing was committed, and the working copy is
+                // not on the carry's commit. A re-merge's carry (see
+                // `record`) is set only after a commit.
+                let reached = match &ran {
+                    Ok(Ran {
+                        recorded: Recorded::Unchanged { wc_commit, .. },
+                        ..
+                    }) => carry.as_ref().is_some_and(|carry| &carry.to == wc_commit),
+                    Ok(_) => true,
+                    Err(_) => pipeline.committed.get(),
+                };
+                if !reached && let Some(carry) = carry {
                     entry.carry.restore(carry);
                 }
                 ran
@@ -844,7 +850,7 @@ impl Manager {
 
 /// The blocking half of a snapshot, with the jj handle locked.
 struct Pipeline<'a> {
-    entry: &'a WorkspaceEntry,
+    entry: &'a Arc<WorkspaceEntry>,
     db: &'a Db,
     id: WorkspaceId,
     kind: SnapshotKind,
@@ -951,6 +957,9 @@ impl Pipeline<'_> {
         &self,
         mut pending: reef_lib::jj::PendingSnapshot<'_>,
     ) -> (Result<Ran, ManagerError>, Option<Arc<ReadonlyRepo>>) {
+        if let Some(manager) = &self.manager {
+            manager.scheduler.commit_hold_point(self.id);
+        }
         let adopted = pending.adopted();
         let mut updated_files = pending.updated_files();
         let millis =
@@ -998,8 +1007,6 @@ impl Pipeline<'_> {
 
         let plan = pending.plan().clone();
         let recovered = plan.recover.is_some();
-        let carried = plan.carried.clone();
-        let conflict = carried.is_some() && !plan.tree_ids.is_resolved();
         let mut meta = self.meta.clone();
         if let Some(started) = &plan.started_on {
             // Issue #248: say so in the operation's description.
@@ -1010,14 +1017,19 @@ impl Pipeline<'_> {
                 started.head
             );
         }
-        let (committed, moved) = match self.commit(plan, meta) {
+        let Committed {
+            commit: committed,
+            moved,
+            carried,
+        } = match self.commit(plan, meta) {
             Ok(committed) => committed,
             Err(error) => return (Err(error), None),
         };
         self.committed.set(true);
+        let conflict = carried.is_some() && committed.tree_id.is_none();
         let started_on = committed.started_on.clone();
         let new_head = Some(Arc::clone(&committed.repo));
-        if pending.carried() {
+        if carried.is_some() {
             // The commit has the write's changes, which are not on disk yet:
             // the row moves to it only once they are.
             match self.check_out_carried(&mut pending, &committed, carried.clone()) {
@@ -1049,34 +1061,85 @@ impl Pipeline<'_> {
     }
 }
 
+/// What [`Pipeline::commit`] wrote.
+struct Committed {
+    commit: SnapshotCommit,
+    /// The other workspaces it moved, to follow (#91, #202).
+    moved: Vec<WorkspaceId>,
+    /// `Some(disk)`: the commit has files that are not on disk yet, the
+    /// tree the scan read being `disk`: the scan was carried onto a write's
+    /// commit, or merged onto an ancestor's rebase of its commit.
+    carried: Option<ScannedTree>,
+}
+
 impl Pipeline<'_> {
     /// Step 3: commits `plan` on the repository thread, which adopts the
     /// new head, and hands carries to the workspaces it moved (#91, #202).
+    /// When an ancestor's snapshot rebased the commit the plan rewrites
+    /// after the scan, the plan is merged onto the rebased commit
+    /// ([`onto_moved`](reef_lib::jj::snapshot::onto_moved)) rather than
+    /// diverging the change.
     fn commit(
         &self,
         plan: reef_lib::jj::SnapshotPlan,
         meta: OpMeta,
-    ) -> Result<(SnapshotCommit, Vec<WorkspaceId>), ManagerError> {
+    ) -> Result<Committed, ManagerError> {
         let manager = self.manager.clone();
         let name = self.id.jj_workspace_name();
+        let entry = Arc::clone(self.entry);
+        let unused = self.carry.filter(|_| plan.carried.is_none()).cloned();
         let committed = pollster::block_on(self.entry.repo.call_async(move |head| {
             async move {
                 let before = Arc::clone(head.repo.head());
-                let committed = commit_snapshot(&before, &plan, &meta).await;
-                let mut moved = Vec::new();
-                if let Ok(committed) = &committed {
-                    // The next job starts from this operation (R1.03). A
-                    // reload is not needed: nothing else in the daemon
-                    // writes, and `refresh` catches anything outside it.
-                    head.adopt(Arc::clone(&committed.repo));
-                    if let Some(manager) = &manager {
-                        // In this job, as a write's carries are (ADR 0039):
-                        // no snapshot of a moved workspace loads this head
-                        // before its carry is set.
-                        moved = manager.carry_moved(&before, committed, &name).await;
+                let moved = moved_to(&before, &plan, &name, &entry, unused.as_ref());
+                // The move's carry, taken, goes back if nothing is written.
+                let give_back = |to: CommitIdHex| {
+                    entry.carry.restore(Carry {
+                        from: plan.rewrite_of.clone(),
+                        to,
+                        base: None,
+                    });
+                };
+                let merged = match &moved {
+                    Some(to) => {
+                        match reef_lib::jj::snapshot::onto_moved(&before, &plan, to).await {
+                            Ok(merged) => Some(merged),
+                            Err(error) => {
+                                give_back(to.clone());
+                                return Err(error);
+                            }
+                        }
                     }
+                    None => None,
+                };
+                let written =
+                    commit_snapshot(&before, merged.as_ref().unwrap_or(&plan), &meta).await;
+                let committed = match written {
+                    Ok(committed) => committed,
+                    Err(error) => {
+                        if let Some(to) = moved {
+                            give_back(to);
+                        }
+                        return Err(error);
+                    }
+                };
+                let plan = merged.unwrap_or(plan);
+                // The next job starts from this operation (R1.03). A reload
+                // is not needed: nothing else in the daemon writes, and
+                // `refresh` catches anything outside it.
+                head.adopt(Arc::clone(&committed.repo));
+                let mut moved = Vec::new();
+                if let Some(manager) = &manager {
+                    // In this job, as a write's carries are (ADR 0039): no
+                    // snapshot of a moved workspace loads this head before
+                    // its carry is set.
+                    moved = manager.carry_moved(&before, &committed, &name).await;
                 }
-                committed.map(|committed| (committed, moved))
+                Ok(Committed {
+                    commit: committed,
+                    moved,
+                    carried: plan.carried,
+                })
             }
             .boxed_local()
         }));
@@ -1140,6 +1203,25 @@ impl Pipeline<'_> {
         }
         checked_out
     }
+}
+
+/// The view's commit for workspace `name` at `head`, when an ancestor's
+/// snapshot rebased `plan.rewrite_of` there after the scan: the carry it
+/// handed the workspace ([`Manager::carry_moved`]) moves one to the other,
+/// and is taken. `None` for a plan that diverges, recovers or starts a new
+/// change, and when the view's commit is the plan's.
+fn moved_to(
+    head: &ReadonlyRepo,
+    plan: &reef_lib::jj::SnapshotPlan,
+    name: &str,
+    entry: &WorkspaceEntry,
+    unused: Option<&Carry>,
+) -> Option<CommitIdHex> {
+    if plan.divergent || plan.recover.is_some() || plan.started_on.is_some() {
+        return None;
+    }
+    let now = reef_lib::jj::repo::view_wc_commit(head, name)?;
+    (now != plan.rewrite_of && entry.carry.take_move(unused, &plan.rewrite_of, &now)).then_some(now)
 }
 
 /// Refuses a root replaced by a symlink, which a scan would follow, taking

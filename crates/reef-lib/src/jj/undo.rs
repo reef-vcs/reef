@@ -154,8 +154,10 @@ struct Changed {
 /// Refuses an operation [`Repo::revert_operation`] never reverts: the root,
 /// a merge of concurrent operations, one that adds or forgets a jj
 /// workspace, a Reef workspace move, and one that changed git refs or
-/// git's `HEAD`.
-pub async fn undoable(op: &Operation) -> Result<(), UndoError> {
+/// git's `HEAD`. One that records lifecycle transitions is reverted only
+/// `with_transitions`: by the daemon, recording their inverse in the same
+/// operation.
+pub async fn undoable(op: &Operation, with_transitions: bool) -> Result<(), UndoError> {
     let refuse = |why| {
         Err(UndoError::NotUndoable {
             op: OperationIdHex::of(op.id()),
@@ -197,10 +199,11 @@ pub async fn undoable(op: &Operation) -> Result<(), UndoError> {
     }
     // The daemon reverts a lifecycle transition in its own rows (R3.09); a
     // view revert would leave them as they are.
-    if op
-        .metadata()
-        .attributes
-        .contains_key(super::oplog::ATTR_LIFECYCLE)
+    if !with_transitions
+        && op
+            .metadata()
+            .attributes
+            .contains_key(super::oplog::ATTR_LIFECYCLE)
     {
         return refuse("it records a lifecycle transition, which only the daemon undoes");
     }
@@ -250,9 +253,10 @@ const GIT_REMOTE: &str = "git";
 async fn load_revertible(
     head: &ReadonlyRepo,
     op_id: &OperationIdHex,
+    with_transitions: bool,
 ) -> Result<Operation, UndoError> {
     let op = head.loader().load_operation(&op_id.to_id()).await?;
-    undoable(&op).await?;
+    undoable(&op, with_transitions).await?;
     let common = closest_common_ancestors([op.clone()], [head.operation().clone()]).await?;
     if !matches!(common.as_slice(), [only] if only.id() == op.id()) {
         return Err(UndoError::NotInHistory(op_id.clone()));
@@ -403,14 +407,16 @@ async fn moved_since(head: &ReadonlyRepo, changed: &Changed) -> Result<Option<St
 }
 
 /// Plans reverting `op_id` at `head`: refuses an operation that is not
-/// [`undoable`] or not in the head's history, and lists the workspaces the
-/// revert would move. Whether it is superseded is checked when it is
-/// written, after the caller has snapshotted those workspaces.
+/// [`undoable`] (`with_transitions`) or not in the head's history, and
+/// lists the workspaces the revert would move. Whether it is superseded is
+/// checked when it is written, after the caller has snapshotted those
+/// workspaces.
 pub async fn plan_revert(
     head: &Arc<ReadonlyRepo>,
     op_id: &OperationIdHex,
+    with_transitions: bool,
 ) -> Result<RevertPlan, UndoError> {
-    let op = load_revertible(head, op_id).await?;
+    let op = load_revertible(head, op_id, with_transitions).await?;
     let changed = changed(head, op).await?;
     let mut workspaces: BTreeSet<String> = changed
         .working_copies
@@ -446,7 +452,8 @@ impl Repo {
     /// stay. Returns the new operation, `None` when there was nothing to
     /// revert.
     ///
-    /// Refuses an operation that is not [`undoable`], not in the head's
+    /// Refuses an operation that is not [`undoable`] (with transitions when
+    /// `meta` records some), not in the head's
     /// history ([`UndoError::NotInHistory`]), or superseded: something it
     /// changed has changed again since ([`UndoError::Superseded`]), where
     /// `jj op revert` would merge, usually leaving changes divergent.
@@ -456,7 +463,7 @@ impl Repo {
         op_id: &OperationIdHex,
         meta: &OpMeta,
     ) -> Result<Option<OperationIdHex>, UndoError> {
-        let op = load_revertible(&self.repo, op_id).await?;
+        let op = load_revertible(&self.repo, op_id, !meta.transitions.is_empty()).await?;
         let changed = changed(&self.repo, op).await?;
         if let Some(what) = moved_since(&self.repo, &changed).await? {
             return Err(UndoError::Superseded {

@@ -39,7 +39,7 @@ use reef_lib::jj::repo::ReadError;
 use reef_lib::jj::snapshot::{Carry, SnapshotError};
 use reef_lib::jj::workspace::{CommitLookupError, ResetError};
 use reef_lib::jj::{
-    CheckoutSummary, CheckoutTreeError, CreateWorkspaceError, ForgetWorkspaceError,
+    CheckoutSummary, CheckoutTreeError, CommitIdHex, CreateWorkspaceError, ForgetWorkspaceError,
     ImportRefsError, MovePointerError, OpKind, OpMeta, OpenError, Repo, ResolveError,
 };
 use reef_lib::spec::SpecError;
@@ -135,9 +135,40 @@ pub struct ScanMark {
 pub struct CarrySlot(Mutex<Option<Carry>>);
 
 impl CarrySlot {
-    /// Hands `carry` to the workspace's next snapshot, replacing any.
+    /// Hands `carry` to the workspace's next snapshot. A pending carry that
+    /// ends where it starts, or starts where it ends, is joined with it
+    /// (#91: two ancestor snapshots before the follow); any other is
+    /// replaced.
     pub(crate) fn set(&self, carry: Carry) {
-        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = Some(carry);
+        let mut slot = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        *slot = Some(match slot.take() {
+            Some(pending) => join(&pending, &carry).unwrap_or(carry),
+            None => carry,
+        });
+    }
+
+    /// Whether a carry moves `from`, the commit a snapshot rewrites, to
+    /// `to`, the view's commit now: an ancestor's snapshot rebased it while
+    /// the snapshot scanned. The carry is the pending one, `unused` (the one
+    /// the snapshot took and did not use), or the two joined; a pending one
+    /// it is, or joins, is taken.
+    pub(crate) fn take_move(
+        &self,
+        unused: Option<&Carry>,
+        from: &CommitIdHex,
+        to: &CommitIdHex,
+    ) -> bool {
+        let moves = |carry: &Carry| &carry.from == from && &carry.to == to;
+        let mut slot = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let joined = match (unused, slot.as_ref()) {
+            (Some(unused), Some(pending)) => join(unused, pending),
+            _ => None,
+        };
+        if joined.as_ref().is_some_and(moves) || slot.as_ref().is_some_and(moves) {
+            *slot = None;
+            return true;
+        }
+        unused.is_some_and(moves)
     }
 
     /// Whether a write left a carry.
@@ -153,14 +184,32 @@ impl CarrySlot {
         self.0.lock().unwrap_or_else(PoisonError::into_inner).take()
     }
 
-    /// Puts back a carry a snapshot took and did not use, unless a newer
-    /// one was set meanwhile.
+    /// Puts back a carry a snapshot took and did not use, joined with one
+    /// set meanwhile that continues it; a newer one that does not stands.
     pub(crate) fn restore(&self, carry: Carry) {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get_or_insert(carry);
+        let mut slot = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        *slot = Some(match slot.take() {
+            Some(newer) => join(&carry, &newer).unwrap_or(newer),
+            None => carry,
+        });
     }
+}
+
+/// `a` and `b` as one carry, when one ends where the other starts: from the
+/// first's `from`, with its base, to the second's `to`.
+fn join(a: &Carry, b: &Carry) -> Option<Carry> {
+    let (first, second) = if a.to == b.from {
+        (a, b)
+    } else if b.to == a.from {
+        (b, a)
+    } else {
+        return None;
+    };
+    Some(Carry {
+        from: first.from.clone(),
+        to: second.to.clone(),
+        base: first.base.clone(),
+    })
 }
 
 /// The parts of a workspace's spec its snapshots and watcher apply, from
@@ -786,16 +835,54 @@ pub(crate) fn gone_advice(id: WorkspaceId, state: WorkspaceState, repo: RepoId) 
 
 #[cfg(test)]
 mod carry_slot_tests {
-    use reef_lib::jj::CommitIdHex;
-
     use super::*;
 
     fn carry(to: &str) -> Carry {
+        moving("aa", to)
+    }
+
+    fn moving(from: &str, to: &str) -> Carry {
         Carry {
-            from: "aa".parse::<CommitIdHex>().unwrap(),
+            from: from.parse::<CommitIdHex>().unwrap(),
             to: to.parse::<CommitIdHex>().unwrap(),
             base: None,
         }
+    }
+
+    // #91: two ancestor snapshots before the follow takes the first carry.
+    #[test]
+    fn carries_that_continue_each_other_join() {
+        let slot = CarrySlot::default();
+        slot.set(moving("a0", "a1"));
+        slot.set(moving("a1", "a2"));
+        assert_eq!(slot.take(), Some(moving("a0", "a2")));
+        // A snapshot that took the first gives it back after the second.
+        let taken = moving("a0", "a1");
+        slot.set(moving("a1", "a2"));
+        slot.restore(taken);
+        assert_eq!(slot.take(), Some(moving("a0", "a2")));
+        // A failed check-out's carry ends where the pending one starts.
+        slot.set(moving("a2", "a3"));
+        slot.set(moving("a0", "a2"));
+        assert_eq!(slot.take(), Some(moving("a0", "a3")));
+    }
+
+    #[test]
+    fn take_move_joins_the_unused_carry_and_leaves_others() {
+        let id = |hex: &str| hex.parse::<CommitIdHex>().unwrap();
+        let slot = CarrySlot::default();
+        let unused = moving("b0", "b1");
+        slot.set(moving("b1", "b2"));
+        assert!(!slot.take_move(Some(&unused), &id("b0"), &id("b9")));
+        assert!(slot.is_set(), "a carry that does not match stays");
+        assert!(slot.take_move(Some(&unused), &id("b0"), &id("b2")));
+        assert!(!slot.is_set(), "the joined pending carry is taken");
+        slot.set(moving("b1", "b2"));
+        assert!(slot.take_move(Some(&unused), &id("b1"), &id("b2")));
+        assert!(!slot.is_set(), "the pending carry alone is taken");
+        slot.set(moving("c1", "c2"));
+        assert!(slot.take_move(Some(&unused), &id("b0"), &id("b1")));
+        assert!(slot.is_set(), "an unrelated pending carry stays");
     }
 
     #[test]

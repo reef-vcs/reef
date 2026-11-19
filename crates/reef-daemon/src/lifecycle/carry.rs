@@ -20,12 +20,14 @@
 //! the visible commit, so a look after a crash does the same thing again,
 //! and one after the carry finds nothing to do.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Weak};
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::Duration;
 
 use reef_lib::error::ErrorChain;
-use reef_lib::jj::lifecycle::{DependencyEvent, LifecycleState, TransitionCause, carries};
+use reef_lib::jj::lifecycle::{
+    DependencyEvent, LifecycleState, NotCarried, TransitionCause, Verdicts as Known, carries,
+};
 use reef_lib::jj::{ChangeIdHex, CommitIdHex, OpKind, OpMeta};
 
 use super::{Actor, LifecycleError, Planned, record};
@@ -107,6 +109,79 @@ async fn look(state: &Arc<AppState>, seen: &mut HashMap<RepoId, String>) {
     }
 }
 
+/// A superseded change and its successor.
+pub(crate) type Renamed = Vec<(ChangeIdHex, ChangeIdHex)>;
+
+/// Each repository's carry checks that did not carry, known while its
+/// superseded changes stay the same: the carry follower and the
+/// missing-dependency reads check each pair of a recorded and a visible
+/// commit once (S-247), so the checks that can still carry are never
+/// starved, and a collected commit is logged once.
+#[derive(Debug, Default)]
+pub(crate) struct Verdicts(Mutex<HashMap<RepoId, (Renamed, Known)>>);
+
+impl Verdicts {
+    /// `repo`'s known verdicts under `renamed`; none when `renamed`
+    /// changed since they were reached.
+    pub(crate) fn known(&self, repo: RepoId, renamed: &Renamed) -> Known {
+        let mut all = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let entry = all.entry(repo).or_default();
+        if &entry.0 != renamed {
+            *entry = (renamed.clone(), Known::new());
+        }
+        entry.1.clone()
+    }
+
+    /// Adds `found`, reached under `renamed`, logging each collected
+    /// recorded commit once. With `current`, every pair a full look saw,
+    /// forgets the others.
+    pub(crate) fn remember(
+        &self,
+        repo: RepoId,
+        renamed: &Renamed,
+        found: Vec<(ChangeIdHex, (CommitIdHex, CommitIdHex), NotCarried)>,
+        current: Option<&HashSet<(CommitIdHex, CommitIdHex)>>,
+    ) {
+        let mut all = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let entry = all.entry(repo).or_default();
+        if &entry.0 != renamed {
+            return;
+        }
+        if let Some(current) = current {
+            entry.1.retain(|pair, _| current.contains(pair));
+        }
+        for (change, pair, not) in found {
+            if not == NotCarried::Gone && !entry.1.contains_key(&pair) {
+                tracing::warn!(%repo, change_id = %change, commit_id = %pair.0, "a proposal's recorded commit was collected; it is not carried, and does not hold the changes above it");
+            }
+            entry.1.insert(pair, not);
+        }
+    }
+}
+
+/// `repo`'s superseded changes with their successors.
+pub(crate) fn renamed(state: &AppState, repo: RepoId) -> Result<Renamed, LifecycleError> {
+    let superseded = state.db.lifecycle_page(
+        repo,
+        &LifecycleFilter {
+            states: vec![LifecycleState::Superseded.as_str().to_owned()],
+            changes: Vec::new(),
+            agents: Vec::new(),
+        },
+        None,
+        1000,
+    )?;
+    Ok(superseded
+        .iter()
+        .filter_map(|row| {
+            Some((
+                row.change_id.parse().ok()?,
+                row.superseded_by.as_ref()?.parse().ok()?,
+            ))
+        })
+        .collect())
+}
+
 /// What [`carry`] did.
 #[derive(Debug, Default)]
 pub(crate) struct Carry {
@@ -117,13 +192,26 @@ pub(crate) struct Carry {
 }
 
 /// Carries every proposal of `repo` (of `only`, when given: full change
-/// ids) whose change moved onto new commits of the same parent changes
-/// with its own diff unchanged, in one operation. Takes the repository's
-/// create lock shared and its lifecycle lock; the caller holds neither.
+/// ids, with no limit on the checks) whose change moved onto new commits of
+/// the same parent changes with its own diff unchanged, in one operation.
+/// Takes the repository's create lock shared and its lifecycle lock; the
+/// caller holds neither.
 pub(crate) async fn carry(
     state: &Arc<AppState>,
     repo: RepoId,
     only: Option<&[String]>,
+) -> Result<Carry, LifecycleError> {
+    carry_because(state, repo, only, None).await
+}
+
+/// [`carry`], each carry naming `because`, the change below and what
+/// happened, when given: a supersede names its successor for every
+/// dependent it moved, its children's children too.
+pub(crate) async fn carry_because(
+    state: &Arc<AppState>,
+    repo: RepoId,
+    only: Option<&[String]>,
+    because: Option<(&str, DependencyEvent)>,
 ) -> Result<Carry, LifecycleError> {
     if only.is_some_and(<[String]>::is_empty) {
         return Ok(Carry::default());
@@ -156,35 +244,32 @@ pub(crate) async fn carry(
         .filter_map(|row| Some((row.change_id.parse().ok()?, row.commit_id.parse().ok()?)))
         .collect();
     // A superseded parent's dependents moved onto its successor (R3.11).
-    let superseded = state.db.lifecycle_page(
-        repo,
-        &LifecycleFilter {
-            states: vec![LifecycleState::Superseded.as_str().to_owned()],
-            changes: Vec::new(),
-            agents: Vec::new(),
-        },
-        None,
-        1000,
-    )?;
-    let renamed: Vec<(ChangeIdHex, ChangeIdHex)> = superseded
-        .iter()
-        .filter_map(|row| {
-            Some((
-                row.change_id.parse().ok()?,
-                row.superseded_by.as_ref()?.parse().ok()?,
-            ))
-        })
-        .collect();
+    let renamed = renamed(state, repo)?;
+    let known = state.lifecycle.verdicts.known(repo, &renamed);
     let handle = state.manager.handle(repo)?;
-    let found = state
-        .reads
-        .run(&handle, move || async move {
-            carries(&tip, &proposals, &renamed, MAX_CHECKS).await
-        })
-        .await
-        .map_err(|error| LifecycleError::Read(ErrorChain(&error).to_string()))?
-        .map_err(|error| LifecycleError::Read(ErrorChain(&error).to_string()))?;
+    let max = if only.is_some() {
+        usize::MAX
+    } else {
+        MAX_CHECKS
+    };
+    let found = {
+        let renamed = renamed.clone();
+        state
+            .reads
+            .run(&handle, move || async move {
+                carries(&tip, &proposals, &renamed, &known, max).await
+            })
+            .await
+            .map_err(|error| LifecycleError::Read(ErrorChain(&error).to_string()))?
+            .map_err(|error| LifecycleError::Read(ErrorChain(&error).to_string()))?
+    };
     let more = found.more;
+    let current: Option<HashSet<_>> =
+        (only.is_none() && !more).then(|| found.moved.iter().cloned().collect());
+    state
+        .lifecycle
+        .verdicts
+        .remember(repo, &renamed, found.verdicts, current.as_ref());
     // A rewrite below them left these conflicted: their owners are told
     // (R3.11, decision 5), once per change, commit and text.
     for conflicted in &found.conflicted {
@@ -209,7 +294,7 @@ pub(crate) async fn carry(
             more,
         });
     }
-    record_carries(state, repo, &rows, &found, more).await
+    record_carries(state, repo, (&rows, because), &found, more).await
 }
 
 /// Records the carries of `found`, read from `rows`, each checked again
@@ -217,7 +302,7 @@ pub(crate) async fn carry(
 async fn record_carries(
     state: &Arc<AppState>,
     repo: RepoId,
-    rows: &[crate::db::LifecycleRow],
+    (rows, because): (&[crate::db::LifecycleRow], Option<(&str, DependencyEvent)>),
     found: &[reef_lib::jj::lifecycle::Carried],
     more: bool,
 ) -> Result<Carry, LifecycleError> {
@@ -225,6 +310,53 @@ async fn record_carries(
     let _shared = create_lock.read_owned().await;
     let lifecycle_lock = state.lifecycle.lock(repo);
     let _held = lifecycle_lock.lock().await;
+    // What each carry names: the parent change that moved, and what
+    // happened to it.
+    let mut causes: HashMap<&str, (String, DependencyEvent)> = HashMap::new();
+    for carried in found {
+        let Some(moved) = carried.moved.first() else {
+            continue;
+        };
+        let cause = if let Some((change, event)) = because {
+            (change.to_owned(), event)
+        } else {
+            let landed = state
+                .db
+                .lifecycle_row(repo, moved.as_str())?
+                .is_some_and(|row| row.state == LifecycleState::Landed.as_str());
+            let event = if carried.renamed {
+                DependencyEvent::Superseded
+            } else if landed {
+                DependencyEvent::Landed
+            } else {
+                DependencyEvent::Amended
+            };
+            (moved.to_string(), event)
+        };
+        causes.insert(carried.change.as_str(), cause);
+    }
+    // A supersede's children's children, carried in the same look, name
+    // the successor as its children do, whichever carries them first.
+    for _ in 0..found.len() {
+        let mut inherited = false;
+        for carried in found {
+            let parent = carried
+                .moved
+                .first()
+                .and_then(|moved| causes.get(moved.as_str()))
+                .filter(|(_, event)| *event == DependencyEvent::Superseded)
+                .cloned();
+            if let Some(parent) = parent
+                && causes.get(carried.change.as_str()) != Some(&parent)
+            {
+                causes.insert(carried.change.as_str(), parent);
+                inherited = true;
+            }
+        }
+        if !inherited {
+            break;
+        }
+    }
     let mut planned = Vec::new();
     for carried in found {
         let Some(row) = state.db.lifecycle_row(repo, carried.change.as_str())? else {
@@ -238,28 +370,11 @@ async fn record_carries(
         if !CARRIED.contains(&row.state.as_str()) || Some(row.commit_id.as_str()) != recorded {
             continue;
         }
-        let Some(dependency) = carried.moved.first() else {
+        let Some((dependency, event)) = causes.get(carried.change.as_str()) else {
             continue;
         };
-        let landed = state
-            .db
-            .lifecycle_row(repo, dependency.as_str())?
-            .is_some_and(|row| row.state == LifecycleState::Landed.as_str());
-        let event = if carried.renamed {
-            DependencyEvent::Superseded
-        } else if landed {
-            DependencyEvent::Landed
-        } else {
-            DependencyEvent::Amended
-        };
         planned.push(Planned {
-            row: carry_row(
-                repo,
-                &row,
-                carried.visible.as_str(),
-                dependency.as_str(),
-                event,
-            ),
+            row: carry_row(repo, &row, carried.visible.as_str(), dependency, *event),
             owner: None,
         });
     }

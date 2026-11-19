@@ -1306,11 +1306,6 @@ pub async fn land_change(
     }
     let started = Instant::now();
     let wait = request.wait;
-    // A dependent whose dependency was just rewritten is carried before the
-    // gate reads it (R3.11), so it is not refused as amended.
-    if let Err(error) = crate::lifecycle::carry::carry(state, request.repo, None).await {
-        tracing::warn!(error = %ErrorChain(&error), "cannot carry proposals before a landing; the gate reads them as they are");
-    }
     let info = {
         let request = request.clone();
         state
@@ -1480,7 +1475,10 @@ pub(crate) enum Gate {
 /// proposed at its visible commit, and its stack below it (R3.10) proposed
 /// for the same destination; each is judged in order, rebased onto the ones
 /// below ([`judge_slots`]).
-pub(crate) async fn decide(state: &AppState, request: &LandRequest) -> Result<Gate, LandingError> {
+pub(crate) async fn decide(
+    state: &Arc<AppState>,
+    request: &LandRequest,
+) -> Result<Gate, LandingError> {
     let repo = request.repo;
     let handle = state.manager.handle(repo)?;
     let info = {
@@ -1491,6 +1489,7 @@ pub(crate) async fn decide(state: &AppState, request: &LandRequest) -> Result<Ga
     };
     let change = info.change_id.as_str().to_owned();
     let commit = info.commit_id.clone();
+    carry_stack(state, repo, &info).await?;
     let row = state.db.lifecycle_row(repo, &change)?;
     let current = row
         .as_ref()
@@ -1722,7 +1721,7 @@ pub(crate) async fn judge_slots(
 /// The gate: [`decide`], then its writes: a refusal of a change landed alone
 /// is a blocked row, and a stack's passing prefix is queued in one operation
 /// with the rest blocked.
-async fn gate(state: &AppState, request: LandRequest) -> Result<LandOutcome, LandingError> {
+async fn gate(state: &Arc<AppState>, request: LandRequest) -> Result<LandOutcome, LandingError> {
     match decide(state, &request).await? {
         Gate::Queued(outcome) => Ok(*outcome),
         Gate::Judged(judgment) => write(state, request, *judgment).await,
@@ -1848,6 +1847,34 @@ fn queued_outcome(
     })
 }
 
+/// Carries `info`'s change and the members of its stack across the
+/// rewrites below them (R3.11) before the gate reads their rows: a
+/// dependent whose dependency was just rewritten is not refused as amended,
+/// and a declined member rebased by one still counts as declined. Only its
+/// own members, so no other proposal waiting for the carry follower delays
+/// them (S-247).
+async fn carry_stack(
+    state: &Arc<AppState>,
+    repo: RepoId,
+    info: &ChangeInfo,
+) -> Result<(), LandingError> {
+    let change = info.change_id.as_str();
+    let mut only = vec![change.to_owned()];
+    if let Some(destination) = state
+        .db
+        .lifecycle_row(repo, change)?
+        .and_then(|row| row.destination)
+        .filter(|destination| !destination.contains('@'))
+        && let Ok(members) = read_stack(state, repo, info, &destination).await
+    {
+        only.extend(members.iter().map(|member| member.change.to_string()));
+    }
+    if let Err(error) = crate::lifecycle::carry::carry(state, repo, Some(&only)).await {
+        tracing::warn!(error = %ErrorChain(&error), "cannot carry a stack before its landing; the gate reads it as it is");
+    }
+    Ok(())
+}
+
 /// `info`'s stack onto `destination`'s head (R3.10), read on the
 /// repository thread.
 async fn read_stack(
@@ -1922,7 +1949,7 @@ fn left_review(
         }),
         change,
         state,
-        transition: row.transition_id.clone(),
+        transition: crate::lifecycle::dependents::left_transition(app, repo, row),
     }
 }
 

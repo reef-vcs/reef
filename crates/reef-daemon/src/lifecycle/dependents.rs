@@ -77,6 +77,22 @@ pub(crate) fn move_off(
     (above.change.clone(), onto)
 }
 
+/// The transition that took `row`'s change out of review: its latest one
+/// other than a carry across a rewrite below it (R3.11), which moves the
+/// row but is not a new decline.
+pub(crate) fn left_transition(state: &AppState, repo: RepoId, row: &LifecycleRow) -> String {
+    state
+        .db
+        .last_transition(
+            repo,
+            &row.change_id,
+            reef_lib::jj::lifecycle::TransitionCause::Dependency.as_str(),
+        )
+        .ok()
+        .flatten()
+        .map_or_else(|| row.transition_id.clone(), |transition| transition.id)
+}
+
 /// Whether `row` left review at `commit`: declined or withdrawn, and not
 /// revised since. The carry follower moves a declined or withdrawn row's
 /// commit along a rebase by a rewrite below it, so only its owner's own
@@ -86,6 +102,49 @@ pub(crate) fn left_review(row: &LifecycleRow, commit: &str) -> Option<LifecycleS
     (matches!(state, LifecycleState::Declined | LifecycleState::Withdrawn)
         && row.commit_id == commit)
         .then_some(state)
+}
+
+/// Whether `row` is still out of review at `commit`, its change's visible
+/// commit: [`left_review`], or declined or withdrawn at a commit that a
+/// rewrite below it rebased to `commit` with its own diff unchanged
+/// ([`carry_check`](reef_lib::jj::lifecycle::carry_check)). The stack
+/// proposal's gate reads this under the lifecycle lock, so it never waits
+/// for the carry follower (S-245, S-247). A check that cannot be read, or
+/// whose recorded commit was collected, counts as still out: proposing the
+/// member alone (`--only`) puts it back on purpose.
+pub(crate) async fn still_left(
+    state: &AppState,
+    repo: RepoId,
+    row: &LifecycleRow,
+    commit: &str,
+) -> Option<LifecycleState> {
+    use reef_lib::jj::lifecycle::{CarryCheck, NotCarried, carry_check};
+    let left: LifecycleState = row.state.parse().ok()?;
+    if !matches!(left, LifecycleState::Declined | LifecycleState::Withdrawn) {
+        return None;
+    }
+    if row.commit_id == commit {
+        return Some(left);
+    }
+    let read = async {
+        let recorded: reef_lib::jj::CommitIdHex = row.commit_id.parse().ok()?;
+        let visible: reef_lib::jj::CommitIdHex = commit.parse().ok()?;
+        let renamed = super::carry::renamed(state, repo).ok()?;
+        let tip = state.events.tip(repo)?;
+        let handle = state.manager.handle(repo).ok()?;
+        state
+            .reads
+            .run(&handle, move || async move {
+                carry_check(&tip, &recorded, &visible, &renamed).await
+            })
+            .await
+            .ok()?
+            .ok()
+    };
+    match read.await {
+        Some(CarryCheck::Not(NotCarried::Gone) | CarryCheck::Carried { .. }) | None => Some(left),
+        Some(CarryCheck::Not(_)) => None,
+    }
 }
 
 /// The lowest member below the head (the last link) that left review, with
@@ -120,36 +179,52 @@ pub(crate) fn missing(
     })
 }
 
+/// What [`stacks`] read.
+#[derive(Debug, Default)]
+pub(crate) struct Stacks {
+    /// Each head's links, bottom first, the head last.
+    pub links: HashMap<String, Vec<Link>>,
+    /// The heads whose stack could not be read: a read failed, the
+    /// destination is gone, or the stack is too large. What sits below them
+    /// is not known.
+    pub unread: HashSet<String>,
+}
+
 /// The stack of each of `heads` (change and destination bookmark): its
-/// links bottom first, the head last. A change with no visible commit, a
-/// destination that is gone, or a stack too large is left out; `None` when
-/// the read failed.
+/// links bottom first, the head last. A change with no visible commit has
+/// none; `None` when the read failed.
 pub(crate) async fn stacks(
     state: &AppState,
     repo: RepoId,
     heads: Vec<(String, String)>,
-) -> Option<HashMap<String, Vec<Link>>> {
+) -> Option<Stacks> {
     if heads.is_empty() {
-        return Some(HashMap::new());
+        return Some(Stacks::default());
     }
     let tip = state.events.tip(repo)?;
     let handle = state.manager.handle(repo).ok()?;
     let read = state
         .reads
         .run(&handle, move || async move {
-            let mut found = HashMap::new();
+            let mut found = Stacks::default();
             for (change, bookmark) in heads {
                 let Ok(id) = change.parse::<ChangeIdHex>() else {
                     continue;
                 };
-                let Ok(Some(visible)) = reef_lib::jj::assignment::visible_commit(&tip, &id).await
-                else {
-                    continue;
+                let visible = match reef_lib::jj::assignment::visible_commit(&tip, &id).await {
+                    Ok(Some(visible)) => visible,
+                    Ok(None) => continue,
+                    Err(_) => {
+                        found.unread.insert(change);
+                        continue;
+                    }
                 };
-                let Ok(destination) = land::destination_head(&tip, &bookmark) else {
-                    continue;
+                let members = match land::destination_head(&tip, &bookmark) {
+                    Ok(destination) => land::stack(&tip, &visible.commit, &destination).await,
+                    Err(error) => Err(error),
                 };
-                let Ok(members) = land::stack(&tip, &visible.commit, &destination).await else {
+                let Ok(members) = members else {
+                    found.unread.insert(change);
                     continue;
                 };
                 let links: Vec<Link> = members
@@ -160,7 +235,7 @@ pub(crate) async fn stacks(
                         parents: member.parents.iter().map(ToString::to_string).collect(),
                     })
                     .collect();
-                found.insert(change, links);
+                found.links.insert(change, links);
             }
             found
         })
@@ -174,14 +249,52 @@ pub(crate) async fn stacks(
     }
 }
 
+/// What [`above_left`] found, by change id.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct AboveLeft {
+    /// The proposals with a change below them still out of review.
+    above: HashSet<String>,
+    /// Those changes.
+    still: HashSet<String>,
+    /// The proposals it could not read (divergent ones).
+    unread: HashSet<String>,
+}
+
+/// Each repository's last [`above_left`] answer, with a digest of the
+/// operation and the rows it read: `reef here`, `ListConflicts` and the
+/// followers read it at the same operation, and it costs one read of each
+/// declined or withdrawn change, a merge for one a rewrite below moved.
+#[derive(Debug, Default)]
+pub(crate) struct AboveCache(std::sync::Mutex<HashMap<RepoId, (u64, AboveLeft)>>);
+
+impl AboveCache {
+    fn get(&self, repo: RepoId, key: u64) -> Option<AboveLeft> {
+        let all = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        all.get(&repo)
+            .filter(|(known, _)| *known == key)
+            .map(|(_, found)| found.clone())
+    }
+
+    fn put(&self, repo: RepoId, key: u64, found: &AboveLeft) {
+        let mut all = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        all.insert(repo, (key, found.clone()));
+    }
+}
+
 /// Of `open`, the proposals with a change of `left` below them still out
-/// of review, and those changes, by change id; `None` when the read fails.
+/// of review, and those changes; `None` when the read fails.
 async fn above_left(
     state: &AppState,
     repo: RepoId,
     open: &[LifecycleRow],
     left: &[LifecycleRow],
-) -> Option<(HashSet<String>, HashSet<String>)> {
+) -> Option<AboveLeft> {
     let heads: Vec<ChangeIdHex> = open
         .iter()
         .filter_map(|row| row.change_id.parse().ok())
@@ -191,16 +304,40 @@ async fn above_left(
         .filter_map(|row| Some((row.change_id.parse().ok()?, row.commit_id.parse().ok()?)))
         .collect();
     if heads.is_empty() || left.is_empty() {
-        return Some((HashSet::new(), HashSet::new()));
+        return Some(AboveLeft::default());
     }
     let tip = state.events.tip(repo)?;
     let handle = state.manager.handle(repo).ok()?;
-    let read = state
-        .reads
-        .run(&handle, move || async move {
-            reef_lib::jj::lifecycle::above_any(&tip, &heads, &left).await
-        })
-        .await;
+    let renamed = match super::carry::renamed(state, repo) {
+        Ok(renamed) => renamed,
+        Err(error) => {
+            tracing::warn!(%repo, error = %ErrorChain(&error), "cannot read superseded changes");
+            return None;
+        }
+    };
+    let key = {
+        use std::hash::{Hash as _, Hasher as _};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        reef_lib::jj::oplog::entry(tip.operation())
+            .id
+            .as_str()
+            .hash(&mut hasher);
+        (&heads, &left, &renamed).hash(&mut hasher);
+        hasher.finish()
+    };
+    if let Some(found) = state.lifecycle.above.get(repo, key) {
+        return Some(found);
+    }
+    let known = state.lifecycle.verdicts.known(repo, &renamed);
+    let read = {
+        let renamed = renamed.clone();
+        state
+            .reads
+            .run(&handle, move || async move {
+                reef_lib::jj::lifecycle::above_any(&tip, &heads, &left, (&renamed, &known)).await
+            })
+            .await
+    };
     let found = match read {
         Ok(Ok(found)) => found,
         Ok(Err(error)) => {
@@ -212,14 +349,21 @@ async fn above_left(
             return None;
         }
     };
-    Some((
-        found.heads.iter().map(ToString::to_string).collect(),
-        found
+    state
+        .lifecycle
+        .verdicts
+        .remember(repo, &renamed, found.verdicts, None);
+    let found = AboveLeft {
+        above: found.heads.iter().map(ToString::to_string).collect(),
+        still: found
             .left
             .iter()
             .map(|(change, _)| change.to_string())
             .collect(),
-    ))
+        unread: found.unread.iter().map(ToString::to_string).collect(),
+    };
+    state.lifecycle.above.put(repo, key, &found);
+    Some(found)
 }
 
 /// The lifecycle rows of every change of `stacks`, by change.
@@ -248,18 +392,32 @@ pub(crate) async fn held(
     repo: RepoId,
     only: Option<&[String]>,
 ) -> HashMap<String, (Missing, LifecycleRow)> {
-    try_held(state, repo, only).await.unwrap_or_default()
+    try_held(state, repo, only)
+        .await
+        .map(|held| held.held)
+        .unwrap_or_default()
 }
 
-/// [`held`], or `None` when a read failed, so the assignment follower
-/// closes nothing on a failure (R3.11). A repository with no declined or
-/// withdrawn change costs one query; otherwise one index read decides which
-/// proposals sit above one, and only their stacks are read.
+/// What [`try_held`] read.
+#[derive(Debug, Default)]
+pub(crate) struct Held {
+    /// Each open proposal held, with the lowest member that left review.
+    pub held: HashMap<String, (Missing, LifecycleRow)>,
+    /// The open proposals it could not read: whether they are held is not
+    /// known.
+    pub unread: HashSet<String>,
+}
+
+/// [`held`], with the proposals it could not read, or `None` when a read
+/// failed, so the assignment follower closes nothing it could not read
+/// (R3.11). A repository with no declined or withdrawn change costs one
+/// query; otherwise one index read decides which proposals sit above one,
+/// and only their stacks are read.
 pub(crate) async fn try_held(
     state: &AppState,
     repo: RepoId,
     only: Option<&[String]>,
-) -> Option<HashMap<String, (Missing, LifecycleRow)>> {
+) -> Option<Held> {
     let filter = |states: &[LifecycleState]| crate::db::LifecycleFilter {
         states: states
             .iter()
@@ -273,7 +431,7 @@ pub(crate) async fn try_held(
         ..filter(&[LifecycleState::Declined, LifecycleState::Withdrawn])
     };
     let left = match state.db.lifecycle_page(repo, &left, None, 1000) {
-        Ok(rows) if rows.is_empty() => return Some(HashMap::new()),
+        Ok(rows) if rows.is_empty() => return Some(Held::default()),
         Ok(rows) => rows,
         Err(error) => {
             tracing::warn!(%repo, error = %ErrorChain(&error), "cannot read declined proposals");
@@ -299,7 +457,11 @@ pub(crate) async fn try_held(
     // Only proposals above a change still at the commit it left review at
     // need their stack read: most withdrawn changes were revised or are
     // gone.
-    let (above, still) = above_left(state, repo, &open, &left).await?;
+    let AboveLeft {
+        above,
+        still,
+        mut unread,
+    } = above_left(state, repo, &open, &left).await?;
     let open: Vec<LifecycleRow> = open
         .into_iter()
         .filter(|row| above.contains(&row.change_id))
@@ -309,17 +471,21 @@ pub(crate) async fn try_held(
         .filter_map(|row| Some((row.change_id.clone(), row.destination.clone()?)))
         .collect();
     let stacks = stacks(state, repo, heads).await?;
-    let rows = rows_of(state, repo, &stacks);
-    Some(
-        open.into_iter()
-            .filter_map(|row| {
-                let links = stacks.get(&row.change_id)?;
-                let bookmark = row.destination.clone().unwrap_or_default();
-                let missing = missing(links, &rows, &still, &bookmark)?;
-                Some((row.change_id.clone(), (missing, row)))
-            })
-            .collect(),
-    )
+    let rows = rows_of(state, repo, &stacks.links);
+    unread.extend(stacks.unread);
+    let held = open
+        .into_iter()
+        .filter_map(|row| {
+            let links = stacks.links.get(&row.change_id)?;
+            let bookmark = row.destination.clone().unwrap_or_default();
+            let mut missing = missing(links, &rows, &still, &bookmark)?;
+            if let Some(left) = rows.get(&missing.change) {
+                missing.transition = left_transition(state, repo, left);
+            }
+            Some((row.change_id.clone(), (missing, row)))
+        })
+        .collect();
+    Some(Held { held, unread })
 }
 
 /// Each open proposal of `rows`' dependencies: the changes below it in its
@@ -337,7 +503,7 @@ pub(crate) async fn dependencies(
         })
         .filter_map(|row| Some((row.change_id.clone(), row.destination.clone()?)))
         .collect();
-    let stacks = stacks(state, repo, heads).await.unwrap_or_default();
+    let stacks = stacks(state, repo, heads).await.unwrap_or_default().links;
     let lifecycles = rows_of(state, repo, &stacks);
     stacks
         .into_iter()
@@ -438,13 +604,19 @@ pub(crate) async fn tell_missing(
             missing.onto.clone()
         }),
     );
+    // Told again when the dependency leaves review again.
+    let after = state
+        .db
+        .transition(repo, &missing.transition)
+        .ok()
+        .flatten()
+        .and_then(|row| row.recorded_at);
     crate::landing::instruct::write(
         state,
         repo,
         dependent,
-        text,
-        String::new(),
-        super::carry::AGENT,
+        (text, String::new()),
+        (super::carry::AGENT, after),
         "missing dependency",
     )
     .await;
@@ -468,9 +640,8 @@ pub(crate) async fn tell_conflicted(
         state,
         repo,
         dependent,
-        text,
-        String::new(),
-        super::carry::AGENT,
+        (text, String::new()),
+        (super::carry::AGENT, None),
         "dependency conflict",
     )
     .await;

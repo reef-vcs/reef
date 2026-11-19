@@ -14,8 +14,8 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use reef_api::v1::{
@@ -25,6 +25,7 @@ use reef_api::v1::{
     TextReplace, UndoOperationRequest, create_workspace_request, edit_files_request, file_edit,
 };
 use reef_daemon::client::{Client, ClientError};
+use reef_daemon::snapshot::SnapshotOutcome;
 use reef_daemon::testing::{SyntheticRepo, TestDaemon, no_automatic_snapshots};
 use reef_testing::synth::Preset;
 use tonic::Code;
@@ -1621,6 +1622,287 @@ async fn descendant_of_a_busy_workspace_carries() {
     }
     assert!(!y_row.divergent, "{y_row:?}");
     assert_eq!(divergent_changes(client, &repo).await, Vec::<String>::new());
+    daemon.stop().await;
+}
+
+/// Snapshots `ws` held between its scan and its commit
+/// (`Scheduler::hold_commits`) while `meanwhile` runs; the snapshot's
+/// result.
+async fn held_at_commit(
+    daemon: &TestDaemon,
+    repo: &SyntheticRepo,
+    ws: &v1::Workspace,
+    meanwhile: impl Future<Output = ()>,
+) -> Result<(), ClientError> {
+    let scheduler = daemon.handle.state().manager.scheduler();
+    let hold = scheduler.hold_commits(ws.id.parse().unwrap()).await;
+    let task = {
+        let (client, repo, id) = (daemon.client.clone(), repo.id.clone(), ws.id.clone());
+        tokio::spawn(async move { client.snapshot_workspace(&repo, &id, "").await.map(drop) })
+    };
+    let begun = Instant::now();
+    while scheduler.held_commits() == 0 {
+        assert!(
+            begun.elapsed() < Duration::from_secs(30),
+            "the snapshot never reached its commit"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    meanwhile.await;
+    drop(hold);
+    task.await.unwrap()
+}
+
+/// Y's one visible commit, not divergent, with `paths` on disk and in it.
+async fn y_current(client: &Client, repo: &SyntheticRepo, y: &v1::Workspace, paths: &[&str]) {
+    let y_row = get(client, repo, y).await;
+    assert_eq!(y_row.change_id, y.change_id);
+    assert!(!y_row.divergent, "{y_row:?}");
+    assert_eq!(
+        change_commits(client, repo, &y.change_id).await,
+        std::slice::from_ref(&y_row.commit_id)
+    );
+    for path in paths {
+        assert!(read(y, path).is_some(), "{path} on disk");
+        assert!(
+            file(client, repo, &y_row.commit_id, path).await.is_some(),
+            "{path} in Y's commit"
+        );
+    }
+    assert_eq!(divergent_changes(client, repo).await, Vec::<String>::new());
+}
+
+// Issue #91 (second review, 1a): two ancestor snapshots before the busy
+// descendant's follow takes its carry join into one carry.
+#[tokio::test(flavor = "multi_thread")]
+async fn two_ancestor_snapshots_before_the_follow_carry_once() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let (x, y) = stacked(client, &repo).await;
+    // Y's clean snapshot waits after its scan, so the follow X's snapshots
+    // queue runs only after both, and Y's edit is not in that scan.
+    held_at_commit(&daemon, &repo, &y, async {
+        write(&y, "y-late.txt", "late\n");
+        write(&x, "x2.txt", "x2\n");
+        snapshot(client, &repo, &x).await;
+        write(&x, "x3.txt", "x3\n");
+        snapshot(client, &repo, &x).await;
+    })
+    .await
+    .unwrap();
+    eventually("Y's directory has X's second file", || {
+        read(&y, "x3.txt").is_some()
+    })
+    .await;
+    snapshot(client, &repo, &y).await;
+    y_current(
+        client,
+        &repo,
+        &y,
+        &["x.txt", "x2.txt", "x3.txt", "y.txt", "y-late.txt"],
+    )
+    .await;
+    daemon.stop().await;
+}
+
+// Issue #91 (second review, 1b): an ancestor's snapshot that rebases the
+// busy descendant's commit between the descendant's scan and its commit
+// is merged into that commit, in the same change.
+#[tokio::test(flavor = "multi_thread")]
+async fn ancestor_snapshot_between_scan_and_commit_merges() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let (x, y) = stacked(client, &repo).await;
+    write(&y, "y-late.txt", "late\n");
+    held_at_commit(&daemon, &repo, &y, async {
+        write(&x, "x2.txt", "x2\n");
+        snapshot(client, &repo, &x).await;
+    })
+    .await
+    .unwrap();
+    y_current(
+        client,
+        &repo,
+        &y,
+        &["x.txt", "x2.txt", "y.txt", "y-late.txt"],
+    )
+    .await;
+    assert_eq!(read(&y, "x2.txt").as_deref(), Some("x2\n"));
+    daemon.stop().await;
+}
+
+// Second review, 1b: where the scan and the rebase change the same lines,
+// the change gets jj's conflict, with markers on disk, and does not
+// diverge.
+#[tokio::test(flavor = "multi_thread")]
+async fn ancestor_snapshot_between_scan_and_commit_conflicts_in_the_change() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let (x, y) = stacked(client, &repo).await;
+    write(&y, "x.txt", "from y\n");
+    held_at_commit(&daemon, &repo, &y, async {
+        write(&x, "x.txt", "from x\n");
+        snapshot(client, &repo, &x).await;
+    })
+    .await
+    .unwrap();
+    y_current(client, &repo, &y, &["x.txt", "y.txt"]).await;
+    let on_disk = read(&y, "x.txt").unwrap();
+    assert!(
+        on_disk.contains("<<<<<<<") && on_disk.contains("from y") && on_disk.contains("from x"),
+        "{on_disk}"
+    );
+    daemon.stop().await;
+}
+
+// Second review, 1b: a file the rebase changed, edited in the descendant
+// after its scan, is not overwritten: the snapshot fails before its
+// check-out, and the next one merges the edit in.
+#[tokio::test(flavor = "multi_thread")]
+async fn ancestor_snapshot_between_scan_and_commit_keeps_an_edit_after_the_scan() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let (x, y) = stacked(client, &repo).await;
+    write(&y, "y-late.txt", "late\n");
+    let held = held_at_commit(&daemon, &repo, &y, async {
+        write(&x, "x.txt", "from x\n");
+        snapshot(client, &repo, &x).await;
+        write(&y, "x.txt", "from y after the scan\n");
+    })
+    .await;
+    assert!(
+        held.is_err(),
+        "the check-out would overwrite an edit: {held:?}"
+    );
+    snapshot(client, &repo, &y).await;
+    y_current(client, &repo, &y, &["x.txt", "y.txt", "y-late.txt"]).await;
+    let on_disk = read(&y, "x.txt").unwrap();
+    assert!(on_disk.contains("from y after the scan"), "{on_disk}");
+    assert!(on_disk.contains("from x"), "{on_disk}");
+    daemon.stop().await;
+}
+
+/// Waits up to thirty seconds for `ready`.
+async fn until(what: &str, mut ready: impl FnMut() -> bool) {
+    let begun = Instant::now();
+    while !ready() {
+        assert!(
+            begun.elapsed() < Duration::from_secs(30),
+            "timed out: {what}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+// Second R3.11 review, F1: a watcher's narrowed snapshot merged onto an
+// ancestor's rebase of its commit does not overwrite a file the agent
+// wrote again after the scan.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_narrowed_snapshot_merged_at_commit_keeps_a_later_edit() {
+    let (daemon, repo) = TestDaemon::with_synthetic_repo_and(Preset::Small, |config| {
+        let watcher = &mut config.file.watcher;
+        watcher.backend = reef_daemon::config::WatcherBackend::Notify;
+        watcher.debounce = Duration::from_millis(100);
+        watcher.min_interval = Duration::from_millis(100);
+        watcher.fallback_interval = Duration::from_hours(1);
+        watcher.watched_fallback_interval = Duration::from_hours(1);
+        watcher.notify_attach_background = false;
+    })
+    .await;
+    let client = &daemon.client;
+    let (x, y) = stacked(client, &repo).await;
+    let outcomes: Arc<Mutex<Vec<SnapshotOutcome>>> = Arc::default();
+    let scheduler = daemon.handle.state().manager.scheduler();
+    {
+        let sink = Arc::clone(&outcomes);
+        let id: reef_daemon::model::WorkspaceId = y.id.parse().unwrap();
+        scheduler.on_snapshot(Box::new(move |outcome| {
+            if outcome.workspace == id {
+                sink.lock().unwrap().push(outcome.clone());
+            }
+        }));
+    }
+    let narrowed = || {
+        outcomes
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|outcome| outcome.narrowed && outcome.changed)
+            .count()
+    };
+    write(&y, "warm.txt", "w\n");
+    until("a narrowed snapshot of Y", || narrowed() == 1).await;
+
+    let hold = scheduler.hold_commits(y.id.parse().unwrap()).await;
+    write(&y, "y.txt", "scanned\n");
+    until("Y's watcher snapshot waits at its commit", || {
+        scheduler.held_commits() == 1
+    })
+    .await;
+    write(&x, "x2.txt", "x2\n");
+    snapshot(client, &repo, &x).await;
+    write(&y, "y.txt", "after the scan\n");
+    drop(hold);
+
+    eventually("Y's directory has X's new file", || {
+        read(&y, "x2.txt").is_some()
+    })
+    .await;
+    snapshot(client, &repo, &y).await;
+    assert_eq!(read(&y, "y.txt").as_deref(), Some("after the scan\n"));
+    let y_row = get(client, &repo, &y).await;
+    assert_eq!(
+        file(client, &repo, &y_row.commit_id, "y.txt")
+            .await
+            .as_deref(),
+        Some("after the scan\n")
+    );
+    y_current(client, &repo, &y, &["x2.txt", "warm.txt"]).await;
+    daemon.stop().await;
+}
+
+// Second R3.11 review, F2: a snapshot that took the carry an ancestor's
+// commit handed it, and found nothing changed at the older head, gives the
+// carry back, so the follow carries the edits made since.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unchanged_snapshot_gives_back_the_carry_it_took() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let scheduler = daemon.handle.state().manager.scheduler();
+    let (x, y) = stacked(client, &repo).await;
+    // X's snapshot waits after its scan.
+    let x_hold = scheduler.hold_commits(x.id.parse().unwrap()).await;
+    write(&x, "x2.txt", "x2\n");
+    let x_task = {
+        let (client, repo, id) = (client.clone(), repo.id.clone(), x.id.clone());
+        tokio::spawn(async move { client.snapshot_workspace(&repo, &id, "").await.map(drop) })
+    };
+    until("X waits at its commit", || scheduler.held_commits() == 1).await;
+    // Y's snapshot loads the head, then waits before it takes its carry.
+    let scans = scheduler.hold_scans().await;
+    let y_task = {
+        let (client, repo, id) = (client.clone(), repo.id.clone(), y.id.clone());
+        tokio::spawn(async move { client.snapshot_workspace(&repo, &id, "").await.map(drop) })
+    };
+    until("Y waits before its scan", || scheduler.held_scans() == 1).await;
+    // X commits, handing Y a carry and queueing its follow.
+    drop(x_hold);
+    x_task.await.unwrap().unwrap();
+    // Y's snapshot takes the carry and finds nothing changed; the agent
+    // writes before the follow scans.
+    let y_hold = scheduler.hold_commits(y.id.parse().unwrap()).await;
+    drop(scans);
+    until("Y waits at its commit", || scheduler.held_commits() == 1).await;
+    write(&y, "y-late.txt", "late\n");
+    drop(y_hold);
+    y_task.await.unwrap().unwrap();
+
+    eventually("Y's directory has X's new file", || {
+        read(&y, "x2.txt").is_some()
+    })
+    .await;
+    snapshot(client, &repo, &y).await;
+    y_current(client, &repo, &y, &["x2.txt", "y.txt", "y-late.txt"]).await;
     daemon.stop().await;
 }
 
