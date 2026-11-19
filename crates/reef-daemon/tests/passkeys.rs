@@ -936,12 +936,11 @@ async fn approvals() {
     daemon.stop().await;
 }
 
-// 6. `GetApproval { wait }` returns on a resolution and on the expiry; a
-// decline ends an approval.
 // An approve whose call is dropped mid-way (a closed tab, a client's
-// deadline) leaves the approval to expire, not stuck being approved.
+// deadline), here just after its key is certified, still ends with the
+// approval approved: a decline cannot end an approval whose key is live.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_dropped_approve_still_expires() {
+async fn a_dropped_approve_still_ends_approved() {
     use reef_daemon::identity::approvals::Resolution;
     use reef_daemon::identity::issue::Channel;
     let (daemon, repo) = fixture().await;
@@ -952,7 +951,82 @@ async fn a_dropped_approve_still_expires() {
     register(&page, &mut passkey, "alice", None).await.unwrap();
     let change = commit_on(client, &repo.id, "root()", &[("a.txt", "a\n")]).await;
     let identities = &daemon.handle.state().identity;
-    identities.set_approval_wait(Duration::from_millis(300));
+    let key = fresh_key();
+    let key_id = key.public_key().id().to_string();
+    let approval = request_approval(
+        client,
+        "alice",
+        &repo.id,
+        &change.commit_id,
+        payload(&signoff(None), &change.tree_id),
+        &key,
+    )
+    .await
+    .unwrap();
+    let asserted = assertion(&mut passkey, &page.origin, &approval.challenge);
+    let web = Channel::Web {
+        session: "0123456789abcdef".to_owned(),
+    };
+    let mut approving = Box::pin(identities.resolve_approval(
+        &web,
+        Some(&page.origin),
+        &approval.id,
+        Resolution::Approve(asserted),
+    ));
+    let give_up = Instant::now() + Duration::from_secs(10);
+    while futures::poll!(approving.as_mut()).is_pending()
+        && client.get_session_key(&key_id).await.is_err()
+    {
+        assert!(Instant::now() < give_up, "the key was never certified");
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    drop(approving);
+
+    let refused = client
+        .resolve_approval(ResolveApprovalRequest {
+            id: approval.id.clone(),
+            resolution: Some(resolve_approval_request::Resolution::Decline(
+                "not mine".to_owned(),
+            )),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(refused.reason(), "APPROVAL_RESOLVED");
+    let ended = client
+        .get_approval(GetApprovalRequest {
+            id: approval.id.clone(),
+            wait: Some(prost_types::Duration {
+                seconds: 10,
+                nanos: 0,
+            }),
+        })
+        .await
+        .unwrap()
+        .approval
+        .unwrap();
+    assert_eq!(ended.state(), ApprovalState::Approved);
+    assert_eq!(ended.key.unwrap().key_id, key_id);
+    daemon.stop().await;
+}
+
+// A `GetApproval { wait }` begun while an approve is in flight ends at the
+// approval's expiry when that approve fails, not at the end of its `wait`.
+// On one thread the approve's task runs only once the test awaits, so the
+// wait begins while it is in flight.
+#[tokio::test(flavor = "current_thread")]
+async fn a_failed_approve_leaves_the_wait_bounded_by_the_expiry() {
+    use reef_daemon::identity::IdentityError;
+    use reef_daemon::identity::approvals::{Resolution, State};
+    use reef_daemon::identity::issue::Channel;
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    create_identity(client, "alice").await;
+    let page = ui(client).await;
+    let mut passkey = Authenticator::new(Algorithm::EdDsa);
+    register(&page, &mut passkey, "alice", None).await.unwrap();
+    let change = commit_on(client, &repo.id, "root()", &[("a.txt", "a\n")]).await;
+    let identities = &daemon.handle.state().identity;
+    identities.set_approval_wait(Duration::from_millis(1500));
     let approval = request_approval(
         client,
         "alice",
@@ -967,34 +1041,39 @@ async fn a_dropped_approve_still_expires() {
     let web = Channel::Web {
         session: "0123456789abcdef".to_owned(),
     };
-    let dropped = tokio::time::timeout(
-        Duration::ZERO,
-        identities.resolve_approval(
-            &web,
-            Some(&page.origin),
-            &approval.id,
-            Resolution::Approve(asserted),
-        ),
-    )
-    .await;
+    let mut approving = Box::pin(identities.resolve_approval(
+        &web,
+        Some("http://elsewhere.example"),
+        &approval.id,
+        Resolution::Approve(asserted),
+    ));
+    assert!(futures::poll!(approving.as_mut()).is_pending());
+    let started = Instant::now();
+    let mut waiting = Box::pin(identities.get_approval(&approval.id, Duration::from_secs(8)));
+    assert!(futures::poll!(waiting.as_mut()).is_pending());
+    let (refused, waited) = tokio::join!(approving, waiting);
+    let took = started.elapsed();
     assert!(
-        dropped.is_err(),
-        "the approve was still running when dropped"
+        matches!(
+            refused,
+            Err(IdentityError::PasskeyInvalid {
+                check: "origin",
+                ..
+            })
+        ),
+        "{refused:?}"
     );
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    let ended = client
-        .get_approval(GetApprovalRequest {
-            id: approval.id.clone(),
-            wait: None,
-        })
-        .await
-        .unwrap()
-        .approval
-        .unwrap();
-    assert_eq!(ended.state(), ApprovalState::Expired);
+    let waited = waited.unwrap();
+    assert!(matches!(waited.state, State::Expired), "{:?}", waited.state);
+    assert!(
+        took < Duration::from_secs(4),
+        "the wait held {took:?}, past the approval's 1.5 s expiry"
+    );
     daemon.stop().await;
 }
 
+// 6. `GetApproval { wait }` returns on a resolution and on the expiry; a
+// decline ends an approval.
 #[tokio::test(flavor = "multi_thread")]
 async fn approval_waits() {
     let (daemon, repo) = fixture().await;

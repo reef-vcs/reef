@@ -20,7 +20,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use reef_api::v1;
@@ -252,28 +252,6 @@ struct Held {
     changed: watch::Sender<()>,
 }
 
-/// An approve in flight on approval `id`. Expiry leaves it alone, so if
-/// its future is dropped before the outcome is recorded (the client went
-/// away mid-call), dropping this makes the approval pending again, and so
-/// able to expire.
-struct Resolving<'a> {
-    approvals: &'a Approvals,
-    id: &'a str,
-    ended: bool,
-}
-
-impl Drop for Resolving<'_> {
-    fn drop(&mut self) {
-        if self.ended {
-            return;
-        }
-        if let Some(entry) = self.approvals.lock().get_mut(self.id) {
-            entry.approval.state.approve_failed();
-            entry.changed.send_replace(());
-        }
-    }
-}
-
 /// The approvals `Identities` holds.
 #[derive(Debug)]
 pub(crate) struct Approvals {
@@ -419,31 +397,30 @@ impl Identities {
     /// `GetApproval`: approval `id`, once it is not pending or `wait` (at
     /// most until its expiry) has passed.
     pub async fn get_approval(&self, id: &str, wait: Duration) -> Result<Approval, IdentityError> {
-        let (approval, mut changed) = self.approval_now(id)?;
-        if !approval.is_pending() || wait.is_zero() {
-            return Ok(approval);
-        }
-        let until_expiry = u64::try_from(approval.expires_at.0 - Timestamp::now().0)
-            .map_or(Duration::ZERO, Duration::from_millis);
-        // An approve in flight may finish past the expiry, so its outcome,
-        // not the expiry, ends the wait; a client would otherwise poll
-        // again at once until it does.
-        let resolving = matches!(approval.state, State::Pending { resolving: true });
-        let deadline = tokio::time::Instant::now()
-            + if resolving {
-                wait
-            } else {
-                wait.min(until_expiry)
-            };
+        let (mut approval, mut changed) = self.approval_now(id)?;
+        let waited = tokio::time::Instant::now() + wait;
         loop {
-            match tokio::time::timeout_at(deadline, changed.changed()).await {
-                Ok(Ok(())) => {
-                    let (approval, _) = self.approval_now(id)?;
-                    if !approval.is_pending() {
-                        return Ok(approval);
-                    }
-                }
-                Ok(Err(_)) | Err(_) => return Ok(self.approval_now(id)?.0),
+            if !approval.is_pending() || tokio::time::Instant::now() >= waited {
+                return Ok(approval);
+            }
+            // An approve in flight may finish past the expiry, so its
+            // outcome, not the expiry, ends the wait; a client would
+            // otherwise poll again at once until it does. A failed one
+            // brings the expiry back.
+            let resolving = matches!(approval.state, State::Pending { resolving: true });
+            let deadline = if resolving {
+                waited
+            } else {
+                let until_expiry = u64::try_from(approval.expires_at.0 - Timestamp::now().0)
+                    .map_or(Duration::ZERO, Duration::from_millis);
+                waited.min(tokio::time::Instant::now() + until_expiry)
+            };
+            let woke = tokio::time::timeout_at(deadline, changed.changed()).await;
+            approval = self.approval_now(id)?.0;
+            if !matches!(woke, Ok(Ok(())))
+                && !matches!(approval.state, State::Pending { resolving: true })
+            {
+                return Ok(approval);
             }
         }
     }
@@ -451,7 +428,7 @@ impl Identities {
     /// `ResolveApproval` through `channel`, whose page is at `origin` when
     /// it is the web UI.
     pub async fn resolve_approval(
-        &self,
+        self: &Arc<Self>,
         channel: &Channel,
         origin: Option<&str>,
         id: &str,
@@ -473,16 +450,20 @@ impl Identities {
                     }
                 };
                 let approval = self.begin_approve(id)?;
-                let mut resolving = Resolving {
-                    approvals: &self.approvals,
-                    id,
-                    ended: false,
-                };
-                let approved = self
-                    .approve(&approval, &assertion, origin.unwrap_or_default(), channel)
-                    .await;
-                resolving.ended = true;
-                self.end_approve(&approval, approved, &web_session)
+                // A task, so the caller going away (a closed tab, a
+                // client's deadline) cannot part the key's certification
+                // from the approval's end: approved, or pending again.
+                let identities = Arc::clone(self);
+                let origin = origin.unwrap_or_default().to_owned();
+                let channel = channel.clone();
+                tokio::spawn(async move {
+                    let approved = identities
+                        .approve(&approval, &assertion, &origin, &channel)
+                        .await;
+                    identities.end_approve(&approval, approved, &web_session)
+                })
+                .await
+                .map_err(|error| IdentityError::Task(error.to_string()))?
             }
         }
     }
