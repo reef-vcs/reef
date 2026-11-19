@@ -25,7 +25,7 @@ use serde_json::{Value, json};
 use tokio::process::Command;
 
 /// The tools, in `tools/list`'s order.
-const TOOLS: [&str; 26] = [
+const TOOLS: [&str; 27] = [
     "list_repositories",
     "list_workspaces",
     "get_workspace",
@@ -46,6 +46,7 @@ const TOOLS: [&str; 26] = [
     "describe_change",
     "publish_change",
     "propose_change",
+    "ask_for_help",
     "land_change",
     "push_landed",
     "rebase_change",
@@ -224,9 +225,12 @@ async fn handshake_and_tools() {
     // or `git push` at the root. R3.10's `propose_change` and `land_change`
     // took it to 25,286 (the user's decision 8): without them an MCP agent
     // has no way to put its work forward or land it, and leaves Reef for
-    // `reef propose` and `reef land` in a shell at the root. Raising it
+    // `reef propose` and `reef land` in a shell at the root. R3.32's
+    // `ask_for_help` took it to 25,900 (the user's decision 6), with other
+    // tools' revision texts shortened to fit: without it an MCP agent that
+    // cannot settle something has no way to reach a person. Raising it
     // again needs the same argument in that ticket's brief.
-    assert!(bytes <= 25_286, "tools/list is {bytes} bytes");
+    assert!(bytes <= 25_900, "tools/list is {bytes} bytes");
 }
 
 // 3
@@ -268,7 +272,7 @@ async fn starts_without_a_daemon() {
     command.env_remove("REEF_STATE_DIR");
     let mut mcp = Mcp::start(command).await;
     let listed = mcp.request("tools/list", json!({})).await;
-    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 26);
+    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 27);
     let error = mcp.err("get_status", json!({})).await;
     assert_eq!(error["kind"], "unavailable", "{error}");
     assert_eq!(
@@ -1513,9 +1517,11 @@ async fn every_tool_result_matches_its_output_schema() {
         "{refused}"
     );
     // `propose_stack_and_land_it` calls these on a repository with a
-    // trunk, each result checked against its schema.
+    // trunk, each result checked against its schema; `ask_for_help_then_wait`
+    // calls this one.
     called.insert("propose_change");
     called.insert("land_change");
+    called.insert("ask_for_help");
     for tool in TOOLS {
         assert!(called.contains(tool), "{tool} was not called");
     }
@@ -1664,4 +1670,86 @@ async fn wait_delivers_instructions() {
     let instruction = read.instruction.unwrap();
     assert_eq!(instruction.state(), v1::InstructionState::Delivered);
     assert_eq!(instruction.channel(), v1::DeliveryChannel::Mcp);
+}
+
+// R3.32 test 11: `ask_for_help` records a help request for the server's
+// session; a person's answer comes back inline in the wait that follows,
+// framed as an answer; the result matches its schema.
+#[tokio::test(flavor = "multi_thread")]
+async fn ask_for_help_then_wait() {
+    let (daemon, repo) = fixture().await;
+    let workspace = daemon
+        .client
+        .create_workspace(v1::CreateWorkspaceRequest {
+            repo: repo.id.clone(),
+            owner: "test@host".to_owned(),
+            ..v1::CreateWorkspaceRequest::default()
+        })
+        .await
+        .unwrap()
+        .workspace
+        .unwrap();
+    std::fs::write(Path::new(&workspace.path).join("w.txt"), "w\n").unwrap();
+    let mut mcp = command(&daemon, Path::new(&workspace.path));
+    mcp.env("CLAUDECODE", "1")
+        .env("CLAUDE_CODE_SESSION_ID", "s-asker");
+    let mut mcp = Mcp::start(mcp).await;
+    let asked = mcp
+        .ok(
+            "ask_for_help",
+            json!({"text": "Which format?", "tried": "read the docs",
+                   "question": "TOML?", "reason": "decision"}),
+        )
+        .await;
+    let id = asked["comment"]["id"].as_str().unwrap().to_owned();
+    assert_eq!(asked["comment"]["state"], "open", "{asked}");
+    assert_eq!(asked["comment"]["reason"], "decision", "{asked}");
+    let next = asked["next"].as_str().unwrap();
+    assert!(next.contains("wait_for_operations"), "{next}");
+    let read = daemon
+        .client
+        .get_comment(v1::GetCommentRequest {
+            repo: repo.id.clone(),
+            id: id.clone(),
+        })
+        .await
+        .unwrap()
+        .comment
+        .unwrap();
+    assert_eq!(read.help.as_ref().unwrap().client_session, "s-asker");
+
+    let arguments = json!({"kinds": ["comment"], "timeout_seconds": 10});
+    let wait = mcp
+        .send(
+            "tools/call",
+            json!({"name": "wait_for_operations", "arguments": arguments}),
+        )
+        .await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let answer = daemon
+        .client
+        .create_comment(v1::CreateCommentRequest {
+            repo: repo.id.clone(),
+            revision: read.commit_id.clone(),
+            reply_to: id.clone(),
+            kind: v1::CommentKind::Instruction.into(),
+            text: "Use TOML.".to_owned(),
+            ..v1::CreateCommentRequest::default()
+        })
+        .await
+        .unwrap()
+        .comment
+        .unwrap();
+    let (_, waited) = result_of(&mcp.response(wait).await);
+    assert_eq!(
+        waited["instructions"][0]["id"],
+        answer.id.as_str(),
+        "{waited}"
+    );
+    let frame = waited["instructions"][0]["frame"].as_str().unwrap();
+    assert!(frame.starts_with("Reef answer"), "{frame}");
+    assert!(
+        frame.contains(&id) && frame.contains("Use TOML."),
+        "{frame}"
+    );
 }

@@ -662,6 +662,7 @@ impl WorkspaceService for WorkspacesService {
                 workspace.lifecycle = Some(Box::new(stepped.lifecycle));
                 workspace.changed_file_count = Some(stepped.changed_file_count);
                 workspace.conflicted_path_count = stepped.conflicted_path_count;
+                workspace.help_request_id = stepped.help_request_id.unwrap_or_default();
             }
         }
         Ok(Response::new(GetWorkspaceResponse {

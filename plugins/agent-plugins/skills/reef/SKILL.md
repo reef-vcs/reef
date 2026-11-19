@@ -24,8 +24,7 @@ Output is JSON when piped; errors carry `hint` and `next`, a command to run.
 ## Commands
 
 - `reef ws create` prints a new workspace's path; `reef ws release <id>`
-  ends it. `reef ws list` counts changed files; `reef ws inspect <id>`
-  has the rest. Ids take 4+ characters.
+  ends it; `reef ws list` and `reef ws inspect <id>` show them. Ids take 4+ characters.
 - `cd "$(reef ws move -o text <id> --new-on main)"` snapshots and starts the next task
   in the same directory and lease (`cd` again: overlays remount).
 - `--workspace <id>` or `--repo <path|id>` picks what to read.
@@ -38,8 +37,8 @@ and `REEF_SOCKET` set, its lease renewed until it exits. `REEF_MODEL` and
 
 ## Output
 
-Piped output is brief JSON; `-o json` or `REEF_OUTPUT=json` has every field.
-Errors: `{"error": {kind, reason, message, hint, next, metadata}}`. Exit 0 ok,
+Piped output is brief JSON; `-o json` has every field.
+Errors: `{"error": {kind, reason, message, hint, next}}`. Exit 0 ok,
 2 usage, 3 not found, 4 exists, 5 conflict, 6 unavailable, 7 denied,
 8 I/O, 9 unsupported, 1 other; `ws run` exits with its command's code.
 
@@ -49,3 +48,4 @@ Errors: `{"error": {kind, reason, message, hint, next, metadata}}`. Exit 0 ok,
 Revisions are jj revsets. To finish, follow `reef here`'s `next`: describe it, then
 `reef propose` and `reef land` where a policy lands changes, else `reef publish` to a git
 branch. `reef rebase` brings it onto trunk; `reef conflict show` explains a conflict.
+`reef ask -m why --tried what --wait 10m` asks a person.

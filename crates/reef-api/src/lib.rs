@@ -46,7 +46,7 @@ pub use reef::daemon::v0;
 /// The revision of `reef.api.v1` this build serves. It increases by one with
 /// every change to the schema, and [`API_DIGEST`] changes with it; v1 only
 /// grows (ADR 0029). `GetDaemonStatus` reports it.
-pub const API_REVISION: u32 = 38;
+pub const API_REVISION: u32 = 39;
 
 /// blake3 of the v1 descriptors without comments, one per revision, oldest
 /// first: entry `n - 1` is revision `n`'s. A schema change appends one entry
@@ -166,6 +166,13 @@ pub const API_DIGESTS: &[&str] = &[
     // #262: `ChangeStep`, `Workspace.step`, `Workspace.lifecycle`,
     // `Workspace.conflicted_path_count` and `GetWorkspaceRequest.sync_first`.
     "09a5de186cba0dafbdece039e519e076a8d8a0f25ce309bdde3ecb7482a54a19",
+    // R3.32: `COMMENT_KIND_HELP_REQUEST`, `HelpState`, `HelpReason`,
+    // `HelpInput`, `HelpRequest`, `Comment.help`, `CreateCommentRequest.help`
+    // and `client_session`, `ListCommentsRequest.help_states`,
+    // `CommentEvent.help_from` and `help_to`, `TARGET_SOURCE_HELP_REQUEST`,
+    // `INSTRUCTION_CAUSE_ANSWER_CANCELLED`, `WithdrawHelpRequest`,
+    // `CHANGE_STEP_AWAIT_HELP` and `Workspace.help_request_id`.
+    "236a97c0284846f3dd5b8f5ae43c4eb212a6b598176484b8f03e5617419724bf",
 ];
 
 /// blake3 of the v1 descriptors without comments, as of [`API_REVISION`]:
@@ -813,6 +820,28 @@ pub mod error {
     /// wrote or claimed, or a claim of a change another token proposed
     /// (R3.12). Metadata: `id`.
     pub const REMOTE_COMMENT_NOT_OWNED: &str = "REMOTE_COMMENT_NOT_OWNED";
+    /// A help request without `help`, or with an empty `help.tried`
+    /// (R3.32).
+    pub const HELP_REQUIRED: &str = "HELP_REQUIRED";
+    /// A help request's `help.conflict` that is neither an assignment id nor
+    /// a conflict id, or names another change's (R3.32). Metadata:
+    /// `conflict`.
+    pub const INVALID_CONFLICT: &str = "INVALID_CONFLICT";
+    /// A help request from a session that has one open on the change
+    /// already (R3.32). Metadata: `id`.
+    pub const HELP_ALREADY_OPEN: &str = "HELP_ALREADY_OPEN";
+    /// An answer to a help request from the session that asked it (R3.32).
+    /// Metadata: `id`.
+    pub const SELF_ANSWER: &str = "SELF_ANSWER";
+    /// `WithdrawHelpRequest` of a comment that is not a help request
+    /// (R3.32). Metadata: `id`.
+    pub const NOT_A_HELP_REQUEST: &str = "NOT_A_HELP_REQUEST";
+    /// `WithdrawHelpRequest` of a help request that was answered (R3.32).
+    /// Metadata: `state`.
+    pub const HELP_NOT_OPEN: &str = "HELP_NOT_OPEN";
+    /// A change with 16 open help requests, or a repository with 256
+    /// (R3.32). Metadata: `max`.
+    pub const TOO_MANY_HELP_REQUESTS: &str = "TOO_MANY_HELP_REQUESTS";
     /// An assignment id, or a change, with no resolver assignment (R3.27).
     /// Metadata: `assignment`.
     pub const ASSIGNMENT_NOT_FOUND: &str = "ASSIGNMENT_NOT_FOUND";
@@ -835,7 +864,8 @@ pub mod error {
     /// conflict over, an agent claims it (R3.27).
     pub const TAKE_NEEDS_PERSON: &str = "TAKE_NEEDS_PERSON";
     /// An `expected_conflict_id` that is not the assignment's conflict
-    /// (R3.27). Metadata: `conflict_id`.
+    /// (R3.27), or a help request's conflict id the change no longer has
+    /// (R3.32). Metadata: `conflict_id`.
     pub const CONFLICT_CHANGED: &str = "CONFLICT_CHANGED";
     /// An assignment with 1,000 events refuses more (R3.27). Metadata:
     /// `max`.

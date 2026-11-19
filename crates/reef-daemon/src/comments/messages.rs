@@ -5,6 +5,7 @@ use reef_api::v1;
 use reef_lib::jj::comments::comment_events_of;
 use reef_lib::jj::oplog::OpEntry;
 
+use super::help::{HelpInput, HelpState, Reason};
 use super::{Estimate, Kind, State};
 use crate::db::CommentRow;
 use crate::lifecycle::messages::actor_message;
@@ -43,8 +44,61 @@ pub fn kind_of(value: i32) -> Option<Kind> {
     match v1::CommentKind::try_from(value).ok()? {
         v1::CommentKind::Note => Some(Kind::Note),
         v1::CommentKind::Instruction => Some(Kind::Instruction),
+        v1::CommentKind::HelpRequest => Some(Kind::HelpRequest),
         v1::CommentKind::Unspecified => None,
     }
+}
+
+/// A help state as the v1 enum.
+pub fn help_state_message(state: HelpState) -> v1::HelpState {
+    match state {
+        HelpState::Open => v1::HelpState::Open,
+        HelpState::Answered => v1::HelpState::Answered,
+        HelpState::Withdrawn => v1::HelpState::Withdrawn,
+    }
+}
+
+/// The help state a v1 value names; `None` for UNSPECIFIED or an unknown
+/// value.
+pub fn help_state_of(value: i32) -> Option<HelpState> {
+    Some(match v1::HelpState::try_from(value).ok()? {
+        v1::HelpState::Unspecified => return None,
+        v1::HelpState::Open => HelpState::Open,
+        v1::HelpState::Answered => HelpState::Answered,
+        v1::HelpState::Withdrawn => HelpState::Withdrawn,
+    })
+}
+
+fn reason_message(reason: Reason) -> v1::HelpReason {
+    match reason {
+        Reason::Decision => v1::HelpReason::Decision,
+        Reason::Conflict => v1::HelpReason::Conflict,
+        Reason::Blocked => v1::HelpReason::Blocked,
+        Reason::Unclear => v1::HelpReason::Unclear,
+        Reason::Other => v1::HelpReason::Other,
+    }
+}
+
+/// What a request's `help` sends; `None` when it has none.
+pub fn help_input_of(help: Option<&v1::HelpInput>) -> Option<HelpInput> {
+    let help = help?;
+    let reason = match v1::HelpReason::try_from(help.reason).unwrap_or_default() {
+        v1::HelpReason::Decision => Reason::Decision,
+        v1::HelpReason::Conflict => Reason::Conflict,
+        v1::HelpReason::Blocked => Reason::Blocked,
+        v1::HelpReason::Unclear => Reason::Unclear,
+        v1::HelpReason::Other | v1::HelpReason::Unspecified => Reason::Other,
+    };
+    Some(HelpInput {
+        reason,
+        tried: help.tried.clone(),
+        question: help.question.clone(),
+        conflict: help.conflict.clone(),
+    })
+}
+
+fn column_help_state(text: &str) -> v1::HelpState {
+    HelpState::parse(text).map_or(v1::HelpState::Unspecified, help_state_message)
 }
 
 /// The channel a v1 value names, as its column text; `sdk` for
@@ -62,6 +116,7 @@ fn kind_message(text: &str) -> v1::CommentKind {
     match text {
         "note" => v1::CommentKind::Note,
         "instruction" => v1::CommentKind::Instruction,
+        "help_request" => v1::CommentKind::HelpRequest,
         _ => v1::CommentKind::Unspecified,
     }
 }
@@ -76,6 +131,7 @@ fn cause_message(text: &str) -> v1::InstructionCause {
         "reproposed" => v1::InstructionCause::Reproposed,
         "change_final" => v1::InstructionCause::ChangeFinal,
         "expired" => v1::InstructionCause::Expired,
+        "answer_cancelled" => v1::InstructionCause::AnswerCancelled,
         _ => v1::InstructionCause::Unspecified,
     }
 }
@@ -95,6 +151,7 @@ fn source_message(text: &str) -> v1::TargetSource {
         "proposal" => v1::TargetSource::Proposal,
         "provenance" => v1::TargetSource::Provenance,
         "none" => v1::TargetSource::None,
+        "help_request" => v1::TargetSource::HelpRequest,
         _ => v1::TargetSource::Unspecified,
     }
 }
@@ -121,11 +178,14 @@ pub fn estimate_message(json: &str) -> v1::InstructionEstimate {
 }
 
 /// A committed comment as a message; `last_seen` is its target's client
-/// session's, and `outdated` whether its anchored file changed since.
+/// session's, `outdated` whether its anchored file changed since, and
+/// `conflict_moved` whether a help request's conflict id is no longer its
+/// change's.
 pub fn comment_message(
     row: &CommentRow,
     last_seen: Option<Timestamp>,
     outdated: bool,
+    conflict_moved: bool,
 ) -> v1::Comment {
     let anchor = row.path.as_ref().map(|path| v1::CommentAnchor {
         path: path.clone(),
@@ -166,6 +226,21 @@ pub fn comment_message(
         started_at: columns.started_at.map(timestamp),
         finished_at: columns.finished_at.map(timestamp),
     });
+    let help = row.help.as_ref().map(|columns| v1::HelpRequest {
+        state: column_help_state(&columns.state).into(),
+        cause: cause_message(&columns.cause).into(),
+        reason: reason_message(Reason::parse(&columns.reason).unwrap_or_default()).into(),
+        tried: columns.tried.clone(),
+        question: columns.question.clone().unwrap_or_default(),
+        client_session: columns.client_session.clone().unwrap_or_default(),
+        conflict_id: columns.conflict_id.clone().unwrap_or_default(),
+        assignment_id: columns.assignment_id.clone().unwrap_or_default(),
+        conflict_moved,
+        answer_id: columns.answer_id.clone().unwrap_or_default(),
+        answered_at: columns.answered_at.map(timestamp),
+        closed_at: columns.closed_at.map(timestamp),
+        summary: columns.summary.clone().unwrap_or_default(),
+    });
     v1::Comment {
         id: row.id.clone(),
         change_id: row.change_id.clone(),
@@ -192,6 +267,7 @@ pub fn comment_message(
         operation_collected: row.operation_collected,
         outdated,
         instruction,
+        help,
     }
 }
 
@@ -210,6 +286,8 @@ pub fn operation_comments(entry: &OpEntry) -> Vec<v1::CommentEvent> {
             from: column_state(&record.from).into(),
             to: column_state(&record.to).into(),
             cause: cause_message(&record.cause).into(),
+            help_from: column_help_state(&record.help_from).into(),
+            help_to: column_help_state(&record.help_to).into(),
         })
         .collect()
 }

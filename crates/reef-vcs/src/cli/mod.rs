@@ -15,6 +15,7 @@
 
 mod advice;
 pub(crate) mod ambient;
+pub(crate) mod ask;
 mod autostart;
 mod backup;
 pub(crate) mod changes;
@@ -353,6 +354,11 @@ enum Command {
     /// Notes on changes, and instructions for the session that made them.
     #[command(infer_subcommands = true)]
     Comment(comment::Args),
+    /// Ask a person for help on a change: what is wrong, what you tried, your question.
+    #[command(
+        after_help = "Example: reef ask -m 'Which config format?' --tried 'read docs/config.md' --reason decision --wait 10m"
+    )]
+    Ask(ask::AskArgs),
     /// Revert one operation (`reef op log` lists them).
     Undo(op::UndoArgs),
     /// List the operation log, or show one operation.
@@ -854,7 +860,7 @@ async fn run(global: Global, command: Command, out: &Out) -> Result<ExitCode, Cl
         Command::Here(args) => here::run(&connect(&global, out).await?, &global, args).await,
         Command::Status(args) => Box::pin(status::run(&connect(&global, out).await?, args)).await,
         Command::Log(args) => log::run(&connect(&global, out).await?, args).await,
-        Command::Show(args) => changes::show(&connect(&global, out).await?, args).await,
+        Command::Show(args) => Box::pin(changes::show(&connect(&global, out).await?, args)).await,
         Command::Diff(args) => diff::run(&connect(&global, out).await?, args).await,
         Command::Describe(args) => changes::describe(&connect(&global, out).await?, args).await,
         Command::Publish(args) => {
@@ -880,6 +886,7 @@ async fn run(global: Global, command: Command, out: &Out) -> Result<ExitCode, Cl
             }
         }
         Command::Comment(args) => Box::pin(comment::run(&connect(&global, out).await?, args)).await,
+        Command::Ask(args) => Box::pin(ask::run(&connect(&global, out).await?, args)).await,
         Command::Undo(args) => op::undo(&connect(&global, out).await?, args).await,
         Command::Op(args) => op::run(&connect(&global, out).await?, args).await,
         Command::History(args) => history::run(&connect(&global, out).await?, args).await,

@@ -164,6 +164,8 @@ pub(crate) async fn send(
         ceilings: None,
         agent: Some(super::batch::AGENT.to_owned()),
         remote: None,
+        help: None,
+        client_session: String::new(),
     };
     match comments::create(state, request).await {
         Ok(written) => {

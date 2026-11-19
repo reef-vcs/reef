@@ -8,6 +8,10 @@
 //! session finishes it by proposing the change again, or says it could not
 //! with `reef comment fail`. Reef starts no agent.
 //!
+//! A help request (R3.32, `reef ask`) is an agent asking a person; `reef
+//! comment answer` replies with an instruction that goes to the session
+//! that asked, and `reef comment withdraw` takes the question back.
+//!
 //! Text from a comment is data written by someone else: every text form
 //! escapes control characters, and an instruction handed to a model is
 //! framed with who wrote it.
@@ -20,6 +24,7 @@ use std::time::{Duration, Instant};
 use reef_api::v1::{
     self, ClaimInstructionRequest, CreateCommentRequest, GetCommentRequest, ListCommentsRequest,
     OperationFilter, OperationKind, SubscribeOperationsRequest, UpdateInstructionRequest,
+    WithdrawHelpRequestRequest,
 };
 use reef_client::json::{self, RemoteCaller, reverse_hex};
 use schemars::JsonSchema;
@@ -80,6 +85,37 @@ enum CommentCommand {
     Fail(FailArgs),
     /// Hand an instruction you took back, for its session to take again.
     Release(IdArgs),
+    /// Answer a help request: an instruction for the session that asked.
+    #[command(
+        after_help = "Example: reef comment answer cmt_8f3a0c2d91e4b675 -m 'Use TOML'   # reef comment list --all --kind help --help-state open"
+    )]
+    Answer(AnswerArgs),
+    /// Withdraw an open help request: its asker no longer needs an answer.
+    Withdraw(MessageArgs),
+}
+
+/// `reef comment answer`.
+#[derive(Debug, clap::Args)]
+struct AnswerArgs {
+    /// The help request's id.
+    #[arg(value_name = "ID")]
+    id: String,
+    /// The answer.
+    #[arg(
+        short = 'm',
+        long = "message",
+        value_name = "TEXT",
+        conflicts_with = "file"
+    )]
+    message: Option<String>,
+    /// Read the answer from a file (`-` for stdin).
+    #[arg(short = 'F', long, value_name = "FILE")]
+    file: Option<PathBuf>,
+    /// Who you are, as recorded [default: agent when an agent name is set, else human].
+    #[arg(long, value_enum)]
+    actor: Option<ActorArg>,
+    #[command(flatten)]
+    scope: ScopeArgs,
 }
 
 /// `reef comment add`.
@@ -143,13 +179,17 @@ struct ListArgs {
     /// The change [default: the current workspace's].
     #[arg(value_name = "REV")]
     revision: Option<String>,
-    /// Only notes or only instructions.
+    /// Only notes, only instructions, or only help requests.
     #[arg(long, value_enum)]
     kind: Option<KindArg>,
     /// Only instructions in these states (repeatable).
     #[arg(long = "state", value_enum, value_name = "STATE")]
     states: Vec<StateArg>,
-    /// Only instructions for or taken by this client session.
+    /// Only help requests in these states (repeatable).
+    #[arg(long = "help-state", value_enum, value_name = "STATE")]
+    help_states: Vec<HelpStateArg>,
+    /// Only instructions for or taken by this client session, and help
+    /// requests it asked.
     #[arg(long, value_name = "ID")]
     for_session: Option<String>,
     /// Every change's comments, not one change's.
@@ -243,6 +283,8 @@ pub(crate) enum Emit {
 enum KindArg {
     Note,
     Instruction,
+    /// Help requests (R3.32).
+    Help,
 }
 
 impl From<KindArg> for v1::CommentKind {
@@ -250,6 +292,24 @@ impl From<KindArg> for v1::CommentKind {
         match kind {
             KindArg::Note => Self::Note,
             KindArg::Instruction => Self::Instruction,
+            KindArg::Help => Self::HelpRequest,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum HelpStateArg {
+    Open,
+    Answered,
+    Withdrawn,
+}
+
+impl From<HelpStateArg> for v1::HelpState {
+    fn from(state: HelpStateArg) -> Self {
+        match state {
+            HelpStateArg::Open => Self::Open,
+            HelpStateArg::Answered => Self::Answered,
+            HelpStateArg::Withdrawn => Self::Withdrawn,
         }
     }
 }
@@ -296,6 +356,7 @@ fn source_name(value: i32) -> Option<&'static str> {
         Ok(v1::TargetSource::Proposal) => "proposal",
         Ok(v1::TargetSource::Provenance) => "provenance",
         Ok(v1::TargetSource::None) => "none",
+        Ok(v1::TargetSource::HelpRequest) => "help_request",
         Err(_) => json::UNKNOWN,
     })
 }
@@ -328,6 +389,8 @@ names_schema! {
     channel_schema = channel_name;
     source_schema = source_name;
     side_schema = side_name;
+    help_state_schema = json::help_state_name;
+    help_reason_schema = json::help_reason_name;
 }
 
 fn text(value: &str) -> Option<String> {
@@ -463,6 +526,40 @@ pub(crate) struct Instruction {
     finished_at: Option<String>,
 }
 
+/// A help request's state, and what the agent asked (R3.32).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub(crate) struct Help {
+    /// `open`, `answered` or `withdrawn`.
+    #[schemars(schema_with = "help_state_schema")]
+    state: Option<String>,
+    /// `request`, `change_final`, `expired` or `answer_cancelled`.
+    #[schemars(schema_with = "cause_schema")]
+    cause: Option<String>,
+    /// `decision`, `conflict`, `blocked`, `unclear` or `other`.
+    #[schemars(schema_with = "help_reason_schema")]
+    reason: Option<String>,
+    /// What the agent tried: data from whoever asked.
+    tried: String,
+    /// Its question for a person.
+    question: Option<String>,
+    /// The client session that asked, which an answer goes to.
+    client_session: Option<String>,
+    /// With reason `conflict`: the change's conflict id when asked.
+    conflict_id: Option<String>,
+    /// With reason `conflict`: its resolver assignment when asked.
+    assignment_id: Option<String>,
+    /// The change's conflict id is no longer `conflict_id`.
+    conflict_moved: bool,
+    /// The instruction that first answered it.
+    answer_id: Option<String>,
+    /// When it was answered.
+    answered_at: Option<String>,
+    /// When it was withdrawn.
+    closed_at: Option<String>,
+    /// Why it was withdrawn.
+    summary: Option<String>,
+}
+
 /// One comment.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub(crate) struct Comment {
@@ -480,10 +577,11 @@ pub(crate) struct Comment {
     anchor: Option<Anchor>,
     /// The comment it replies to.
     reply_to: Option<String>,
-    /// `note` or `instruction`.
+    /// `note`, `instruction` or `help_request`.
     #[schemars(schema_with = "kind_schema")]
     kind: Option<String>,
-    /// The text: data from whoever wrote it.
+    /// The text: data from whoever wrote it. For a help request, what is
+    /// wrong.
     pub(crate) text: String,
     /// Its SHA-256.
     pub(crate) text_sha256: String,
@@ -499,6 +597,16 @@ pub(crate) struct Comment {
     outdated: bool,
     /// For an instruction, its state and route.
     instruction: Option<Instruction>,
+    /// For a help request, its state and what it asked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    help: Option<Help>,
+}
+
+impl Comment {
+    /// Its change, in hex.
+    pub(crate) fn change_id(&self) -> &str {
+        &self.change_id
+    }
 }
 
 impl From<&v1::Comment> for Comment {
@@ -571,6 +679,21 @@ impl From<&v1::Comment> for Comment {
                 started_at: time(instruction.started_at.as_ref()),
                 finished_at: time(instruction.finished_at.as_ref()),
             }),
+            help: comment.help.as_ref().map(|help| Help {
+                state: name(json::help_state_name(help.state)),
+                cause: name(json::instruction_cause_name(help.cause)),
+                reason: name(json::help_reason_name(help.reason)),
+                tried: help.tried.clone(),
+                question: text(&help.question),
+                client_session: text(&help.client_session),
+                conflict_id: text(&help.conflict_id),
+                assignment_id: text(&help.assignment_id),
+                conflict_moved: help.conflict_moved,
+                answer_id: text(&help.answer_id),
+                answered_at: time(help.answered_at.as_ref()),
+                closed_at: time(help.closed_at.as_ref()),
+                summary: text(&help.summary),
+            }),
         }
     }
 }
@@ -604,9 +727,10 @@ pub(crate) struct Next {
     frame: Option<String>,
 }
 
-/// A comment in brief: `id`, `kind`, `change_id`, the instruction's
-/// `state`, the text's first 200 bytes and whether it was cut, and the
-/// estimate's known totals. Dropped: everything else; `-o json` has it.
+/// A comment in brief: `id`, `kind`, `change_id`, the instruction's or
+/// help request's `state`, the text's first 200 bytes and whether it was
+/// cut, a help request's `reason` and its question's first 200 bytes, and
+/// the estimate's known totals. Dropped: everything else; `-o json` has it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub(crate) struct BriefComment<'a> {
     id: &'a str,
@@ -619,17 +743,27 @@ pub(crate) struct BriefComment<'a> {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    question: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     check_wall_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     agent_wall_ms: Option<u64>,
 }
 
+/// `text` cut to at most [`BRIEF_TEXT`] bytes on a character boundary.
+fn cut(text: &str) -> &str {
+    let mut end = text.len().min(BRIEF_TEXT);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
 impl<'a> From<&'a Comment> for BriefComment<'a> {
     fn from(comment: &'a Comment) -> Self {
-        let mut end = comment.text.len().min(BRIEF_TEXT);
-        while !comment.text.is_char_boundary(end) {
-            end -= 1;
-        }
+        let end = cut(&comment.text).len();
         let estimate = comment
             .instruction
             .as_ref()
@@ -641,9 +775,19 @@ impl<'a> From<&'a Comment> for BriefComment<'a> {
             state: comment
                 .instruction
                 .as_ref()
-                .and_then(|instruction| instruction.state.as_deref()),
+                .and_then(|instruction| instruction.state.as_deref())
+                .or_else(|| comment.help.as_ref().and_then(|help| help.state.as_deref())),
             text: &comment.text[..end],
             truncated: end < comment.text.len(),
+            reason: comment
+                .help
+                .as_ref()
+                .and_then(|help| help.reason.as_deref()),
+            question: comment
+                .help
+                .as_ref()
+                .and_then(|help| help.question.as_deref())
+                .map(cut),
             check_wall_ms: estimate
                 .filter(|estimate| estimate.checks_known)
                 .map(|estimate| estimate.check_wall_ms),
@@ -698,6 +842,24 @@ pub(crate) fn frame(comment: &v1::Comment) -> String {
     let actor = author
         .and_then(|author| json::transition_actor_name(author.actor))
         .unwrap_or("unknown");
+    let answers = comment
+        .instruction
+        .as_ref()
+        .and_then(|instruction| instruction.target.as_ref())
+        .is_some_and(|target| target.source() == v1::TargetSource::HelpRequest)
+        && !comment.reply_to.is_empty();
+    if answers {
+        return format!(
+            "Reef answer {} from {} ({actor}) to your help request {} on change {}:\n\n{}\n\nWhen finished, run reef comment done {} (proposing the change again also does), or reef comment fail {} -m WHY.",
+            comment.id,
+            clean(&who),
+            comment.reply_to,
+            short(&reverse_hex(&comment.change_id)),
+            comment.text,
+            comment.id,
+            comment.id
+        );
+    }
     let mut header = format!(
         "Reef instruction {} from {} ({actor}) on change {}, round {}",
         comment.id,
@@ -807,7 +969,113 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<(), CliError> {
             .await
         }
         CommentCommand::Next(args) => Box::pin(next(ctx, args)).await,
+        CommentCommand::Answer(args) => Box::pin(answer(ctx, args)).await,
+        CommentCommand::Withdraw(args) => Box::pin(withdraw(ctx, args)).await,
     }
+}
+
+/// The text of `-m TEXT` or `-F FILE` (`-` for stdin).
+pub(crate) fn body(message: Option<&String>, file: Option<&PathBuf>) -> Result<String, CliError> {
+    match (message, file) {
+        (Some(message), _) => Ok(message.clone()),
+        (None, Some(path)) if path.as_os_str() == "-" => {
+            let mut text = String::new();
+            io::Read::read_to_string(&mut io::stdin(), &mut text).map_err(|source| {
+                CliError::Io {
+                    op: "read",
+                    path: "stdin".into(),
+                    source,
+                }
+            })?;
+            Ok(text)
+        }
+        (None, Some(path)) => std::fs::read_to_string(path).map_err(|source| CliError::Io {
+            op: "read",
+            path: path.clone(),
+            source,
+        }),
+        (None, None) => Err(CliError::Usage(
+            "give the text with -m TEXT or -F FILE".to_owned(),
+        )),
+    }
+}
+
+/// `reef comment answer`: an instruction replying to a help request on its
+/// change, which goes to the session that asked.
+async fn answer(ctx: &Ctx, args: AnswerArgs) -> Result<(), CliError> {
+    let scope = scope::resolve(ctx, &args.scope).await?;
+    let advice = AdviceCtx::new(&scope);
+    let answer_text = body(args.message.as_ref(), args.file.as_ref())?;
+    let asked = ctx
+        .call(ctx.client.get_comment(GetCommentRequest {
+            repo: scope.repo_id.clone(),
+            id: args.id.clone(),
+        }))
+        .await
+        .map_err(|error| advice.refine(error))?
+        .comment
+        .unwrap_or_default();
+    if asked.kind() != v1::CommentKind::HelpRequest {
+        return Err(CliError::Usage(format!(
+            "{} is not a help request; reply to other comments with reef comment add --reply-to",
+            args.id
+        )));
+    }
+    // A reply to a withdrawn help request is an ordinary instruction for
+    // the change's session, not an answer to the asker: say so rather than
+    // send it there.
+    if asked.help.as_ref().map(v1::HelpRequest::state) == Some(v1::HelpState::Withdrawn) {
+        return Err(CliError::Usage(format!(
+            "{} was withdrawn; to instruct the change's session anyway, run reef comment add --reply-to {} --instruction",
+            args.id, args.id
+        )));
+    }
+    let request = CreateCommentRequest {
+        repo: scope.repo_id.clone(),
+        workspace: scope.workspace_id(),
+        revision: reverse_hex(&asked.change_id),
+        reply_to: asked.id.clone(),
+        kind: v1::CommentKind::Instruction.into(),
+        text: answer_text,
+        actor: args
+            .actor
+            .map_or(v1::TransitionActor::Unspecified, v1::TransitionActor::from)
+            .into(),
+        client_session: client_session(None),
+        skip_snapshot: true,
+        ..CreateCommentRequest::default()
+    };
+    let response = Box::pin(ctx.call(ctx.client.create_comment(request)))
+        .await
+        .map_err(|error| advice.refine(error))?;
+    let written = Written {
+        comment: Comment::from(&response.comment.unwrap_or_default()),
+        confirm_refused: text(&response.confirm_refused),
+    };
+    ctx.out.object_with(&written, BriefComment::from)
+}
+
+/// `reef comment withdraw`.
+async fn withdraw(ctx: &Ctx, args: MessageArgs) -> Result<(), CliError> {
+    let scope = scope::resolve(ctx, &args.scope).await?;
+    let advice = AdviceCtx::new(&scope);
+    let response = ctx
+        .call(
+            ctx.client
+                .withdraw_help_request(WithdrawHelpRequestRequest {
+                    repo: scope.repo_id.clone(),
+                    id: args.id,
+                    summary: args.message.unwrap_or_default(),
+                    workspace: scope.workspace_id(),
+                }),
+        )
+        .await
+        .map_err(|error| advice.refine(error))?;
+    let comment = Comment::from(&response.comment.unwrap_or_default());
+    if response.operation.is_none() {
+        ctx.out.note("reef: already withdrawn; nothing recorded");
+    }
+    ctx.out.object_with(&comment, BriefComment::from)
 }
 
 /// Whether `args` asks for the hook mode, which `reef` runs before it
@@ -820,7 +1088,7 @@ pub(crate) fn is_hook(args: &Args) -> Option<&NextArgs> {
 }
 
 /// `N` or `N-M`.
-fn parse_lines(text: &str) -> Result<(u32, u32), CliError> {
+pub(crate) fn parse_lines(text: &str) -> Result<(u32, u32), CliError> {
     let bad = || CliError::Usage(format!("--lines {text}: give N or N-M, 1-based"));
     let (start, end) = match text.split_once('-') {
         Some((start, end)) => (start, end),
@@ -840,37 +1108,13 @@ fn millis(duration: Option<Duration>) -> u64 {
     })
 }
 
-#[expect(clippy::too_many_lines, reason = "the flags' checks, then the request")]
 async fn add(ctx: &Ctx, args: AddArgs) -> Result<(), CliError> {
     let scope = scope::resolve(ctx, &args.scope).await?;
     let advice = AdviceCtx {
         revision: Some(args.revision.clone()),
         ..AdviceCtx::new(&scope)
     };
-    let body = match (&args.message, &args.file) {
-        (Some(message), _) => message.clone(),
-        (None, Some(path)) if path.as_os_str() == "-" => {
-            let mut text = String::new();
-            io::Read::read_to_string(&mut io::stdin(), &mut text).map_err(|source| {
-                CliError::Io {
-                    op: "read",
-                    path: "stdin".into(),
-                    source,
-                }
-            })?;
-            text
-        }
-        (None, Some(path)) => std::fs::read_to_string(path).map_err(|source| CliError::Io {
-            op: "read",
-            path: path.clone(),
-            source,
-        })?,
-        (None, None) => {
-            return Err(CliError::Usage(
-                "give the text with -m TEXT or -F FILE".to_owned(),
-            ));
-        }
-    };
+    let body = body(args.message.as_ref(), args.file.as_ref())?;
     if args.confirm && !args.instruction {
         return Err(CliError::Usage(
             "--confirm confirms an instruction: add --instruction".to_owned(),
@@ -922,6 +1166,10 @@ async fn add(ctx: &Ctx, args: AddArgs) -> Result<(), CliError> {
             allow_unknown: args.allow_unknown,
         }),
         skip_snapshot: false,
+        // Who writes it: an answer to a help request from the session that
+        // asked is refused (R3.32).
+        client_session: client_session(None),
+        help: None,
     };
     let response = Box::pin(ctx.call(ctx.client.create_comment(request)))
         .await
@@ -983,6 +1231,11 @@ async fn list(ctx: &Ctx, args: ListArgs) -> Result<(), CliError> {
                         .iter()
                         .map(|state| v1::InstructionState::from(*state).into())
                         .collect(),
+                    help_states: args
+                        .help_states
+                        .iter()
+                        .map(|state| v1::HelpState::from(*state).into())
+                        .collect(),
                     client_session: args.for_session.clone().unwrap_or_default(),
                     ..ListCommentsRequest::default()
                 },
@@ -1029,17 +1282,18 @@ async fn update(
 ) -> Result<(), CliError> {
     let scope = scope::resolve(ctx, &scope_args).await?;
     let advice = AdviceCtx::new(&scope);
-    let response = ctx
-        .call(ctx.client.update_instruction(UpdateInstructionRequest {
+    let response = Box::pin(
+        ctx.call(ctx.client.update_instruction(UpdateInstructionRequest {
             repo: scope.repo_id.clone(),
             id,
             to: to.into(),
             expected_state: expected.into(),
             summary: message.unwrap_or_default(),
             workspace: scope.workspace_id(),
-        }))
-        .await
-        .map_err(|error| advice.refine(error))?;
+        })),
+    )
+    .await
+    .map_err(|error| advice.refine(error))?;
     let comment = Comment::from(&response.comment.unwrap_or_default());
     if response.operation.is_none() {
         ctx.out.note("reef: already so; nothing recorded");
@@ -1049,7 +1303,7 @@ async fn update(
 
 /// The client session this process speaks for: the flag, else the
 /// harness's environment, else [`CLIENT_SESSION_ENV`].
-fn client_session(flag: Option<String>) -> String {
+pub(crate) fn client_session(flag: Option<String>) -> String {
     flag.or_else(|| Ambient::current().client_session)
         .or_else(|| std::env::var(CLIENT_SESSION_ENV).ok())
         .map(|session| session.trim().to_owned())
@@ -1058,14 +1312,12 @@ fn client_session(flag: Option<String>) -> String {
 
 /// Claims one instruction, or waits up to `wait` for one, following the
 /// repository's comment operations.
-async fn claim_or_wait(
+pub(crate) async fn claim_or_wait(
     ctx: &Ctx,
     request: ClaimInstructionRequest,
     wait: Option<Duration>,
 ) -> Result<Option<v1::Comment>, CliError> {
-    let first = ctx
-        .call(ctx.client.claim_instruction(request.clone()))
-        .await?;
+    let first = Box::pin(ctx.call(ctx.client.claim_instruction(request.clone()))).await?;
     if first.comment.is_some() {
         return Ok(first.comment);
     }
@@ -1085,9 +1337,7 @@ async fn claim_or_wait(
         .await?;
     // A confirm between the first claim and the subscription is not on
     // the stream: claim once more now that it is.
-    let again = ctx
-        .call(ctx.client.claim_instruction(request.clone()))
-        .await?;
+    let again = Box::pin(ctx.call(ctx.client.claim_instruction(request.clone()))).await?;
     if again.comment.is_some() {
         return Ok(again.comment);
     }
@@ -1108,9 +1358,7 @@ async fn claim_or_wait(
             .iter()
             .any(|operation| operation.comments.iter().any(confirmed_event));
         if confirmed {
-            let claimed = ctx
-                .call(ctx.client.claim_instruction(request.clone()))
-                .await?;
+            let claimed = Box::pin(ctx.call(ctx.client.claim_instruction(request.clone()))).await?;
             if claimed.comment.is_some() {
                 return Ok(claimed.comment);
             }
@@ -1275,15 +1523,16 @@ async fn hook(global: &Global, args: &NextArgs) -> Result<Option<Taken>, CliErro
     for (repo, workspace) in repos {
         // Taken as DELIVERED, not started: one the deadline cuts off before
         // it is printed can still be released and taken again.
-        let claimed = ctx
-            .call(ctx.client.claim_instruction(ClaimInstructionRequest {
+        let claimed = Box::pin(
+            ctx.call(ctx.client.claim_instruction(ClaimInstructionRequest {
                 repo,
                 workspace,
                 client_session: session.clone(),
                 channel: v1::DeliveryChannel::Hook.into(),
                 ..ClaimInstructionRequest::default()
-            }))
-            .await;
+            })),
+        )
+        .await;
         let claimed = match claimed {
             Ok(claimed) => claimed,
             Err(error) => {
@@ -1344,6 +1593,10 @@ fn estimate_lines(estimate: &Estimate) -> Vec<String> {
     lines
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "a line per field: the comment's, an instruction's, a help request's"
+)]
 fn comment_pairs(comment: &Comment) -> Vec<(&'static str, String)> {
     let mut pairs = vec![
         ("comment", comment.id.clone()),
@@ -1421,6 +1674,30 @@ fn comment_pairs(comment: &Comment) -> Vec<(&'static str, String)> {
             }
         }
     }
+    if let Some(help) = &comment.help {
+        let mut state = help.state.clone().unwrap_or_default();
+        if let Some(cause) = help.cause.as_deref().filter(|c| *c != "request") {
+            let _ = write!(state, " ({cause})");
+        }
+        pairs.push(("state", state));
+        pairs.push(("reason", help.reason.clone().unwrap_or_default()));
+        if let Some(conflict) = &help.conflict_id {
+            let mut about = clean(conflict);
+            if help.conflict_moved {
+                about.push_str(" (moved since)");
+            }
+            pairs.push(("conflict", about));
+        }
+        if let Some(assignment) = &help.assignment_id {
+            pairs.push(("assignment", clean(assignment)));
+        }
+        if let Some(answer) = &help.answer_id {
+            pairs.push(("answer", clean(answer)));
+        }
+        if let Some(summary) = &help.summary {
+            pairs.push(("summary", clean(summary.lines().next().unwrap_or_default())));
+        }
+    }
     pairs
 }
 
@@ -1430,6 +1707,18 @@ impl TextRender for Comment {
         writeln!(w)?;
         for line in self.text.lines() {
             writeln!(w, "  {}", clean(line))?;
+        }
+        if let Some(help) = &self.help {
+            writeln!(w, "\n  tried:")?;
+            for line in help.tried.lines() {
+                writeln!(w, "  {}", clean(line))?;
+            }
+            if let Some(question) = &help.question {
+                writeln!(w, "\n  question:")?;
+                for line in question.lines() {
+                    writeln!(w, "  {}", clean(line))?;
+                }
+            }
         }
         Ok(())
     }
@@ -1482,6 +1771,7 @@ impl TextRow for Comment {
             self.instruction
                 .as_ref()
                 .and_then(|instruction| instruction.state.clone())
+                .or_else(|| self.help.as_ref().and_then(|help| help.state.clone()))
                 .unwrap_or_else(|| "-".to_owned()),
             clean(&who),
             self.anchor

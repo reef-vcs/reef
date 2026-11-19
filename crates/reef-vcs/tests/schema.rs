@@ -585,6 +585,41 @@ async fn outputs_match_their_schemas() {
         .await;
     let third = text(&written["comment"]["id"]);
     script.both(&c_dir, &["comment", "cancel", &third]).await;
+    // Help requests (R3.32): asked once per session, answered from outside
+    // the asking workspace (from inside, it would answer itself), listed,
+    // and withdrawn; a second withdrawal records nothing.
+    let ask = |session: &'static str| {
+        vec![
+            "ask",
+            "-m",
+            "Which config format?",
+            "--tried",
+            "read docs/config.md",
+            "--question",
+            "TOML or YAML?",
+            "--reason",
+            "decision",
+            "--client-session",
+            session,
+        ]
+    };
+    let asked = script.json(&c_dir, &ask("asker-1")).await;
+    let first_help = text(&asked["comment"]["id"]);
+    script.run(&c_dir, &ask("asker-2")).await;
+    let asked = script.json(&c_dir, &ask("asker-3")).await;
+    let third_help = text(&asked["comment"]["id"]);
+    script
+        .both(&root, &["comment", "answer", &first_help, "-m", "TOML"])
+        .await;
+    script
+        .both(
+            &c_dir,
+            &["comment", "list", "--kind", "help", "--help-state", "open"],
+        )
+        .await;
+    script
+        .both(&c_dir, &["comment", "withdraw", &third_help])
+        .await;
     // Its batch (R3.14).
     script.both(&lander_dir, &["landing", "batches"]).await;
     script.both(&lander_dir, &["landing", "batch", "@-"]).await;

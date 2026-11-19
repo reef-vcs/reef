@@ -34,10 +34,11 @@ pub struct CommentEventRecord {
     pub change: String,
     /// The change's proposal round when the comment was written.
     pub round: u32,
-    /// `note` or `instruction`.
+    /// `note`, `instruction` or `help_request`.
     pub kind: String,
     /// What happened: `comment`, `instruct`, `confirm`, `claim`, `start`,
-    /// `finish`, `cancel` or `release`.
+    /// `finish`, `cancel` or `release`; for a help request (R3.32), `ask`,
+    /// `answer`, `withdraw` or `reopen`.
     pub event: String,
     /// For an instruction, its state before.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -45,8 +46,16 @@ pub struct CommentEventRecord {
     /// For an instruction, its state after.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub to: String,
-    /// Why: `request`, `reproposed`, `change_final` or `expired`.
+    /// Why: `request`, `reproposed`, `change_final`, `expired` or
+    /// `answer_cancelled`.
     pub cause: String,
+    /// For a help request, its state before. Absent in records written
+    /// before R3.32, which readers of format 1 skip.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub help_from: String,
+    /// For a help request, its state after.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub help_to: String,
 }
 
 /// An operation's [`ATTR_COMMENT`] value.
@@ -298,6 +307,8 @@ mod tests {
             from: "awaiting_confirmation".to_owned(),
             to: "pending".to_owned(),
             cause: "request".to_owned(),
+            help_from: String::new(),
+            help_to: String::new(),
         }
     }
 
@@ -312,6 +323,36 @@ mod tests {
         assert_eq!(text.matches("\"from\"").count(), 1, "{text}");
         let attributes = BTreeMap::from([(ATTR_COMMENT.to_owned(), text)]);
         assert_eq!(comment_events_of(&attributes), vec![event(), note]);
+    }
+
+    /// A record written before R3.32 has no help states; one written
+    /// after has them, and a reader that knows none of them skips them.
+    #[test]
+    fn help_states_are_optional_both_ways() {
+        #[derive(serde::Deserialize)]
+        struct Older {
+            comments: Vec<OlderEvent>,
+        }
+        #[derive(serde::Deserialize)]
+        struct OlderEvent {
+            event: String,
+        }
+        let before = r#"{"v":1,"comments":[{"id":"cev_1","comment":"cmt_1","change":"ab","round":0,"kind":"note","event":"comment","cause":"request"}]}"#;
+        let attributes = BTreeMap::from([(ATTR_COMMENT.to_owned(), before.to_owned())]);
+        let read = comment_events_of(&attributes);
+        assert_eq!(read.len(), 1);
+        assert_eq!(read[0].help_to, "");
+        let mut ask = event();
+        ask.kind = "help_request".to_owned();
+        ask.event = "ask".to_owned();
+        ask.from.clear();
+        ask.to.clear();
+        ask.help_to = "open".to_owned();
+        let text = CommentRecord::encode(std::slice::from_ref(&ask));
+        assert!(text.contains(r#""help_to":"open""#), "{text}");
+        assert!(!text.contains("help_from"), "{text}");
+        let older: Older = serde_json::from_str(&text).unwrap();
+        assert_eq!(older.comments[0].event, "ask");
     }
 
     #[test]

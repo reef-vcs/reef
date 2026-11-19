@@ -827,6 +827,7 @@ mod tests {
             path: "/ws/1".into(),
             state: "active".into(),
             divergent: false,
+            help_request_id: None,
             attention: None,
             created_at: Some("2026-10-31T00:00:00.000Z".into()),
             last_snapshot_at: None,
