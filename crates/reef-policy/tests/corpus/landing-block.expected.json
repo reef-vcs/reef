@@ -9,7 +9,8 @@
     "lines_added": 3,
     "lines_removed": 1,
     "paths": 1,
-    "provenance": 1
+    "provenance": 1,
+    "resolutions": 0
   },
   "rules": [
     {
@@ -67,6 +68,18 @@
       "message": "",
       "missing": [],
       "name": "builtin:owners",
+      "paths": [],
+      "paths_total": 0,
+      "signoff": null,
+      "status": "not_applicable"
+    },
+    {
+      "evidence_ids": [],
+      "failed": [],
+      "kind": "builtin",
+      "message": "",
+      "missing": [],
+      "name": "builtin:resolution",
       "paths": [],
       "paths_total": 0,
       "signoff": null,

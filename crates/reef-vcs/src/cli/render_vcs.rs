@@ -164,16 +164,29 @@ impl TextRender for RepoStatus {
                     "Each side, where it came from and who wrote it: reef conflict show"
                 )?;
             }
-            if ws.conflict_assignment_count > 0 {
+            // R3.28: a conflict that waits for a person is not the agent's
+            // to resolve.
+            let blocked = u32::try_from(
+                ws.conflict_assignments
+                    .iter()
+                    .filter(|row| row.state.as_deref() == Some("blocked"))
+                    .count(),
+            )
+            .unwrap_or(u32::MAX);
+            let to_resolve = ws.conflict_assignment_count.saturating_sub(blocked);
+            let plural = |n: u32| if n == 1 { "" } else { "s" };
+            if to_resolve > 0 {
                 writeln!(
                     w,
-                    "Assigned to you: {} conflict{} to resolve: reef conflict assignments --mine",
-                    ws.conflict_assignment_count,
-                    if ws.conflict_assignment_count == 1 {
-                        ""
-                    } else {
-                        "s"
-                    }
+                    "Assigned to you: {to_resolve} conflict{} to resolve: reef conflict assignments --mine",
+                    plural(to_resolve)
+                )?;
+            }
+            if blocked > 0 {
+                writeln!(
+                    w,
+                    "Waiting for a person: {blocked} conflict{} (policy tier `ask`, or out of attempts); do not resolve: reef conflict assignments --mine --state blocked",
+                    plural(blocked)
                 )?;
             }
             if let Some(workspace) = &ws.workspace {

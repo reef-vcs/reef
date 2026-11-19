@@ -56,6 +56,7 @@ pub use artifacts::{
 };
 pub use conflict_assignments::{
     AssignmentEventRow, AssignmentFilter, AssignmentRow, OPEN_ASSIGNMENT_STATES, OwnerColumns,
+    TierColumns,
 };
 pub use evidence::{
     EVIDENCE_ID_LEN, EvidenceFilter, EvidenceKeyRow, EvidenceLinkRow, EvidenceRow, Inserted,
@@ -97,7 +98,9 @@ pub use lifecycle::{
 /// (R3.12), `0017_conflict_assignments` (R3.27), `0018_history` (R3.16),
 /// `0019_workspace_disk` (#272), `0020_landing_pushes` (R3.17),
 /// `0021_landing_stacks` (R3.10), `0023_automatic_landing` (R3.45;
-/// `0022` is #262's) and `0025_help_requests` (R3.32; `0024` is R3.28's).
+/// `0022` is #262's), `0025_help_requests` (R3.32) and
+/// `0026_resolution_tiers` (R3.28, numbered after R3.32's, which merged
+/// first; `0024` is unused).
 /// They are independent of each other, so a database may have a later one
 /// without an earlier one; see [`migrate`].
 const MIGRATIONS: &[(&str, &str)] = &[
@@ -177,6 +180,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0025_help_requests",
         include_str!("migrations/0025_help_requests.sql"),
+    ),
+    (
+        "0026_resolution_tiers",
+        include_str!("migrations/0026_resolution_tiers.sql"),
     ),
 ];
 
@@ -865,8 +872,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("reef.sqlite3");
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 23);
-        assert_eq!(SCHEMA_VERSION, 23);
+        assert_eq!(db.schema_version().unwrap(), SCHEMA_VERSION);
         let instance_id = db.meta(META_DAEMON_INSTANCE_ID).unwrap().unwrap();
         assert!(instance_id.parse::<crate::model::RepoId>().is_ok());
         let created_at = db.meta(META_CREATED_AT).unwrap().unwrap();
@@ -874,7 +880,7 @@ mod tests {
         drop(db);
 
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 23);
+        assert_eq!(db.schema_version().unwrap(), SCHEMA_VERSION);
         assert_eq!(
             db.meta(META_DAEMON_INSTANCE_ID).unwrap().unwrap(),
             instance_id
@@ -917,7 +923,7 @@ mod tests {
                 error,
                 DbError::TooNew {
                     found: 99,
-                    supported: 23
+                    supported: SCHEMA_VERSION
                 }
             ),
             "{error:?}"
@@ -956,7 +962,8 @@ mod tests {
                 "0020_landing_pushes",
                 "0021_landing_stacks",
                 "0023_automatic_landing",
-                "0025_help_requests"
+                "0025_help_requests",
+                "0026_resolution_tiers"
             ]
         );
         // A newer daemon applied a migration this binary does not have, without
@@ -982,7 +989,7 @@ mod tests {
         drop(conn);
 
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 23);
+        assert_eq!(db.schema_version().unwrap(), SCHEMA_VERSION);
         assert_eq!(
             db.with(applied_migrations).unwrap(),
             [
@@ -1008,7 +1015,8 @@ mod tests {
                 "0020_landing_pushes",
                 "0021_landing_stacks",
                 "0023_automatic_landing",
-                "0025_help_requests"
+                "0025_help_requests",
+                "0026_resolution_tiers"
             ]
         );
         let repo = "aaaa000000000001".parse().unwrap();
@@ -1053,7 +1061,7 @@ mod tests {
         drop(conn);
 
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 23);
+        assert_eq!(db.schema_version().unwrap(), SCHEMA_VERSION);
         assert_eq!(db.repository(record.id).unwrap().tracked_files, None);
         assert_eq!(
             db.workspace(ws.id).unwrap().watcher,
@@ -1062,7 +1070,7 @@ mod tests {
     }
 
     // R3.01 test 8: a schema 6 database gains the evidence tables with its
-    // rows intact; one at 8 is refused.
+    // rows intact; one newer than this build is refused.
     #[test]
     fn migration_7() {
         use crate::db::repositories::tests::repo;
@@ -1090,8 +1098,7 @@ mod tests {
         drop(conn);
 
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 23);
-        assert_eq!(SCHEMA_VERSION, 23);
+        assert_eq!(db.schema_version().unwrap(), SCHEMA_VERSION);
         assert_eq!(db.repository(record.id).unwrap().root, record.root);
         assert_eq!(db.evidence_counts().unwrap(), (0, 0, 0));
         drop(db);
@@ -1104,10 +1111,7 @@ mod tests {
         assert!(
             matches!(
                 error,
-                DbError::TooNew {
-                    found: 24,
-                    supported: 23
-                }
+                DbError::TooNew { found, supported: SCHEMA_VERSION } if found == SCHEMA_VERSION + 1
             ),
             "{error:?}"
         );
@@ -1191,8 +1195,7 @@ mod tests {
         drop(conn);
 
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 23);
-        assert_eq!(SCHEMA_VERSION, 23);
+        assert_eq!(db.schema_version().unwrap(), SCHEMA_VERSION);
         assert_eq!(
             db.artifacts_of_evidence(record.id, "e1").unwrap(),
             [a.clone(), b.clone()]
@@ -1279,8 +1282,7 @@ mod tests {
         drop(conn);
 
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 23);
-        assert_eq!(SCHEMA_VERSION, 23);
+        assert_eq!(db.schema_version().unwrap(), SCHEMA_VERSION);
         assert_eq!(db.evidence_counts().unwrap(), (1, 0, 1));
         let tokens = db.remote_tokens().unwrap();
         assert_eq!(tokens.len(), 1);
@@ -1337,8 +1339,7 @@ mod tests {
         drop(conn);
 
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 23);
-        assert_eq!(SCHEMA_VERSION, 23);
+        assert_eq!(db.schema_version().unwrap(), SCHEMA_VERSION);
         assert_eq!(db.evidence_counts().unwrap(), (1, 0, 1));
         assert_eq!(db.identities().unwrap().len(), 1);
         assert_eq!(db.provenance_counts().unwrap(), (0, 0));
@@ -1393,8 +1394,7 @@ mod tests {
         drop(conn);
 
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 23);
-        assert_eq!(SCHEMA_VERSION, 23);
+        assert_eq!(db.schema_version().unwrap(), SCHEMA_VERSION);
         assert_eq!(db.evidence_counts().unwrap(), (1, 0, 1));
         assert_eq!(db.repository(record.id).unwrap().root, record.root);
         assert_eq!(db.open_jobs().unwrap(), Vec::new());
@@ -1404,6 +1404,74 @@ mod tests {
             })
             .unwrap();
         assert_eq!(sessions, 1);
+    }
+
+    // R3.28: a database as a daemon built from R3.32's main left it (schema
+    // 23, its last migration `0025_help_requests`) gains
+    // `0026_resolution_tiers`, and each open assignment counts the attempts
+    // already started: its default owner's and its claims.
+    #[test]
+    fn a_schema_23_database_counts_attempts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reef.sqlite3");
+        let conn = Connection::open(&path).unwrap();
+        let before = MIGRATIONS
+            .iter()
+            .position(|(name, _)| *name == "0026_resolution_tiers")
+            .unwrap();
+        assert_eq!(MIGRATIONS[before - 1].0, "0025_help_requests");
+        for (index, (name, sql)) in MIGRATIONS[..before].iter().enumerate() {
+            conn.execute_batch(sql).unwrap();
+            conn.execute(
+                "INSERT INTO meta(key, value) VALUES (?1, '0')",
+                [format!("{META_MIGRATION_PREFIX}{name}")],
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", i64::try_from(index + 1).unwrap())
+                .unwrap();
+        }
+        for (id, claims, reason) in [("asg_1", 2, "default"), ("asg_2", 1, "owner_ended")] {
+            conn.execute(
+                "INSERT INTO conflict_assignments(repo_id, id, change_id, kind, commit_id,
+                   conflict_id, first_conflict_id, introduced, files_total, state, reason,
+                   claims, opened_at, updated_at, conflict_changed_at)
+                 VALUES ('aaaa000000000001', ?1, ?1, 'tree', 'c', 'cfl', 'cfl', 1, 1, 'queued',
+                   'released', ?2, 1, 1, 1)",
+                rusqlite::params![id, claims],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO conflict_assignment_events(repo_id, id, seq, assignment_id,
+                   change_id, conflict_id, to_state, reason, priority, by_actor, at)
+                 VALUES ('aaaa000000000001', ?1, 1, ?2, ?2, 'cfl', 'assigned', ?3, 0, 'daemon', 1)",
+                rusqlite::params![format!("cae_{id}"), id, reason],
+            )
+            .unwrap();
+        }
+        let found: u32 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(found, u32::try_from(before).unwrap());
+        drop(conn);
+
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.schema_version().unwrap(), SCHEMA_VERSION);
+        assert_eq!(
+            db.with(applied_migrations)
+                .unwrap()
+                .get(before)
+                .map(String::as_str),
+            Some("0026_resolution_tiers")
+        );
+        let attempts: Vec<(String, i64)> = db
+            .with(|conn| {
+                let mut stmt =
+                    conn.prepare("SELECT id, attempts FROM conflict_assignments ORDER BY id")?;
+                stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .collect()
+            })
+            .unwrap();
+        assert_eq!(attempts, [("asg_1".to_owned(), 3), ("asg_2".to_owned(), 1)]);
     }
 
     // R1.18: a restore into another state directory moves every path under

@@ -33,6 +33,12 @@ enum ConflictAssignmentState {
   CONFLICT_ASSIGNMENT_STATE_UNOWNED = 4;
   // The change no longer carries the conflict; `reason` says how.
   CONFLICT_ASSIGNMENT_STATE_CLOSED = 5;
+  // Waiting for a person (R3.28): its tier is `ask` and no person gave the
+  // go-ahead (reason ASK), or its attempts are used up (reason ATTEMPTS).
+  // Out of the queue and refused to agents; `owner` is who it would go to.
+  // A person moves it on with AssignConflict (`allow`, a workspace, the
+  // queue, or `take`).
+  CONFLICT_ASSIGNMENT_STATE_BLOCKED = 6;
 }
 
 // Why an assignment's state and owner are what they are.
@@ -76,6 +82,78 @@ enum ConflictAssignmentReason {
   // A closed assignment opened again: the same conflict came back within
   // 24 hours.
   CONFLICT_ASSIGNMENT_REASON_REOPENED = 15;
+  // Blocked: its tier is `ask`, and no person gave the go-ahead (R3.28).
+  CONFLICT_ASSIGNMENT_REASON_ASK = 16;
+  // Blocked: its attempts are used up (R3.28).
+  CONFLICT_ASSIGNMENT_REASON_ATTEMPTS = 17;
+  // A person gave the go-ahead, or granted attempts (R3.28).
+  CONFLICT_ASSIGNMENT_REASON_ALLOWED = 18;
+}
+
+// How a conflict's resolution may proceed (R3.28): the `[conflicts]` table
+// of `reef-policy.toml`.
+enum ConflictTier {
+  // Not set: not looked up yet.
+  CONFLICT_TIER_UNSPECIFIED = 0;
+  // Resolve and land.
+  CONFLICT_TIER_LAND = 1;
+  // Resolve, and landing needs a person's sign-off.
+  CONFLICT_TIER_APPROVE = 2;
+  // Ask a person before attempting; landing needs a person's sign-off.
+  CONFLICT_TIER_ASK = 3;
+}
+
+// What policy gives an assignment's conflict (R3.28), and what it was
+// looked up from.
+message ConflictTierDecision {
+  // The tier.
+  ConflictTier tier = 1;
+  // The policy's attempt cap.
+  uint32 attempts = 2;
+  // The index of the `[[conflicts.rule]]` that decided; unset when the
+  // `[conflicts]` defaults did.
+  optional uint32 rule = 3;
+  // The commit of `trunk()` the policy was read at.
+  string policy_commit = 4;
+  // The SHA-256 of the policy's bytes; empty when there was no policy,
+  // and the defaults applied.
+  string policy_sha256 = 5;
+  // Non-empty: the tier is ASK because the policy is invalid or the lookup
+  // failed, and this says why.
+  string error = 6;
+  // The conflict id it was looked up for.
+  string conflict_id = 7;
+  // When.
+  google.protobuf.Timestamp looked_up_at = 8;
+}
+
+// One conflict a change resolved (R3.28): a resolver assignment of the
+// change closed RESOLVED.
+message ConflictResolution {
+  // The assignment, `asg_` and 16 hex digits.
+  string assignment_id = 1;
+  // The last conflicted commit; GetConflict at this revision reads both
+  // sides and their provenance while jj indexes it.
+  string conflicted_commit_id = 2;
+  // The commit that no longer carried the conflict.
+  string resolved_commit_id = 3;
+  // The tier when it was resolved.
+  ConflictTier tier = 4;
+  // Attempts started.
+  uint32 attempts = 5;
+  // Attempts allowed: the cap plus grants.
+  uint32 attempt_limit = 6;
+  // Landing the change needs a person's sign-off (`builtin:resolution`).
+  bool approval = 7;
+  // The session that recorded the resolving commit; empty when Reef did
+  // not record it.
+  string resolved_session_id = 8;
+  // That session's agent.
+  string resolved_agent = 9;
+  // That session's actor: `human` or `agent`; empty when unknown.
+  string resolved_actor = 10;
+  // When the assignment closed.
+  google.protobuf.Timestamp resolved_at = 11;
 }
 
 // Who owns an assignment, as recorded when it took it. A session owner is a

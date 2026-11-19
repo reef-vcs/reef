@@ -7,7 +7,8 @@
 //! replies to it is an answer: it goes to the session that asked, written
 //! PENDING, and the help request becomes ANSWERED in the answer's own
 //! operation. Its other moves (withdraw, reopen when every answer was
-//! cancelled before delivery, and the sweep's `change_final` and `expired`)
+//! cancelled before delivery, the sweep's `change_final` and `expired`, and
+//! `conflict_unblocked` when the conflict assignment it names leaves BLOCKED)
 //! are events like an instruction's, recorded by the same write path.
 
 use std::sync::Arc;
@@ -125,6 +126,8 @@ pub struct HelpInput {
     pub question: String,
     /// An assignment id, a conflict id, or empty for the change's conflict.
     pub conflict: String,
+    /// Ask only while the conflict's assignment is blocked (R3.28).
+    pub while_blocked: bool,
 }
 
 /// Checks what needs no repository: `tried` is required, the question
@@ -220,6 +223,28 @@ pub fn conflict_reference(
     Ok((current.to_owned(), open_assignment()?))
 }
 
+/// For a help request asked `while_blocked`: refused unless the assignment
+/// in `conflict` (as [`conflict_reference`] returned it) is open and
+/// BLOCKED.
+pub fn check_blocked(
+    state: &AppState,
+    repo: RepoId,
+    conflict: Option<&(String, Option<String>)>,
+) -> Result<(), CommentError> {
+    let assignment = conflict
+        .and_then(|(_, assignment)| assignment.clone())
+        .unwrap_or_default();
+    let blocked = !assignment.is_empty()
+        && state.db.assignment(repo, &assignment)?.is_some_and(|row| {
+            row.closed_at.is_none() && row.state == crate::assign::State::Blocked.as_str()
+        });
+    if blocked {
+        Ok(())
+    } else {
+        Err(CommentError::ConflictNotBlocked { assignment })
+    }
+}
+
 /// The session an answer to `help` is for: the one that asked it. `None`
 /// when it named neither a client session nor a Reef session, so any
 /// session on the change may take the answer. A help request asked through
@@ -295,11 +320,13 @@ pub fn is_self_answer(
     }
 }
 
-/// The columns of a new help request.
+/// The columns of a new help request; `assignment_seq` is its
+/// assignment's last event seq when asked.
 pub fn columns(
     input: &HelpInput,
     client_session: Option<String>,
     conflict: Option<(String, Option<String>)>,
+    assignment_seq: Option<i64>,
 ) -> HelpColumns {
     let (conflict_id, assignment_id) = match conflict {
         Some((conflict, assignment)) => (Some(conflict), assignment),
@@ -313,6 +340,7 @@ pub fn columns(
         client_session,
         conflict_id,
         assignment_id,
+        assignment_seq,
         cause: "request".to_owned(),
         ..HelpColumns::default()
     }
@@ -350,7 +378,8 @@ pub(super) fn move_event(
     }
 }
 
-/// A daemon move of `help` (the sweep's `change_final` and `expired`).
+/// A daemon move of `help` (the sweep's `change_final` and `expired`, and
+/// `conflict_unblocked`).
 pub(super) fn daemon_move(
     help: &CommentRow,
     to: HelpState,

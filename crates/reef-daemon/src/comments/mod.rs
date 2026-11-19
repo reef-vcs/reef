@@ -394,6 +394,13 @@ pub enum CommentError {
         /// The commit.
         commit: String,
     },
+    /// A help request asked `while_blocked` about an assignment that does
+    /// not wait for a person.
+    #[error("conflict assignment {assignment:?} does not wait for a person")]
+    ConflictNotBlocked {
+        /// The assignment; empty when the change has none open.
+        assignment: String,
+    },
     /// A conflict id the change no longer has.
     #[error("the change's conflict is now {conflict_id}")]
     ConflictChanged {
@@ -483,6 +490,7 @@ impl Classify for CommentError {
             | Self::ClaimScopeRequired
             | Self::NotConflicted { .. }
             | Self::ConflictChanged { .. }
+            | Self::ConflictNotBlocked { .. }
             | Self::HelpAlreadyOpen { .. }
             | Self::SelfAnswer { .. }
             | Self::NotAHelpRequest { .. }
@@ -567,6 +575,10 @@ impl CommentError {
                 reason::CONFLICT_CHANGED,
                 vec![("conflict_id", conflict_id.clone())],
             ),
+            Self::ConflictNotBlocked { assignment } => (
+                reason::CONFLICT_NOT_BLOCKED,
+                vec![("assignment", assignment.clone())],
+            ),
             Self::HelpAlreadyOpen { id } => (reason::HELP_ALREADY_OPEN, vec![("id", id.clone())]),
             Self::SelfAnswer { id } => (reason::SELF_ANSWER, vec![("id", id.clone())]),
             Self::NotAHelpRequest { id } => (reason::NOT_A_HELP_REQUEST, vec![("id", id.clone())]),
@@ -622,6 +634,10 @@ impl Advise for CommentError {
             Self::ConflictChanged { conflict_id } => Some(Advice::hint(format!(
                 "Read the conflict again (`reef conflict show`); it is {conflict_id} now. Name its assignment id instead, which stays."
             ))),
+            Self::ConflictNotBlocked { .. } => Some(Advice::run(
+                "The conflict no longer waits for a person: someone allowed or took it, or the policy changed. `reef here` says what to do now.",
+                ["reef", "here"],
+            )),
             Self::HelpAlreadyOpen { id } => Some(Advice::run(
                 format!(
                     "Wait for the answer to {id}, or withdraw it (`reef comment withdraw {id}`) and ask again."
@@ -1385,7 +1401,27 @@ async fn create_inner(
             )?),
             None => None,
         };
-        Some(help::columns(&input, client_session.clone(), conflict))
+        // Read under the comment lock: an unblock commits its rows before
+        // it withdraws (`after_unblocked`), so either this sees the row
+        // unblocked or the withdrawal sees this help request. The seq is
+        // read first, so an unblock the check missed has a later one, which
+        // reconcile finds when that withdrawal never ran.
+        let seen = match conflict
+            .as_ref()
+            .and_then(|(_, assignment)| assignment.as_deref())
+        {
+            Some(assignment) => state.db.last_assignment_seq(repo, assignment)?,
+            None => None,
+        };
+        if input.while_blocked {
+            help::check_blocked(state, repo, conflict.as_ref())?;
+        }
+        Some(help::columns(
+            &input,
+            client_session.clone(),
+            conflict,
+            seen,
+        ))
     } else {
         None
     };
@@ -2087,10 +2123,63 @@ pub async fn after_transitions(
     record_daemon(state, repo, planned).await
 }
 
+/// Withdraws the open help requests with reason CONFLICT that name one of
+/// `unblocked`, `(change, assignment, seq)` triples whose assignment just
+/// left BLOCKED in its event `seq` (R3.28): a person allowed or took the
+/// conflict, or a policy change lets an agent attempt it, so the asker need
+/// not wait for an answer (cause `conflict_unblocked`). Only help requests
+/// asked before that event, as reconcile judges them: one asked after a
+/// later block is about that block. One operation for the lot; automatic
+/// landing judges the changes again.
+pub async fn after_unblocked(
+    state: &AppState,
+    repo: RepoId,
+    unblocked: &[(String, String, i64)],
+) -> Result<Option<OperationIdHex>, CommentError> {
+    if unblocked.is_empty() {
+        return Ok(None);
+    }
+    let create_lock = state.manager.repo_lock(repo);
+    let _shared = create_lock.read().await;
+    let comment_lock = state.comments.lock(repo);
+    let _held = comment_lock.lock().await;
+    let mut planned = Vec::new();
+    let mut released = Vec::new();
+    for (change, assignment, seq) in unblocked {
+        for asked in
+            state
+                .db
+                .help_requests_of_change(repo, change, &[help::HelpState::Open.as_str()])?
+        {
+            let names_it = asked.help.as_ref().is_some_and(|columns| {
+                columns.reason == help::Reason::Conflict.as_str()
+                    && columns.assignment_id.as_deref() == Some(assignment.as_str())
+                    && columns.assignment_seq.is_some_and(|seen| seen < *seq)
+            });
+            if names_it {
+                planned.extend(help::daemon_move(
+                    &asked,
+                    help::HelpState::Withdrawn,
+                    "conflict_unblocked",
+                    None,
+                ));
+                released.push(change.clone());
+            }
+        }
+    }
+    let op_id = record_daemon(state, repo, planned).await?;
+    if !released.is_empty() {
+        state.automatic.mark(repo, released);
+    }
+    Ok(op_id)
+}
+
 /// Finishes or cancels, from the database alone, every instruction a
 /// committed transition made moot whose notice never reached the sweep (a
 /// restart dropped the queue, or start-up committed the transition late):
-/// the same moves [`after_transitions`] makes. Returns how many it moved.
+/// the same moves [`after_transitions`] makes, and [`after_unblocked`]'s
+/// for help requests whose conflict stopped waiting. Returns how many it
+/// moved.
 pub async fn reconcile(state: &AppState) -> Result<usize, CommentError> {
     let mut moved = 0;
     for repo in state.db.repos_with_open_instructions()? {
@@ -2117,7 +2206,9 @@ pub async fn reconcile(state: &AppState) -> Result<usize, CommentError> {
             };
             planned.push(daemon_event(&comment, from, to, cause, Some(&transition)));
         }
+        let mut seen: BTreeSet<String> = BTreeSet::new();
         for (asked, transition) in state.db.moot_help_requests(repo)? {
+            seen.insert(asked.id.clone());
             planned.extend(help::daemon_move(
                 &asked,
                 help::HelpState::Withdrawn,
@@ -2125,9 +2216,24 @@ pub async fn reconcile(state: &AppState) -> Result<usize, CommentError> {
                 Some(&transition),
             ));
         }
+        // What `after_unblocked` missed: a restart, or a failed write.
+        let mut released = Vec::new();
+        for asked in state.db.unblocked_help_requests(repo)? {
+            if seen.insert(asked.id.clone()) {
+                released.push(asked.change_id.clone());
+                planned.extend(help::daemon_move(
+                    &asked,
+                    help::HelpState::Withdrawn,
+                    "conflict_unblocked",
+                    None,
+                ));
+            }
+        }
         moved += planned.len();
         if let Err(error) = record_daemon(state, repo, planned).await {
             tracing::warn!(%repo, error = %ErrorChain(&error), "cannot reconcile instructions");
+        } else if !released.is_empty() {
+            state.automatic.mark(repo, released);
         }
     }
     Ok(moved)

@@ -532,7 +532,8 @@ pub(crate) struct Help {
     /// `open`, `answered` or `withdrawn`.
     #[schemars(schema_with = "help_state_schema")]
     state: Option<String>,
-    /// `request`, `change_final`, `expired` or `answer_cancelled`.
+    /// `request`, `change_final`, `expired`, `answer_cancelled` or
+    /// `conflict_unblocked`.
     #[schemars(schema_with = "cause_schema")]
     cause: Option<String>,
     /// `decision`, `conflict`, `blocked`, `unclear` or `other`.

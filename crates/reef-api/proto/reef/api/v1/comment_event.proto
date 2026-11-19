@@ -31,7 +31,8 @@ enum HelpState {
   // An instruction replying to it was written.
   HELP_STATE_ANSWERED = 2;
   // The asker no longer needs it, or its change landed or was superseded,
-  // or it was left open past its time.
+  // or it was left open past its time, or (reason CONFLICT) the conflict
+  // assignment it names stopped waiting for a person.
   HELP_STATE_WITHDRAWN = 3;
 }
 
@@ -72,6 +73,11 @@ enum InstructionCause {
   // A help request's every answer was cancelled before one was delivered,
   // so it is open again.
   INSTRUCTION_CAUSE_ANSWER_CANCELLED = 5;
+  // An open help request with reason CONFLICT was withdrawn because the
+  // conflict assignment it names left BLOCKED (R3.28): a person allowed or
+  // took the conflict, a policy change lets an agent attempt it, or the
+  // assignment closed.
+  INSTRUCTION_CAUSE_CONFLICT_UNBLOCKED = 6;
 }
 
 // One comment write as an operation's `reef.comment` attribute records it:

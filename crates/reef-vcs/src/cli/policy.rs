@@ -741,6 +741,7 @@ pub(crate) fn evaluation_of(message: &v1::PolicyEvaluation) -> Evaluation {
             evidence_ignored: i64::from(input.evidence_ignored),
             provenance: i64::from(input.provenance),
             conflicted: input.conflicted,
+            resolutions: i64::from(input.resolutions),
         },
         cost: message.cost,
     }

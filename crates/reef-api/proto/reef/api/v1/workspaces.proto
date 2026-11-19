@@ -14,6 +14,7 @@ package reef.api.v1;
 
 import "google/protobuf/duration.proto";
 import "google/protobuf/timestamp.proto";
+import "reef/api/v1/assignments.proto";
 import "reef/api/v1/lifecycle.proto";
 import "reef/api/v1/operations.proto";
 import "reef/api/v1/options.proto";
@@ -436,8 +437,18 @@ message Workspace {
   ChangeLifecycle lifecycle = 28;
   // Conflicted paths in its working-copy commit; set where `step` is.
   uint32 conflicted_path_count = 29;
-  // With step AWAIT_HELP: the help request it waits on (R3.32).
+  // With step AWAIT_HELP: the help request it waits on (R3.32). With step
+  // ASK: the help request about the blocked conflict that the session
+  // asked since the conflict last became blocked or changed and whose
+  // answer it took, when there is one. Asking again is no use then: a person must allow or take
+  // the conflict.
   string help_request_id = 30;
+  // With step ASK: the conflict's assignment (`asg_`) that waits for a
+  // person (R3.28), for `reef ask --reason conflict --conflict`.
+  string conflict_assignment_id = 31;
+  // With step ASK: why the conflict waits, ASK (its policy tier) or
+  // ATTEMPTS (its attempt limit is used up) (R3.28).
+  ConflictAssignmentReason conflict_block_reason = 32;
 }
 
 // Another open change that changes a path a workspace's change changes

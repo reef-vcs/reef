@@ -663,6 +663,11 @@ impl WorkspaceService for WorkspacesService {
                 workspace.changed_file_count = Some(stepped.changed_file_count);
                 workspace.conflicted_path_count = stepped.conflicted_path_count;
                 workspace.help_request_id = stepped.help_request_id.unwrap_or_default();
+                workspace.conflict_assignment_id =
+                    stepped.conflict_assignment_id.unwrap_or_default();
+                if let Some(reason) = stepped.conflict_block_reason {
+                    workspace.set_conflict_block_reason(reason);
+                }
             }
         }
         Ok(Response::new(GetWorkspaceResponse {

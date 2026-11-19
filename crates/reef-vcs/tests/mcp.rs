@@ -1753,3 +1753,184 @@ async fn ask_for_help_then_wait() {
         "{frame}"
     );
 }
+
+/// A daemon whose `main` has an `ask` policy, and a conflict that workspace
+/// `b` (returned) owns, blocked: its assignment's id.
+async fn blocked_conflict() -> (TestDaemon, SyntheticRepo, v1::Workspace, String) {
+    let (daemon, repo) = fixture_with(|config| config.file.history.enabled = false).await;
+    daemon.handle.state().manager.scheduler().pause_watcher();
+    daemon
+        .handle
+        .state()
+        .assignments
+        .set_grace(Duration::from_hours(1));
+    let client = &daemon.client;
+    let policy = client
+        .edit_files(v1::EditFilesRequest {
+            repo: repo.id.clone(),
+            target: Some(v1::edit_files_request::Target::NewOn("root()".to_owned())),
+            edits: vec![v1::FileEdit {
+                path: "reef-policy.toml".to_owned(),
+                action: Some(v1::file_edit::Action::Content(
+                    b"version = 1\n[owners]\nidentities = [\"alice\"]\n[conflicts]\ntier = \"ask\"\n"
+                        .to_vec(),
+                )),
+                executable: None,
+            }],
+            ..v1::EditFilesRequest::default()
+        })
+        .await
+        .unwrap()
+        .change
+        .unwrap()
+        .commit_id;
+    let root = repo.root.clone();
+    tokio::task::spawn_blocking(move || common::conflict::bookmark(&root, "main", &policy))
+        .await
+        .unwrap();
+    client
+        .create_identity(v1::CreateIdentityRequest {
+            name: "alice".to_owned(),
+            kind: v1::IdentityKind::Person.into(),
+            ..v1::CreateIdentityRequest::default()
+        })
+        .await
+        .unwrap();
+    let mut commits = Vec::new();
+    let mut workspaces = Vec::new();
+    for (owner, text) in [("agent-a@test", "from a"), ("agent-b@test", "from b")] {
+        let ws = client
+            .create_workspace(v1::CreateWorkspaceRequest {
+                repo: repo.id.clone(),
+                owner: owner.to_owned(),
+                ..v1::CreateWorkspaceRequest::default()
+            })
+            .await
+            .unwrap()
+            .workspace
+            .unwrap();
+        std::fs::write(
+            Path::new(&ws.path).join("conflict.txt"),
+            format!("one\n{text}\nthree\n"),
+        )
+        .unwrap();
+        commits.push(
+            client
+                .snapshot_workspace("", &ws.id, "")
+                .await
+                .unwrap()
+                .commit_id,
+        );
+        workspaces.push(ws);
+    }
+    let (root, b, a) = (repo.root.clone(), commits[1].clone(), commits[0].clone());
+    tokio::task::spawn_blocking(move || common::conflict::rebase(&root, &b, &a))
+        .await
+        .unwrap();
+    let blocked = client
+        .list_conflict_assignments(
+            v1::ListConflictAssignmentsRequest {
+                repo: repo.id.clone(),
+                ..v1::ListConflictAssignmentsRequest::default()
+            },
+            0,
+        )
+        .await
+        .unwrap()
+        .items;
+    assert_eq!(blocked.len(), 1, "{blocked:#?}");
+    assert_eq!(blocked[0].state(), v1::ConflictAssignmentState::Blocked);
+    let assignment = blocked[0].id.clone();
+    let b = workspaces.pop().unwrap();
+    (daemon, repo, b, assignment)
+}
+
+/// A person's go-ahead on `assignment`.
+async fn allow(daemon: &TestDaemon, repo: &SyntheticRepo, assignment: &str) {
+    daemon
+        .client
+        .assign_conflict(v1::AssignConflictRequest {
+            repo: repo.id.clone(),
+            assignment: assignment.to_owned(),
+            target: Some(v1::assign_conflict_request::Target::Allow(true)),
+            actor: v1::TransitionActor::Human.into(),
+            ..v1::AssignConflictRequest::default()
+        })
+        .await
+        .unwrap();
+}
+
+/// `reef mcp` in `ws`, for client session `session`.
+async fn agent_in(daemon: &TestDaemon, ws: &v1::Workspace, session: &str) -> Mcp {
+    let mut mcp = command(daemon, Path::new(&ws.path));
+    mcp.env("CLAUDECODE", "1")
+        .env("CLAUDE_CODE_SESSION_ID", session);
+    Mcp::start(mcp).await
+}
+
+// #335 review: an MCP agent that read step `ask`, then asks after a person
+// allowed the conflict, is refused as `reef here`'s `next` would be, so it
+// resolves instead of waiting on a help request nothing withdraws.
+#[tokio::test(flavor = "multi_thread")]
+async fn ask_for_help_after_an_allow_is_refused() {
+    let (daemon, repo, b, assignment) = blocked_conflict().await;
+    let mut mcp = agent_in(&daemon, &b, "s-blocked").await;
+    let read = mcp.ok("get_workspace", json!({})).await;
+    assert_eq!(read["step"], "ask", "{read}");
+    allow(&daemon, &repo, &assignment).await;
+    let refused = mcp
+        .err(
+            "ask_for_help",
+            json!({"text": "The policy says to ask before resolving conflict.txt.",
+                   "tried": "Nothing: the conflict's policy tier is ask."}),
+        )
+        .await;
+    assert_eq!(refused["reason"], "CONFLICT_NOT_BLOCKED", "{refused}");
+    let after = mcp.ok("get_workspace", json!({})).await;
+    assert_eq!(after["step"], "resolve", "{after}");
+    assert!(after.get("help_request_id").is_none(), "{after}");
+}
+
+// #335 review: on step `ask`, `ask_for_help` with no reason is a question
+// about the blocked conflict, naming its assignment, so a person's allow
+// withdraws it and the agent resolves.
+#[tokio::test(flavor = "multi_thread")]
+async fn ask_for_help_on_a_blocked_conflict_is_withdrawn_by_an_allow() {
+    let (daemon, repo, b, assignment) = blocked_conflict().await;
+    let mut mcp = agent_in(&daemon, &b, "s-blocked").await;
+    let read = mcp.ok("get_workspace", json!({})).await;
+    assert_eq!(read["step"], "ask", "{read}");
+    let asked = mcp
+        .ok(
+            "ask_for_help",
+            json!({"text": "The policy says to ask before resolving conflict.txt.",
+                   "tried": "Nothing: the conflict's policy tier is ask."}),
+        )
+        .await;
+    assert_eq!(asked["comment"]["reason"], "conflict", "{asked}");
+    let id = asked["comment"]["id"].as_str().unwrap().to_owned();
+    let help = |comment: v1::Comment| comment.help.unwrap();
+    let read_help = async |id: &str| {
+        help(
+            daemon
+                .client
+                .get_comment(v1::GetCommentRequest {
+                    repo: repo.id.clone(),
+                    id: id.to_owned(),
+                })
+                .await
+                .unwrap()
+                .comment
+                .unwrap(),
+        )
+    };
+    assert_eq!(read_help(&id).await.assignment_id, assignment);
+    assert_eq!(
+        mcp.ok("get_workspace", json!({})).await["step"],
+        "await_help"
+    );
+    allow(&daemon, &repo, &assignment).await;
+    assert_eq!(read_help(&id).await.state(), v1::HelpState::Withdrawn);
+    let after = mcp.ok("get_workspace", json!({})).await;
+    assert_eq!(after["step"], "resolve", "{after}");
+}

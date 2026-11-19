@@ -81,7 +81,7 @@ count = 1
 presence = "none"
 kinds = ["signoff"]                        # evidence kinds that count as a sign-off; default ["signoff"]
 
-[conflicts]                                # tiers and attempt caps; R3.28 applies them
+[conflicts]                                # tiers and attempt caps for conflicts (conflicts.md)
 tier = "approve"                           # land | approve | ask; default approve
 attempts = 3                               # 1 to 20; default 3
 
@@ -166,7 +166,7 @@ What a policy sees about one change, built by the daemon. `reef schema policy in
 
 | Variable | What |
 | --- | --- |
-| `change` | `id`, `commit`, `tree`, `parents`, `description`, `author.name`, `author.email`, `empty`, `conflicted`; `paths`, every touched path, sorted (a rename contributes both); `files`, each `{path, old_path, status, binary, too_large, lines_added, lines_removed, size}` with `status` one of `added`, `modified`, `deleted`, `renamed`, `copied`; `lines_added`, `lines_removed` |
+| `change` | `id`, `commit`, `tree`, `parents`, `description`, `author.name`, `author.email`, `empty`, `conflicted`; `paths`, every touched path, sorted (a rename contributes both); `files`, each `{path, old_path, status, binary, too_large, lines_added, lines_removed, size}` with `status` one of `added`, `modified`, `deleted`, `renamed`, `copied`; `lines_added`, `lines_removed`; `resolutions`, the conflicts the change resolved (R3.28), each `{assignment, tier, attempts, limit, approval, resolver_actor, conflicted_commit}` |
 | `evidence` | the evidence on `change.tree` whose signature verifies, by witness time then id: `id`, `kind`, `result` (`pass`, `fail`, `error`), `target`, `started_at`, `finished_at`, `added_at` (the witness time), `added_by_agent`, `artifacts` (`{name, sha256, media_type, state, size}`, `state` one of `stored`, `collected`, `absent`), `annotations`, `key` (below), `fresh` and `job` (whether an executor job accepted it fresh, R3.05), `self`, `attestors` |
 | `provenance` | every provenance record of `change.id`: `id`, `commit`, `tree`, `workspace`, `session`, `sequence`, `kind`, `agent`, `recorded_at`, `model`, `harness`, `task`, `instruction_sha256`, `client_session`, `signature` (`valid`, `invalid`), `key` |
 | `groups` | the policy's `[groups]`, from name to members as written |
@@ -179,7 +179,7 @@ A `key` is `{id, status, identity, identity_id, identity_kind, actor, agent, ses
 - **No clock.** Nothing in the input is "now", and identity status is judged at each object's witness time, so an evaluation depends only on the policy's bytes and the input.
 - **Limits**: at most 100,000 touched paths; a larger change is `builtin:input`'s error.
 - **`change.state` and `landing`** (R3.13). `change.state` is the change's lifecycle state (`draft`, `proposed`, `queued`, `landed`, `declined`, `withdrawn`, `superseded`); inside a landing it is `queued`. `landing` is `{destination, destination_commit, rebased, overlap, overlap_total}`: the bookmark the change lands onto, its head, whether the change is rebased onto it (false for a fast-forward), and the paths both the change and the destination changed since the change's parents (at most 1,000, sorted). `reef policy eval` fills it from a preview onto the policy revision (`trunk()` by default, or `trunk()` for `--policy-file`); `reef policy simulate` judges each landing on its own tree (`rebased: false`).
-- **What later tickets add**, each a new field the static check learns: `stack` (R3.10, for R3.24), the `conflict` object's other fields (R3.25 to R3.28), and `budget` (R3.20). A policy that names a field this Reef does not know is `invalid_policy`, so a policy written for a later Reef fails closed on an earlier one: **upgrade daemons before policies**.
+- **What later tickets add**, each a new field the static check learns: `stack` (R3.10, for R3.24) and `budget` (R3.20). A policy that names a field this Reef does not know is `invalid_policy`, so a policy written for a later Reef fails closed on an earlier one: **upgrade daemons before policies**.
 
 ## CEL
 
@@ -228,9 +228,15 @@ An evaluation waits its turn behind at most three others in one daemon. An expre
 | `no_policy` | the policy revision has no `reef-policy.toml` |
 | `invalid_policy` | the file does not load; `diagnostics` has every problem |
 
-Every rule is evaluated and reported, so a blocked change sees every reason at once: the built-in rules first (`builtin:input`, the input was within its limits; `builtin:conflicts`, the change's tree has no conflict; `builtin:description`, a change landing on a summarized or pushed branch has a description; `builtin:policy-file`; `builtin:owners`), then the file's in file order. A rule result has its `status` (`satisfied`, `unsatisfied`, `not_applicable`, `error`), a `message`, the touched `paths` it is about (at most 20, and `paths_total`), the `missing` and `failed` evidence (each `{kind, target, attestors, evidence_ids}`), the `signoff` it needs and has, and the `evidence_ids` that satisfied it. **Everything fails closed**: a rule that errors blocks, and nothing means "allow because the policy could not tell". `reef schema policy evaluation` prints the shape.
+Every rule is evaluated and reported, so a blocked change sees every reason at once: the built-in rules first (`builtin:input`, the input was within its limits; `builtin:conflicts`, the change's tree has no conflict; `builtin:description`, a change landing on a summarized or pushed branch has a description; `builtin:policy-file`; `builtin:owners`; `builtin:resolution`, below), then the file's in file order. A rule result has its `status` (`satisfied`, `unsatisfied`, `not_applicable`, `error`), a `message`, the touched `paths` it is about (at most 20, and `paths_total`), the `missing` and `failed` evidence (each `{kind, target, attestors, evidence_ids}`), the `signoff` it needs and has, and the `evidence_ids` that satisfied it. **Everything fails closed**: a rule that errors blocks, and nothing means "allow because the policy could not tell". `reef schema policy evaluation` prints the shape.
 
-**Conflict tiers.** `[conflicts]` and `[[conflicts.rule]]` are not part of a change's evaluation. For a conflict, the first `[[conflicts.rule]]` whose `paths` match one of the conflict's paths (or that names none) and whose `when` holds gives the tier and attempt cap; else `[conflicts]` does (`approve` and 3 without the table). A `when` that errors is the error, which R3.28 treats as the strictest tier, `ask`. `reef policy check --input` with `{"conflict": {...}}` prints the tier; `reef conflict show -r <rev> --policy-input` prints that input for a real conflict, its sides' identity and agent from their [provenance](conflicts.md#who-wrote-each-side).
+### Conflict tiers
+
+`[conflicts]` and `[[conflicts.rule]]` are not part of a change's evaluation: the daemon looks each conflict's tier up from them, with the policy at `trunk()`, and applies it ([conflicts](conflicts.md#tiers-and-attempts), R3.28). For a conflict, the first `[[conflicts.rule]]` whose `paths` match one of the conflict's paths (or that names none) and whose `when` holds gives the tier and attempt cap; else `[conflicts]` does (`approve` and 3 without the table, or without a policy). A `when` that errors, or an invalid policy, gives the strictest tier, `ask`. A rule's `when` sees `conflict`: `{change_id, paths, sides}`, each side `{change_id, identity, agent, actor}`, filled only for a `verified` side (a label proves nothing). `reef policy check --input` with `{"conflict": {...}}` prints the tier; `reef conflict show -r <rev> --policy-input` prints the input the daemon uses for a real conflict, its sides from their [provenance](conflicts.md#who-wrote-each-side).
+
+### Built-in rules
+
+**`builtin:resolution`** (R3.28) applies to a change with a resolution whose landing needs approval (`change.resolutions[].approval`: an `approve` or `ask` conflict, or one resolved while it waited for a person, by anyone but a person). It is satisfied by one `signoff` evidence on the change's tree from any person: `pass`, a bound key with actor `human` certified for a `person` identity, as `[[signoff]]` counts them (an agent's sign-off never does). A repository that wants particular approvers adds its own area: `[[signoff]]` with `when = 'change.resolutions.exists(r, r.approval)'` and its `groups`. In a stack, a sign-off on a member above counts, as for every sign-off.
 
 ## Simulating a policy
 

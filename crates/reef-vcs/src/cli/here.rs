@@ -219,8 +219,10 @@ fn overlap_hint(ws: &Workspace) -> Option<String> {
 }
 
 /// [`advise`], with the disk's word where it matters (#272): a `low` disk
-/// after divergence, attention and an expiring lease; then being behind
-/// trunk; then missing dependencies (#195); then a `warn` disk.
+/// after divergence, attention and an expiring lease; then a conflict to
+/// resolve or a person to wait for (steps `resolve`, `ask`, `await_help`),
+/// or being behind trunk; then missing dependencies (#195); then a `warn`
+/// disk.
 fn advise_with_disk(
     ws: &Workspace,
     in_run: bool,
@@ -244,7 +246,11 @@ fn advise_with_disk(
     if let Some(disk) = disk.filter(|disk| disk.level == "low") {
         return disk_advice(ws, disk, true);
     }
-    if ws.step.as_deref() == Some("resolve") || behind_and_rebase_fits(ws) {
+    // A conflict, and a person the change waits for, come before
+    // dependencies and a `warn` disk.
+    if matches!(ws.step.as_deref(), Some("resolve" | "ask" | "await_help"))
+        || behind_and_rebase_fits(ws)
+    {
         return advise(ws, in_run, held);
     }
     if let Some(advice) = dependency_advice(ws) {
@@ -411,6 +417,9 @@ fn advise(ws: &Workspace, in_run: bool, held: bool) -> (String, Vec<String>) {
                 .to_owned(),
             argv(&["reef", "ws", "renew", &ws.id]),
         ),
+        ("active", "active" | "in_grace") if ws.step.as_deref() == Some("ask") => {
+            ask_advice(ws)
+        }
         ("active", "active" | "in_grace") if ws.step.as_deref() == Some("resolve") => {
             let files = files(ws.conflicted_path_count);
             (
@@ -449,12 +458,68 @@ fn advise(ws: &Workspace, in_run: bool, held: bool) -> (String, Vec<String>) {
     }
 }
 
+/// What a conflict that waits for a person asks for (R3.28, R3.32): a help
+/// request about its assignment, with `--tried` filled in for the reason it
+/// waits and `-m` left for the agent; or, once the session took an answer
+/// to one and the conflict still waits, a bounded wait for the assignment
+/// to change rather than the same question again.
+fn ask_advice(ws: &Workspace) -> (String, Vec<String>) {
+    let argv =
+        |words: &[&str]| -> Vec<String> { words.iter().map(|word| (*word).to_owned()).collect() };
+    let change = &ws.change_id_reverse_hex;
+    if let Some(asked) = &ws.help_request_id {
+        return (
+            format!(
+                "Its change's conflict still waits for a person. You asked about it ({asked}) and took the answer; asking again does not help. A person must run `reef conflict allow {change}` or take the conflict over. Do not edit the conflicted files. Wait for its assignment to change, at most {WAIT_FOR_SECONDS} s, then run `reef here` again."
+            ),
+            argv(&[
+                "reef",
+                "op",
+                "watch",
+                "--kind",
+                "conflict-assignment",
+                "--change",
+                change,
+                "--count",
+                "1",
+                "--for",
+                WAIT_FOR_SECONDS,
+            ]),
+        );
+    }
+    let (why, tried) = match ws.conflict_block_reason.as_deref() {
+        Some("attempts") => (
+            "its attempt limit is used up",
+            "Nothing more: the conflict's attempt limit is used up.",
+        ),
+        Some("ask") => (
+            "its policy tier is `ask`",
+            "Nothing: the conflict's policy tier is ask, so I may not attempt it.",
+        ),
+        _ => (
+            "its policy tier is `ask`, or its attempts are used",
+            "Nothing: the conflict waits for a person, so I may not attempt it.",
+        ),
+    };
+    let mut next = argv(&["reef", "ask", "--reason", "conflict"]);
+    if let Some(assignment) = &ws.conflict_assignment_id {
+        next.extend(argv(&["--conflict", assignment]));
+    }
+    next.extend(argv(&["--while-blocked", "--tried", tried, "-m"]));
+    (
+        format!(
+            "Its change's conflict waits for a person before anyone resolves it: {why} (`reef conflict assignment {change}` says more). Do not edit the conflicted files. Ask a person: finish `next` with what is wrong (`-m`). They run `reef conflict allow {change}` to let you go on, or take it over; either withdraws your question. An answer alone does not unblock it."
+        ),
+        next,
+    )
+}
+
 /// Whether the change is behind trunk and a `reef rebase` fits its step:
 /// not while it is proposed, queued, declined, done or conflicted, since a
 /// rebase makes a proposal amended and a queued change cannot move.
 fn behind_and_rebase_fits(ws: &Workspace) -> bool {
     let fits = match ws.step.as_deref() {
-        Some("land" | "wait" | "revise" | "done" | "resolve" | "await_help") => false,
+        Some("land" | "wait" | "revise" | "done" | "resolve" | "await_help" | "ask") => false,
         Some("propose") => ws
             .lifecycle
             .as_ref()
@@ -950,6 +1015,11 @@ mod tests {
             } else {
                 String::new()
             },
+            conflict_assignment_id: if step == v1::ChangeStep::Ask {
+                "asg_0123456789abcdef".into()
+            } else {
+                String::new()
+            },
             lifecycle: Some(Box::new(v1::ChangeLifecycle {
                 state: state.into(),
                 recorded: state != v1::LifecycleState::Draft,
@@ -1079,6 +1149,153 @@ mod tests {
                     "{step:?} in_run={in_run} held={held}: {hint}"
                 );
             }
+        }
+    }
+
+    /// `next` with the agent's message appended, as `reef` parses it: the
+    /// `ask` subcommand's `tried` and `message`; it asks `--while-blocked`.
+    fn parsed_ask(next: &[String]) -> (String, String) {
+        let argv = next
+            .iter()
+            .map(String::as_str)
+            .chain(["The policy says a person decides this conflict."]);
+        let matches = crate::cli::command()
+            .try_get_matches_from(argv)
+            .unwrap_or_else(|error| panic!("{next:?} does not parse: {error}"));
+        let Some(("ask", ask)) = matches.subcommand() else {
+            panic!("{next:?} is not `reef ask`");
+        };
+        assert!(ask.get_flag("while_blocked"), "{next:?}");
+        (
+            ask.get_one::<String>("tried").unwrap().clone(),
+            ask.get_one::<String>("message").unwrap().clone(),
+        )
+    }
+
+    /// R3.28 and R3.32: a conflict that waits for a person asks one about
+    /// its assignment, held or not, and is never sent to rebase; `--tried`
+    /// is filled in for why it waits, and `next` with a message appended
+    /// parses as `reef ask`. Without the assignment (an older daemon),
+    /// `reef ask` takes the change's conflict.
+    #[test]
+    fn a_blocked_conflict_says_ask() {
+        use v1::{ChangeStep as Step, LifecycleState as State};
+        let mut ws = stepped(Step::Ask, State::Draft, false);
+        ws.behind_trunk = Some(4);
+        let tier = "Nothing: the conflict's policy tier is ask, so I may not attempt it.";
+        let used = "Nothing more: the conflict's attempt limit is used up.";
+        for (reason, why, tried) in [
+            ("ask", "its policy tier is `ask`", tier),
+            ("attempts", "its attempt limit is used up", used),
+        ] {
+            ws.conflict_block_reason = Some(reason.to_owned());
+            for (in_run, held) in [(false, false), (true, false), (false, true)] {
+                let (hint, next) = advise_with_disk(&ws, in_run, held, None);
+                assert!(hint.contains("waits for a person"), "{hint}");
+                assert!(hint.contains(why), "{hint}");
+                assert!(hint.contains("reef conflict allow zy"), "{hint}");
+                assert_eq!(
+                    next,
+                    [
+                        "reef",
+                        "ask",
+                        "--reason",
+                        "conflict",
+                        "--conflict",
+                        "asg_0123456789abcdef",
+                        "--while-blocked",
+                        "--tried",
+                        tried,
+                        "-m"
+                    ]
+                );
+                assert_eq!(
+                    parsed_ask(&next),
+                    (
+                        tried.to_owned(),
+                        "The policy says a person decides this conflict.".to_owned()
+                    )
+                );
+            }
+        }
+        ws.conflict_assignment_id = None;
+        ws.conflict_block_reason = None;
+        let next = advise_with_disk(&ws, false, false, None).1;
+        assert_eq!(next[..4], ["reef", "ask", "--reason", "conflict"]);
+        assert!(!next.iter().any(|word| word == "--conflict"), "{next:?}");
+        parsed_ask(&next);
+    }
+
+    /// Review of the merge, finding 2: once the session took an answer
+    /// about the blocked conflict, `next` waits for its assignment to
+    /// change, a command that returns, rather than asking again.
+    #[test]
+    fn an_answered_blocked_conflict_waits_for_a_person() {
+        use v1::{ChangeStep as Step, LifecycleState as State};
+        let mut ws = stepped(Step::Ask, State::Draft, false);
+        ws.conflict_block_reason = Some("ask".to_owned());
+        ws.help_request_id = Some("cmt_00000000000000aa".to_owned());
+        let (hint, next) = advise_with_disk(&ws, false, false, None);
+        assert!(
+            hint.contains("You asked about it (cmt_00000000000000aa)"),
+            "{hint}"
+        );
+        assert!(hint.contains("reef conflict allow zy"), "{hint}");
+        assert!(hint.contains("asking again does not help"), "{hint}");
+        let watch: Vec<&str> =
+            "reef op watch --kind conflict-assignment --change zy --count 1 --for 120"
+                .split(' ')
+                .collect();
+        assert_eq!(next, watch);
+        let matches = crate::cli::command()
+            .try_get_matches_from(&next)
+            .unwrap_or_else(|error| panic!("{next:?} does not parse: {error}"));
+        assert_eq!(matches.subcommand_name(), Some("op"));
+    }
+
+    /// Review of the merge, finding 6: a conflict that waits for a person,
+    /// and a help request the session waits on, come before missing
+    /// dependencies and a `warn` disk, as a conflict to resolve does.
+    #[test]
+    fn waiting_for_a_person_comes_before_dependencies_and_a_warn_disk() {
+        use v1::{ChangeStep as Step, LifecycleState as State};
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("package-lock.json"), "{}").unwrap();
+        let warn = DiskStatus {
+            level: "warn".into(),
+            reasons: vec!["free_near_floor".into()],
+            ..low_disk(Some("idle1"))
+        };
+        for (step, first) in [
+            (Step::Ask, "ask"),
+            (Step::AwaitHelp, "comment"),
+            (Step::Resolve, "conflict"),
+        ] {
+            let mut ws = stepped(step, State::Draft, false);
+            ws.path = temp.path().display().to_string();
+            ws.disk = Some(reef_client::json::WorkspaceDisk {
+                tracked_bytes: 0,
+                build_bytes: 0,
+                unshared_bytes: Some(0),
+                files: 1,
+                measured_at: None,
+                incomplete: false,
+                largest: Vec::new(),
+                missing_dependencies: vec![".".into()],
+            });
+            for disk in [None, Some(&warn)] {
+                let (hint, next) = advise_with_disk(&ws, false, false, disk);
+                assert_eq!(
+                    next.get(1).map(String::as_str),
+                    Some(first),
+                    "{step:?}: {hint}"
+                );
+            }
+            // Without the step's wait, the dependencies come first.
+            let mut work = ws.clone();
+            work.step = Some("describe".into());
+            let (_, next) = advise_with_disk(&work, false, false, None);
+            assert_eq!(next[..2], ["npm", "ci"], "{step:?}");
         }
     }
 

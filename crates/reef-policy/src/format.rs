@@ -590,6 +590,8 @@ pub(crate) struct Attestor {
 /// Identities, directly and through groups, resolved at load.
 #[derive(Debug, Default)]
 pub(crate) struct Members {
+    /// Every person: `builtin:resolution`'s approvers.
+    pub(crate) anyone: bool,
     pub(crate) groups: Vec<String>,
     pub(crate) identities: Vec<String>,
     pub(crate) ids: BTreeSet<String>,
@@ -599,7 +601,9 @@ pub(crate) struct Members {
 impl Members {
     /// Whether a key's identity, by id or by name, is a member.
     pub(crate) fn contains(&self, id: &str, name: &str) -> bool {
-        (!id.is_empty() && self.ids.contains(id)) || (!name.is_empty() && self.names.contains(name))
+        self.anyone
+            || (!id.is_empty() && self.ids.contains(id))
+            || (!name.is_empty() && self.names.contains(name))
     }
 }
 
@@ -668,8 +672,25 @@ pub enum Tier {
     Ask,
 }
 
+/// The tier a policy without `[conflicts]`, or without a policy file,
+/// gives every conflict.
+pub const DEFAULT_TIER: Tier = Tier::Approve;
+/// The attempts a policy without `[conflicts]`, or without a policy file,
+/// gives every conflict.
+pub const DEFAULT_ATTEMPTS: i64 = 3;
+
 impl Tier {
-    fn parse(text: &str) -> Option<Tier> {
+    /// Its name in the policy file: `land`, `approve` or `ask`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Tier::Land => "land",
+            Tier::Approve => "approve",
+            Tier::Ask => "ask",
+        }
+    }
+
+    /// The tier `text` names.
+    pub fn parse(text: &str) -> Option<Tier> {
         match text {
             "land" => Some(Tier::Land),
             "approve" => Some(Tier::Approve),
@@ -1654,14 +1675,16 @@ impl Loader<'_> {
         // Conflicts.
         let conflicts = match &raw.conflicts {
             None => Conflicts {
-                tier: Tier::Approve,
-                attempts: 3,
+                tier: DEFAULT_TIER,
+                attempts: DEFAULT_ATTEMPTS,
                 rules: Vec::new(),
             },
             Some(conflicts) => {
                 let conflicts = conflicts.get_ref();
-                let tier = self.tier(conflicts.tier.as_ref()).unwrap_or(Tier::Approve);
-                let attempts = self.attempts(conflicts.attempts.as_ref()).unwrap_or(3);
+                let tier = self.tier(conflicts.tier.as_ref()).unwrap_or(DEFAULT_TIER);
+                let attempts = self
+                    .attempts(conflicts.attempts.as_ref())
+                    .unwrap_or(DEFAULT_ATTEMPTS);
                 let mut rules = Vec::new();
                 for (index, rule) in conflicts.rule.iter().enumerate() {
                     let at = rule.span().start;

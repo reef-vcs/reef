@@ -94,6 +94,7 @@ pub fn help_input_of(help: Option<&v1::HelpInput>) -> Option<HelpInput> {
         tried: help.tried.clone(),
         question: help.question.clone(),
         conflict: help.conflict.clone(),
+        while_blocked: help.while_blocked,
     })
 }
 
@@ -132,6 +133,7 @@ fn cause_message(text: &str) -> v1::InstructionCause {
         "change_final" => v1::InstructionCause::ChangeFinal,
         "expired" => v1::InstructionCause::Expired,
         "answer_cancelled" => v1::InstructionCause::AnswerCancelled,
+        "conflict_unblocked" => v1::InstructionCause::ConflictUnblocked,
         _ => v1::InstructionCause::Unspecified,
     }
 }

@@ -313,6 +313,7 @@ pub(crate) async fn read_change(
         lines_added,
         lines_removed,
         state: if info.immutable { "landed" } else { "draft" }.to_owned(),
+        resolutions: Vec::new(),
     };
     Ok(ChangeRead {
         change,
@@ -940,6 +941,7 @@ pub(crate) fn evaluation_message(evaluation: &Evaluation) -> v1::PolicyEvaluatio
             evidence_ignored: count(evaluation.input.evidence_ignored),
             provenance: count(evaluation.input.provenance),
             conflicted: evaluation.input.conflicted,
+            resolutions: count(evaluation.input.resolutions),
         }),
         cost: evaluation.cost,
         ..v1::PolicyEvaluation::default()
@@ -1117,6 +1119,14 @@ impl PolicyService for PolicyHandler {
             &read.change.id,
             read.change.state == "landed",
         )?;
+        read.change.resolutions = crate::assign::resolutions(
+            state,
+            repo_id,
+            &read.change.id,
+            &read.change.commit,
+            read.change.conflicted,
+        )
+        .map_err(status)?;
         let EvidenceRead {
             evidence,
             ignored,

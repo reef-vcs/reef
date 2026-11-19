@@ -375,7 +375,21 @@ async fn show(ctx: &Ctx, args: ShowArgs) -> Result<(), CliError> {
         .await
         .map_err(|error| advice.refine(error))?;
     let stack = stack_below(ctx, &scope.repo_id, &change).await;
-    let automatic = automatic_of(ctx, &scope.repo_id, &change.change_id).await;
+    let entry = proposal_of(ctx, &scope.repo_id, &change.change_id).await;
+    let automatic = entry
+        .as_ref()
+        .and_then(|entry| entry.automatic.as_ref())
+        .map(AutomaticStatus::from);
+    let resolutions = entry
+        .as_ref()
+        .map(|entry| {
+            entry
+                .resolutions
+                .iter()
+                .map(reef_client::json::ConflictResolution::from)
+                .collect()
+        })
+        .unwrap_or_default();
     let history = ProposalHistory {
         change: reef_client::json::Change::from(&change),
         transitions: transitions
@@ -386,13 +400,15 @@ async fn show(ctx: &Ctx, args: ShowArgs) -> Result<(), CliError> {
             .collect(),
         stack,
         automatic,
+        resolutions,
     };
     ctx.out.object_with(&history, brief::ProposalHistory::from)
 }
 
-/// What the automatic service is doing about `change` (R3.45); `None`
-/// when it is not proposed, or the read fails: context, not the answer.
-async fn automatic_of(ctx: &Ctx, repo: &str, change: &str) -> Option<AutomaticStatus> {
+/// `change`'s proposal entry: what the automatic service is doing about it
+/// (R3.45) and the conflicts it resolved (R3.28); `None` when it is not
+/// proposed, or the read fails: context, not the answer.
+async fn proposal_of(ctx: &Ctx, repo: &str, change: &str) -> Option<v1::ProposalEntry> {
     let listed = ctx
         .call(ctx.client.list_proposals(
             ListProposalsRequest {
@@ -406,10 +422,8 @@ async fn automatic_of(ctx: &Ctx, repo: &str, change: &str) -> Option<AutomaticSt
         .ok()?;
     listed
         .items
-        .iter()
+        .into_iter()
         .find(|entry| entry.change_id == change)
-        .and_then(|entry| entry.automatic.as_ref())
-        .map(AutomaticStatus::from)
 }
 
 /// The changes below `change` in its stack, bottom first (R3.10): its
@@ -564,6 +578,9 @@ impl TextRender for ProposalHistory {
                 pairs.push(("next", automatic.next.join(" ")));
             }
         }
+        for resolution in &self.resolutions {
+            pairs.push(("resolves", resolution_words(resolution)));
+        }
         block(w, &pairs)?;
         if !self.transitions.is_empty() {
             writeln!(w)?;
@@ -573,6 +590,23 @@ impl TextRender for ProposalHistory {
         }
         Ok(())
     }
+}
+
+/// One resolution, in a few words, with how to read its sides (R3.28).
+fn resolution_words(resolution: &reef_client::json::ConflictResolution) -> String {
+    format!(
+        "{} (tier {}, attempt {} of {}){}; both sides: reef conflict show -r {}",
+        resolution.assignment_id,
+        resolution.tier.as_deref().unwrap_or("-"),
+        resolution.attempts,
+        resolution.attempt_limit,
+        if resolution.approval {
+            ": needs a person's sign-off"
+        } else {
+            ""
+        },
+        short(&resolution.conflicted_commit_id),
+    )
 }
 
 impl TextRow for Proposal {

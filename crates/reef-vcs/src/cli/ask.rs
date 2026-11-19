@@ -53,6 +53,11 @@ pub(crate) struct AskArgs {
     /// it is about [default: the change's conflict].
     #[arg(long, value_name = "ID")]
     conflict: Option<String>,
+    /// With --reason conflict: ask only while the conflict waits for a
+    /// person; refused once someone allowed or took it (`reef here` says
+    /// what next).
+    #[arg(long)]
+    while_blocked: bool,
     /// The file it is about, repository-relative.
     #[arg(long, value_name = "PATH")]
     path: Option<String>,
@@ -171,6 +176,7 @@ pub(crate) async fn run(ctx: &Ctx, args: AskArgs) -> Result<(), CliError> {
             tried: args.tried.clone(),
             question: args.question.clone().unwrap_or_default(),
             conflict: args.conflict.clone().unwrap_or_default(),
+            while_blocked: args.while_blocked,
         }),
         client_session: session.clone(),
         ..CreateCommentRequest::default()

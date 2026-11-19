@@ -30,6 +30,7 @@
 
 pub mod follow;
 pub mod messages;
+pub mod tier;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -46,10 +47,13 @@ use reef_lib::jj::{ChangeIdHex, OpKind, OperationIdHex};
 use crate::daemon::AppState;
 use crate::db::{
     AssignmentEventRow, AssignmentRow, DbError, OwnerColumns, ProvenanceFilter,
-    ProvenanceSessionRow,
+    ProvenanceSessionRow, TierColumns,
 };
 use crate::error::{Advice, Advise};
 use crate::model::{RepoId, Timestamp, WorkspaceId, WorkspaceRecord, WorkspaceState};
+use crate::policy::Loaded;
+use crate::service::conflicts::InputRead;
+use crate::service::policy::{self, PolicyFile};
 
 /// The kind of jj's stored conflicts, as rows name it.
 pub const KIND_TREE: &str = "tree";
@@ -76,6 +80,12 @@ const SCAN_CAP: usize = 2 * MAX_OPEN;
 const CHANGED_EVERY: Duration = Duration::from_mins(1);
 /// Provenance records read to find a change's sessions.
 const RECORDS_READ: usize = 200;
+/// Open assignments one look looks the tier up for again (a conflict or
+/// policy that changed); the rest wait for the next look, a second later.
+const LOOKUPS_PER_LOOK: usize = 64;
+/// How long a failed tier lookup stands (its tier `ask`) before a look
+/// tries again with the same conflict and policy.
+const RELOOK_FAILED: Duration = Duration::from_mins(1);
 /// The revset the follower reads, as `ListConflicts` does by default.
 const CONFLICTS: &str = "mutable() & conflicts()";
 
@@ -92,6 +102,9 @@ pub enum State {
     Unowned,
     /// The change no longer carries the conflict.
     Closed,
+    /// Waiting for a person (R3.28): an `ask` tier with no go-ahead, or
+    /// out of attempts.
+    Blocked,
 }
 
 impl State {
@@ -103,6 +116,7 @@ impl State {
             State::Taken => "taken",
             State::Unowned => "unowned",
             State::Closed => "closed",
+            State::Blocked => "blocked",
         }
     }
 
@@ -114,6 +128,7 @@ impl State {
             State::Taken,
             State::Unowned,
             State::Closed,
+            State::Blocked,
         ]
         .into_iter()
         .find(|state| state.as_str() == text)
@@ -153,11 +168,17 @@ pub enum Reason {
     Immutable,
     /// Opened again within [`REOPEN_WINDOW`].
     Reopened,
+    /// Blocked: an `ask` tier with no go-ahead (R3.28).
+    Ask,
+    /// Blocked: out of attempts (R3.28).
+    Attempts,
+    /// A person gave the go-ahead, or granted attempts (R3.28).
+    Allowed,
 }
 
 impl Reason {
     /// Every reason.
-    pub const ALL: [Reason; 15] = [
+    pub const ALL: [Reason; 18] = [
         Reason::Default,
         Reason::Followed,
         Reason::Returned,
@@ -173,6 +194,9 @@ impl Reason {
         Reason::Abandoned,
         Reason::Immutable,
         Reason::Reopened,
+        Reason::Ask,
+        Reason::Attempts,
+        Reason::Allowed,
     ];
 
     /// The column's text.
@@ -193,6 +217,9 @@ impl Reason {
             Reason::Abandoned => "abandoned",
             Reason::Immutable => "immutable",
             Reason::Reopened => "reopened",
+            Reason::Ask => "ask",
+            Reason::Attempts => "attempts",
+            Reason::Allowed => "allowed",
         }
     }
 
@@ -305,6 +332,25 @@ pub enum AssignError {
     /// An agent asked to take a conflict over.
     #[error("only a person takes a conflict over; an agent claims it")]
     TakeNeedsPerson,
+    /// A claim, or an agent's assignment, of a conflict waiting for a
+    /// person (R3.28).
+    #[error("{}", blocked_text(assignment, *block, *attempts, *limit))]
+    Blocked {
+        /// The assignment.
+        assignment: String,
+        /// Why it waits.
+        block: tier::Block,
+        /// Attempts started.
+        attempts: u32,
+        /// Attempts allowed.
+        limit: u32,
+    },
+    /// An agent asked to give the go-ahead or grant attempts (R3.28).
+    #[error("only a person gives the go-ahead on a conflict or grants it attempts")]
+    AllowNeedsPerson,
+    /// Attempts out of range (R3.28).
+    #[error("attempts must be 1 to {}", tier::MAX_GRANT)]
+    InvalidAttempts,
     /// A remote caller asked to take a conflict over.
     #[error("a conflict is taken over on the daemon's machine, not through the remote listener")]
     RemoteHuman,
@@ -353,6 +399,17 @@ fn owned_text(owned: &[String]) -> String {
     }
 }
 
+fn blocked_text(assignment: &str, block: tier::Block, attempts: u32, limit: u32) -> String {
+    match block {
+        tier::Block::Ask => format!(
+            "assignment {assignment} waits for a person: its policy tier is `ask`, and nobody gave the go-ahead"
+        ),
+        tier::Block::Attempts => format!(
+            "assignment {assignment} waits for a person: its {attempts} of {limit} attempts are used"
+        ),
+    }
+}
+
 fn owner_text(workspace: &str, agent: &str) -> String {
     match (workspace.is_empty(), agent.is_empty()) {
         (true, true) => String::new(),
@@ -377,10 +434,12 @@ impl Classify for AssignError {
             | Self::Closed { .. }
             | Self::NoLiveSession { .. }
             | Self::TakeNeedsPerson
+            | Self::Blocked { .. }
             | Self::ConflictChanged { .. }
             | Self::EventLimit { .. } => ErrorKind::Conflict,
-            Self::RemoteHuman => ErrorKind::PermissionDenied,
+            Self::RemoteHuman | Self::AllowNeedsPerson => ErrorKind::PermissionDenied,
             Self::InvalidPriority { .. }
+            | Self::InvalidAttempts
             | Self::InvalidReason
             | Self::TargetRequired
             | Self::WhichAssignment { .. } => ErrorKind::InvalidArgument,
@@ -423,6 +482,13 @@ impl Advise for AssignError {
             Self::TakeNeedsPerson => Some(Advice::run(
                 "Claim it from the queue instead.",
                 ["reef", "conflict", "claim", "--next"],
+            )),
+            Self::Blocked { assignment, .. } => Some(Advice::run(
+                "A person decides first: `reef conflict allow` lets it go on, `reef conflict take` takes it over. Show why it waits.",
+                ["reef", "conflict", "assignment", assignment.as_str()],
+            )),
+            Self::AllowNeedsPerson => Some(Advice::hint(
+                "Ask a person to run `reef conflict allow`; an agent claims what is allowed.",
             )),
             Self::RemoteHuman => Some(Advice::hint(
                 "Take it over on the daemon's machine; through the remote listener, claim it for a workspace.",
@@ -479,6 +545,28 @@ impl AssignError {
                 vec![("workspace_id", workspace.clone())],
             ),
             Self::TakeNeedsPerson => (reason::TAKE_NEEDS_PERSON, Vec::new()),
+            Self::Blocked {
+                assignment,
+                block,
+                attempts,
+                limit,
+            } => (
+                reason::ASSIGNMENT_BLOCKED,
+                vec![
+                    ("assignment", assignment.clone()),
+                    ("blocked", block.as_str().to_owned()),
+                    ("attempts", attempts.to_string()),
+                    ("limit", limit.to_string()),
+                ],
+            ),
+            Self::AllowNeedsPerson => (reason::ALLOW_NEEDS_PERSON, Vec::new()),
+            Self::InvalidAttempts => (
+                reason::INVALID_ATTEMPTS,
+                vec![
+                    ("min", "1".to_owned()),
+                    ("max", tier::MAX_GRANT.to_string()),
+                ],
+            ),
             Self::RemoteHuman => (reason::REMOTE_HUMAN_REQUIRED, Vec::new()),
             Self::ConflictChanged { conflict_id } => (
                 reason::CONFLICT_CHANGED,
@@ -717,7 +805,8 @@ fn event_of(
 }
 
 /// `row` moved to `state` for `reason` with `owner`, at `at`: one more
-/// event, queued now when it enters the queue.
+/// event, queued now when it enters the queue, one more attempt when a
+/// resolver is handed it ([`tier::starts_attempt`]).
 fn moved(
     row: &AssignmentRow,
     state: State,
@@ -728,6 +817,9 @@ fn moved(
     let mut next = row.clone();
     if state == State::Queued && row.state != State::Queued.as_str() {
         next.queued_at = Some(at);
+    }
+    if tier::starts_attempt(row, state, reason, &owner) {
+        next.attempts = row.attempts.saturating_add(1);
     }
     state.as_str().clone_into(&mut next.state);
     reason.as_str().clone_into(&mut next.reason);
@@ -740,19 +832,231 @@ fn moved(
 /// One change of a row, with its event.
 type Change = (AssignmentRow, AssignmentEventRow);
 
+/// `(change, assignment, seq)`: an assignment that left BLOCKED in its
+/// event `seq`.
+type Unblocked = Vec<(String, String, i64)>;
+
 /// What a look read from jj.
 struct Scan {
     found: Vec<Conflicted>,
     more: bool,
     gone: HashMap<ChangeIdHex, Option<Visible>>,
+    /// `trunk()`'s commit and its policy file (R3.28).
+    policy: (String, Option<PolicyFile>),
+    /// The conflicts whose tier this look looks up.
+    lookups: Vec<Lookup>,
+    /// Lookups were left for the next look ([`LOOKUPS_PER_LOOK`]).
+    truncated: bool,
+}
+
+/// `trunk()`'s commit and its policy file; a `trunk()` that cannot be
+/// read is a policy whose bytes cannot be, so the lookup fails (`ask`).
+async fn trunk_policy(
+    head: &reef_lib::jj::ReadonlyRepo,
+    scope: &RevsetScope<'_>,
+) -> (String, Option<PolicyFile>) {
+    policy::policy_at(head, scope, "trunk()")
+        .await
+        .unwrap_or_else(|status| {
+            (
+                String::new(),
+                Some(PolicyFile {
+                    blob_id: String::new(),
+                    bytes: Err(format!(
+                        "could not read the policy at trunk(): {}",
+                        status.message()
+                    )),
+                }),
+            )
+        })
+}
+
+/// A conflict whose tier a look looks up (R3.28).
+struct Lookup {
+    change: String,
+    conflict_id: String,
+    /// The conflict read for its input; `None` when the policy cannot use
+    /// one (no policy, or one that cannot be read).
+    read: Option<Result<InputRead, String>>,
+}
+
+/// The conflicts of `found` whose tier a look looks up, with `file` the
+/// policy at `trunk()`: every new one, and the open ones (`looked_up`, by
+/// change) whose conflict or policy changed since, at most
+/// [`LOOKUPS_PER_LOOK`] of those; and whether some were left for the next
+/// look. On the repository thread.
+async fn lookups_of(
+    head: &reef_lib::jj::ReadonlyRepo,
+    scope: &RevsetScope<'_>,
+    found: &[Conflicted],
+    looked_up: &HashMap<String, TierColumns>,
+    file: Option<&PolicyFile>,
+    now: Timestamp,
+) -> (Vec<Lookup>, bool) {
+    let key = policy_key(file);
+    let readable = matches!(file, Some(PolicyFile { bytes: Ok(_), .. }));
+    let mut lookups = Vec::new();
+    let mut refreshes = 0usize;
+    let mut truncated = false;
+    for conflicted in found.iter().filter(|c| c.introduced > 0) {
+        let change = conflicted.change.to_string();
+        let relook = looked_up.get(&change).map(|columns| {
+            columns.tier.is_none()
+                || columns.conflict_id.as_deref() != Some(conflicted.conflict_id.as_str())
+                || columns.policy_sha256 != key
+                || (columns.error.is_some()
+                    && columns
+                        .at
+                        .is_none_or(|at| at.0 <= ago(now, RELOOK_FAILED).0))
+        });
+        match relook {
+            Some(false) => continue,
+            Some(true) if refreshes >= LOOKUPS_PER_LOOK => {
+                truncated = true;
+                continue;
+            }
+            Some(true) => refreshes += 1,
+            None => {}
+        }
+        let read = if readable {
+            Some(
+                crate::service::conflicts::read_for_input(head, scope, &conflicted.commit)
+                    .await
+                    .map_err(|status| format!("could not read the conflict: {}", status.message())),
+            )
+        } else {
+            None
+        };
+        lookups.push(Lookup {
+            change,
+            conflict_id: conflicted.conflict_id.clone(),
+            read,
+        });
+    }
+    (lookups, truncated)
+}
+
+/// What identifies a policy for the tiers looked up from it: its bytes'
+/// SHA-256, or, when its bytes cannot be read, its blob; `None` for no
+/// policy.
+fn policy_key(file: Option<&PolicyFile>) -> Option<String> {
+    file.map(|file| match &file.bytes {
+        Ok(bytes) => reef_policy::sha256_hex(bytes),
+        Err(_) => format!("blob:{}", file.blob_id),
+    })
+}
+
+/// The tier of each conflict `scan` looks up, by change (R3.28). Blocking.
+fn tiers_of(
+    state: &AppState,
+    repo: RepoId,
+    scan: &mut Scan,
+    now: Timestamp,
+) -> HashMap<String, TierColumns> {
+    let (commit, file) = &scan.policy;
+    let key = policy_key(file.as_ref());
+    let loaded = match file {
+        Some(PolicyFile {
+            bytes: Ok(bytes), ..
+        }) => Some(state.policy.load(bytes)),
+        _ => None,
+    };
+    let mut tiers = HashMap::new();
+    for Lookup {
+        change,
+        conflict_id,
+        read,
+    } in std::mem::take(&mut scan.lookups)
+    {
+        let decision = match (file, loaded.as_deref()) {
+            (None, _) => Ok(reef_policy::ConflictDecision {
+                tier: reef_policy::DEFAULT_TIER,
+                attempts: reef_policy::DEFAULT_ATTEMPTS,
+                rule: None,
+            }),
+            (
+                Some(PolicyFile {
+                    bytes: Err(text), ..
+                }),
+                _,
+            ) => Err(text.clone()),
+            (Some(_), Some(Loaded::Invalid(diagnostics))) => Err(format!(
+                "the policy at trunk() is invalid: {}",
+                diagnostics
+                    .first()
+                    .map_or("no diagnostic", |d| d.message.as_str())
+            )),
+            (Some(_), Some(Loaded::Policy(policy))) => match read {
+                Some(Ok(read)) => crate::service::conflicts::input_of(state, repo, read)
+                    .map_err(|error| {
+                        format!(
+                            "could not read the conflict's provenance: {}",
+                            ErrorChain(&error)
+                        )
+                    })
+                    .and_then(|input| policy.conflict_tier(&input)),
+                Some(Err(error)) => Err(error),
+                None => Err("the conflict was not read".to_owned()),
+            },
+            (Some(_), None) => Err("the policy was not loaded".to_owned()),
+        };
+        tiers.insert(
+            change,
+            tier::decided(decision, commit, key.as_deref(), &conflict_id, now),
+        );
+    }
+    tiers
+}
+
+/// `row`, its tier just looked up, moved where the tier now puts it: a
+/// queued one that may not start an attempt waits for a person; a blocked
+/// one that now may, when `policy_changed` (a new policy at `trunk()`, or a
+/// failed lookup that now succeeds; never the resolver's own progress,
+/// S-230), goes to its kept owner when that session is live, else to the
+/// queue. `None` when it stays. Blocking.
+fn retiered(
+    state: &AppState,
+    row: &AssignmentRow,
+    policy_changed: bool,
+    now: Timestamp,
+) -> Result<Option<Change>, AssignError> {
+    let daemon = Caller::daemon();
+    let (to, why, owner) = match (State::parse(&row.state), tier::blocked(row)) {
+        (Some(State::Queued), Some(block)) => (State::Blocked, block.reason(), row.owner.clone()),
+        (Some(State::Blocked), None) if policy_changed => {
+            let live = match row.owner.workspace_id.as_deref() {
+                Some(workspace) => state.db.live_provenance_session(workspace)?,
+                None => None,
+            };
+            match live {
+                Some(session) => (State::Assigned, Reason::Default, owner_of(state, &session)),
+                None => (State::Queued, Reason::Assigned, row.owner.clone()),
+            }
+        }
+        _ => return Ok(None),
+    };
+    let next = moved(row, to, why, owner, now);
+    let event = event_of(Some(row), &next, why, None, &daemon, now);
+    Ok(Some((next, event)))
+}
+
+/// Whether `next`'s tier came from another policy than `row`'s, or
+/// replaced a failed lookup.
+fn policy_changed(row: &AssignmentRow, next: &AssignmentRow) -> bool {
+    row.tier.error.is_some() || row.tier.policy_sha256 != next.tier.policy_sha256
 }
 
 /// Brings `repo`'s assignments up to date with its head, under its
 /// assignment lock; announces what changed.
 pub async fn look(state: &Arc<AppState>, repo: RepoId) -> Result<(), AssignError> {
-    let lock = state.assignments.lock(repo);
-    let mut looked = lock.lock().await;
-    look_locked(state, repo, &mut looked).await
+    let mut unblocked = Unblocked::new();
+    let result = {
+        let lock = state.assignments.lock(repo);
+        let mut looked = lock.lock().await;
+        look_locked(state, repo, &mut looked, &mut unblocked).await
+    };
+    withdraw_help(state, repo, &unblocked).await;
+    result
 }
 
 /// [`look`] at the head the repository thread has loaded, without loading
@@ -760,25 +1064,33 @@ pub async fn look(state: &Arc<AppState>, repo: RepoId) -> Result<(), AssignError
 /// heads that nothing asked to merge): the follower's look. Outside writes
 /// are looked at once the daemon next loads them, as any read does.
 pub async fn look_loaded(state: &Arc<AppState>, repo: RepoId) -> Result<(), AssignError> {
-    let lock = state.assignments.lock(repo);
-    let mut looked = lock.lock().await;
-    look_at(state, repo, &mut looked, false).await
+    let mut unblocked = Unblocked::new();
+    let result = {
+        let lock = state.assignments.lock(repo);
+        let mut looked = lock.lock().await;
+        look_at(state, repo, &mut looked, false, &mut unblocked).await
+    };
+    withdraw_help(state, repo, &unblocked).await;
+    result
 }
 
 async fn look_locked(
     state: &Arc<AppState>,
     repo: RepoId,
     looked: &mut Looked,
+    unblocked: &mut Unblocked,
 ) -> Result<(), AssignError> {
-    look_at(state, repo, looked, true).await
+    look_at(state, repo, looked, true, unblocked).await
 }
 
-/// A look at the head, reloaded first when `reload` (as reads do).
+/// A look at the head, reloaded first when `reload` (as reads do); what
+/// it unblocked goes in `unblocked`.
 async fn look_at(
     state: &Arc<AppState>,
     repo: RepoId,
     looked: &mut Looked,
     reload: bool,
+    unblocked: &mut Unblocked,
 ) -> Result<(), AssignError> {
     let handle = state
         .manager
@@ -794,6 +1106,11 @@ async fn look_at(
     let now = Timestamp::now();
     if looked.op.as_deref() != Some(op.as_str()) {
         let open = state.db.open_assignments(repo)?;
+        let looked_up: HashMap<String, TierColumns> = open
+            .iter()
+            .filter(|row| row.kind == KIND_TREE)
+            .map(|row| (row.change_id.clone(), row.tier.clone()))
+            .collect();
         let record = state.db.repository(repo)?;
         let user_email = state.settings.user_email().to_owned();
         let open_changes: Vec<ChangeIdHex> = open
@@ -816,6 +1133,9 @@ async fn look_at(
                         stop.requested()
                     })
                     .await?;
+                let policy = trunk_policy(&head, &scope).await;
+                let (lookups, truncated) =
+                    lookups_of(&head, &scope, &found, &looked_up, policy.1.as_ref(), now).await;
                 let seen: HashSet<&ChangeIdHex> = found.iter().map(|c| &c.change).collect();
                 let mut gone = HashMap::new();
                 for change in open_changes {
@@ -824,27 +1144,43 @@ async fn look_at(
                         gone.insert(change, visible);
                     }
                 }
-                Ok::<_, AssignError>(Scan { found, more, gone })
+                Ok::<_, AssignError>(Scan {
+                    found,
+                    more,
+                    gone,
+                    policy,
+                    lookups,
+                    truncated,
+                })
             })
             .await
             .map_err(|error| AssignError::Read(Box::new(error)))??;
         let warned = looked.warned_full;
+        let truncated = scan.truncated;
         let (changes, warned) = blocking(state, move |state| {
+            let mut scan = scan;
             let mut looked = Looked {
                 op: None,
                 warned_full: warned,
             };
-            let changes = reconcile(state, repo, &open, &scan, now, &mut looked)?;
+            let tiers = tiers_of(state, repo, &mut scan, now);
+            let changes = reconcile(state, repo, &open, &scan, &tiers, now, &mut looked)?;
             Ok((changes, looked.warned_full))
         })
         .await?;
         looked.warned_full = warned;
-        let announced = record_and_announce(state, repo, changes, None, None).await?;
-        // The follower's own operations need no second reading of jj.
-        looked.op = Some(announced.after(&op).unwrap_or(op));
+        let announced = record_and_announce(state, repo, changes, None, None, unblocked).await?;
+        // The follower's own operations need no second reading of jj; a
+        // look that left lookups for later reads again soon.
+        looked.op = if truncated {
+            state.assignments.note_deadline(Some(now));
+            None
+        } else {
+            Some(announced.after(&op).unwrap_or(op))
+        };
     }
     let changes = blocking(state, move |state| liveness(state, repo, now)).await?;
-    let announced = record_and_announce(state, repo, changes, None, None).await?;
+    let announced = record_and_announce(state, repo, changes, None, None, unblocked).await?;
     if let Some(head) = looked.op.clone()
         && let Some(after) = announced.after(&head)
     {
@@ -871,6 +1207,7 @@ fn reconcile(
     repo: RepoId,
     open: &[AssignmentRow],
     scan: &Scan,
+    tiers: &HashMap<String, TierColumns>,
     now: Timestamp,
     looked: &mut Looked,
 ) -> Result<Vec<Change>, AssignError> {
@@ -910,10 +1247,15 @@ fn reconcile(
                 next.introduced = found.introduced;
                 next.files_total = found.files_total;
                 next.conflict_changed_at = now;
+                if let Some(columns) = tiers.get(change.as_str()) {
+                    next.tier = tier::merged(&row.tier, columns.clone());
+                }
                 // At most one `changed` event a minute per assignment
                 // (S-153): a resolver snapshotting through a wide conflict
                 // changes its id at every snapshot; the rest are quiet.
-                if now.0.saturating_sub(row.updated_at.0) < grace_millis(CHANGED_EVERY) {
+                if let Some(moved) = retiered(state, &next, policy_changed(row, &next), now)? {
+                    changes.push(moved);
+                } else if now.0.saturating_sub(row.updated_at.0) < grace_millis(CHANGED_EVERY) {
                     db.save_assignment(&next)?;
                 } else {
                     next.events = row.events.saturating_add(1);
@@ -925,12 +1267,22 @@ fn reconcile(
                 }
             }
             Some(row) => {
-                if row.commit_id != commit || row.introduced != found.introduced {
+                let columns = tiers.get(change.as_str());
+                if row.commit_id != commit
+                    || row.introduced != found.introduced
+                    || columns.is_some()
+                {
                     let mut next = row.clone();
                     next.commit_id = commit;
                     next.introduced = found.introduced;
                     next.files_total = found.files_total;
-                    db.save_assignment(&next)?;
+                    if let Some(columns) = columns {
+                        next.tier = tier::merged(&row.tier, columns.clone());
+                    }
+                    match retiered(state, &next, policy_changed(row, &next), now)? {
+                        Some(moved) => changes.push(moved),
+                        None => db.save_assignment(&next)?,
+                    }
                 }
             }
             None if found.introduced == 0 => {}
@@ -943,7 +1295,13 @@ fn reconcile(
                     continue;
                 }
                 open_count += 1;
-                changes.push(open_one(state, repo, found, now)?);
+                changes.push(open_one(
+                    state,
+                    repo,
+                    found,
+                    tiers.get(change.as_str()),
+                    now,
+                )?);
             }
         }
     }
@@ -985,10 +1343,16 @@ fn closes<'a>(
             (Some(commit), Reason::Resolved) => resolver_of(state, repo, commit, row.opened_at)?,
             _ => None,
         };
+        let resolver_actor = match &resolved_session {
+            Some(session) => state.db.provenance_session(session)?.map(|row| row.actor),
+            None => None,
+        };
         let mut next = moved(row, State::Closed, reason, row.owner.clone(), now);
         next.closed_at = Some(now);
         next.closed_commit_id = closed_commit;
         next.resolved_session_id = resolved_session;
+        next.approval =
+            reason == Reason::Resolved && tier::approval(row, resolver_actor.as_deref());
         changes.push((
             next.clone(),
             event_of(Some(row), &next, reason, None, &daemon, now),
@@ -1025,6 +1389,7 @@ fn open_one(
     state: &AppState,
     repo: RepoId,
     found: &Conflicted,
+    tier: Option<&TierColumns>,
     now: Timestamp,
 ) -> Result<Change, AssignError> {
     let change = found.change.to_string();
@@ -1042,8 +1407,13 @@ fn open_one(
         &found.conflict_id,
         ago(now, REOPEN_WINDOW),
     )?;
-    if let Some(closed) = reopen {
+    if let Some(mut closed) = reopen {
+        if let Some(columns) = tier {
+            closed.tier = columns.clone();
+        }
+        let (next_state, reason) = tier::hand_off(&closed, next_state, reason, &owner);
         let mut next = moved(&closed, next_state, reason, owner, now);
+        next.approval = false;
         next.commit_id = found.commit.to_string();
         next.introduced = found.introduced;
         next.files_total = found.files_total;
@@ -1053,7 +1423,7 @@ fn open_one(
         let event = event_of(Some(&closed), &next, Reason::Reopened, None, &daemon, now);
         return Ok((next, event));
     }
-    let row = AssignmentRow {
+    let mut row = AssignmentRow {
         repo_id: repo,
         id: crate::identity::new_id("asg_"),
         change_id: change,
@@ -1063,9 +1433,9 @@ fn open_one(
         first_conflict_id: found.conflict_id.clone(),
         introduced: found.introduced,
         files_total: found.files_total,
-        state: next_state.as_str().to_owned(),
+        state: State::Closed.as_str().to_owned(),
         reason: reason.as_str().to_owned(),
-        owner,
+        owner: OwnerColumns::default(),
         priority: 0,
         queued_at: None,
         claims: 0,
@@ -1076,7 +1446,18 @@ fn open_one(
         closed_at: None,
         closed_commit_id: None,
         resolved_session_id: None,
+        tier: tier.cloned().unwrap_or_default(),
+        attempts: 0,
+        granted: 0,
+        go_ahead_identity_id: None,
+        go_ahead_at: None,
+        approval: false,
     };
+    let (next_state, reason) = tier::hand_off(&row, next_state, reason, &owner);
+    row.attempts = u32::from(tier::starts_attempt(&row, next_state, reason, &owner));
+    next_state.as_str().clone_into(&mut row.state);
+    reason.as_str().clone_into(&mut row.reason);
+    row.owner = owner;
     let event = event_of(None, &row, reason, None, &daemon, now);
     Ok((row, event))
 }
@@ -1142,7 +1523,7 @@ fn liveness(state: &AppState, repo: RepoId, now: Timestamp) -> Result<Vec<Change
                     let (to, why) = if db.provenance_count_by_change(repo, &row.change_id)? == 0 {
                         (State::Unowned, Reason::NoOwner)
                     } else {
-                        (State::Queued, Reason::OwnerEnded)
+                        tier::hand_off(row, State::Queued, Reason::OwnerEnded, &ended_owner)
                     };
                     let next = moved(row, to, why, ended_owner, now);
                     changes.push((
@@ -1177,20 +1558,49 @@ fn liveness(state: &AppState, repo: RepoId, now: Timestamp) -> Result<Vec<Change
 
 /// Records `changes` and announces their events in operations of their own
 /// (for `workspace` and `agent`, when a caller made them); the last
-/// operation's id. A failure to announce is logged: the rows are the
-/// truth.
+/// operation's id. An assignment that leaves BLOCKED goes in `unblocked`,
+/// whose help requests [`withdraw_help`] withdraws once the assignment lock
+/// is dropped. A failure to announce is logged: the rows are the truth.
 async fn record_and_announce(
     state: &AppState,
     repo: RepoId,
     changes: Vec<Change>,
     workspace: Option<&str>,
     agent: Option<&str>,
+    unblocked: &mut Unblocked,
 ) -> Result<Announced, AssignError> {
     if changes.is_empty() {
         return Ok(Announced::default());
     }
     let events = state.db.record_assignments(repo, changes)?;
-    Ok(announce(state, repo, &events, workspace, agent).await)
+    let announced = announce(state, repo, &events, workspace, agent).await;
+    let blocked = State::Blocked.as_str();
+    unblocked.extend(
+        events
+            .iter()
+            .filter(|event| {
+                event.from_state.as_deref() == Some(blocked) && event.to_state != blocked
+            })
+            .map(|event| {
+                (
+                    event.change_id.clone(),
+                    event.assignment_id.clone(),
+                    event.seq,
+                )
+            }),
+    );
+    Ok(announced)
+}
+
+/// Withdraws the open help requests about `unblocked`'s assignments
+/// (`comments::after_unblocked`), so an agent that asked goes on. Called
+/// after the assignment lock is dropped: the withdrawal takes the create
+/// lock, which GC holds exclusively. A failure is logged; reconcile
+/// withdraws them from the rows.
+async fn withdraw_help(state: &AppState, repo: RepoId, unblocked: &Unblocked) {
+    if let Err(error) = crate::comments::after_unblocked(state, repo, unblocked).await {
+        tracing::warn!(%repo, error = %ErrorChain(&error), "cannot withdraw help requests about unblocked conflicts");
+    }
 }
 
 /// The operations [`announce`] wrote.
@@ -1372,11 +1782,40 @@ fn live_owner(state: &AppState, workspace: &WorkspaceRecord) -> Result<OwnerColu
     Ok(owner_of(state, &session))
 }
 
-/// R3.28's gate: whether `caller` may claim `row`. Allows every claim;
-/// R3.28 refuses an agent's claim of an `ask` tier conflict, or one over
-/// its attempt cap, here.
-pub fn may_claim(_row: &AssignmentRow, _caller: &Caller) -> Result<(), AssignError> {
+/// Whether an agent may be handed `row` (R3.28): not one whose tier is
+/// `ask` with no go-ahead, nor one out of attempts. A person's assignment
+/// is a go-ahead instead ([`tier::grant`]).
+pub fn may_claim(row: &AssignmentRow, _caller: &Caller) -> Result<(), AssignError> {
+    match tier::blocked(row) {
+        Some(block) => Err(blocked_error(row, block)),
+        None => Ok(()),
+    }
+}
+
+fn blocked_error(row: &AssignmentRow, block: tier::Block) -> AssignError {
+    AssignError::Blocked {
+        assignment: row.id.clone(),
+        block,
+        attempts: row.attempts,
+        limit: tier::limit(row),
+    }
+}
+
+/// Refuses `row` to an agent when it waits for a person.
+fn not_blocked(row: &AssignmentRow) -> Result<(), AssignError> {
+    if row.state == State::Blocked.as_str() {
+        return Err(blocked_error(
+            row,
+            tier::blocked(row).unwrap_or(tier::Block::Ask),
+        ));
+    }
     Ok(())
+}
+
+/// Whether `caller` is a person on the daemon's machine: who gives a
+/// go-ahead (R3.28) or takes a conflict over.
+fn is_person(caller: &Caller) -> bool {
+    caller.actor == "human" && caller.remote.is_none()
 }
 
 /// What a write did.
@@ -1397,39 +1836,47 @@ pub async fn claim(
     caller: &Caller,
 ) -> Result<Outcome, AssignError> {
     let repo = workspace.repo_id;
-    let lock = state.assignments.lock(repo);
-    let mut looked = lock.lock().await;
-    look_locked(state, repo, &mut looked).await?;
-    let owner = live_owner(state, workspace)?;
-    let row = find(state, repo, named)?;
-    if row.state == State::Assigned.as_str() && row.owner.session_id == owner.session_id {
-        return Ok(Outcome { row, op_id: None });
-    }
-    check_open(&row, expected, true)?;
-    match State::parse(&row.state) {
-        Some(State::Queued) => {}
-        Some(State::Unowned) => {
-            return Err(AssignError::Unowned {
-                assignment: row.id.clone(),
-            });
+    let mut unblocked = Unblocked::new();
+    let result: Result<Outcome, AssignError> = async {
+        let lock = state.assignments.lock(repo);
+        let mut looked = lock.lock().await;
+        look_locked(state, repo, &mut looked, &mut unblocked).await?;
+        let owner = live_owner(state, workspace)?;
+        let row = find(state, repo, named)?;
+        if row.state == State::Assigned.as_str() && row.owner.session_id == owner.session_id {
+            return Ok(Outcome { row, op_id: None });
         }
-        _ => return Err(held(&row)),
+        check_open(&row, expected, true)?;
+        not_blocked(&row)?;
+        match State::parse(&row.state) {
+            Some(State::Queued) => {}
+            Some(State::Unowned) => {
+                return Err(AssignError::Unowned {
+                    assignment: row.id.clone(),
+                });
+            }
+            _ => return Err(held(&row)),
+        }
+        may_claim(&row, caller)?;
+        let now = Timestamp::now();
+        let mut next = moved(&row, State::Assigned, Reason::Claimed, owner, now);
+        next.claims = row.claims.saturating_add(1);
+        let event = event_of(Some(&row), &next, Reason::Claimed, None, caller, now);
+        let op_id = record_and_announce(
+            state,
+            repo,
+            vec![(next.clone(), event)],
+            Some(&workspace.id.as_hex()),
+            caller.marked_agent.as_deref(),
+            &mut unblocked,
+        )
+        .await?
+        .last;
+        Ok(Outcome { row: next, op_id })
     }
-    may_claim(&row, caller)?;
-    let now = Timestamp::now();
-    let mut next = moved(&row, State::Assigned, Reason::Claimed, owner, now);
-    next.claims = row.claims.saturating_add(1);
-    let event = event_of(Some(&row), &next, Reason::Claimed, None, caller, now);
-    let op_id = record_and_announce(
-        state,
-        repo,
-        vec![(next.clone(), event)],
-        Some(&workspace.id.as_hex()),
-        caller.marked_agent.as_deref(),
-    )
-    .await?
-    .last;
-    Ok(Outcome { row: next, op_id })
+    .await;
+    withdraw_help(state, repo, &unblocked).await;
+    result
 }
 
 /// Releases `named` to the queue (decision 6): from the workspace whose
@@ -1445,51 +1892,51 @@ pub async fn release(
     if !valid_reason(reason) {
         return Err(AssignError::InvalidReason);
     }
-    let lock = state.assignments.lock(repo);
-    let mut looked = lock.lock().await;
-    look_locked(state, repo, &mut looked).await?;
-    let row = find(state, repo, named)?;
-    check_open(&row, "", true)?;
-    let owns = match State::parse(&row.state) {
-        Some(State::Assigned) => workspace.is_some_and(|workspace| {
-            row.owner.workspace_id.as_deref() == Some(workspace.id.as_hex().as_str())
-        }),
-        Some(State::Taken) => {
-            caller.remote.is_none()
-                && row.owner.identity_id.is_some()
-                && row.owner.identity_id == caller.person_identity_id
+    let mut unblocked = Unblocked::new();
+    let result: Result<Outcome, AssignError> = async {
+        let lock = state.assignments.lock(repo);
+        let mut looked = lock.lock().await;
+        look_locked(state, repo, &mut looked, &mut unblocked).await?;
+        let row = find(state, repo, named)?;
+        check_open(&row, "", true)?;
+        let owns = match State::parse(&row.state) {
+            Some(State::Assigned) => workspace.is_some_and(|workspace| {
+                row.owner.workspace_id.as_deref() == Some(workspace.id.as_hex().as_str())
+            }),
+            Some(State::Taken) => {
+                caller.remote.is_none()
+                    && row.owner.identity_id.is_some()
+                    && row.owner.identity_id == caller.person_identity_id
+            }
+            _ => false,
+        };
+        if !owns {
+            return Err(held(&row));
         }
-        _ => false,
-    };
-    if !owns {
-        return Err(held(&row));
+        let now = Timestamp::now();
+        let mut row = row;
+        if row.state == State::Taken.as_str() && is_person(caller) {
+            // A person handing back what they took lets resolvers go on.
+            tier::grant(&mut row, caller.person_identity_id.as_deref(), None, now);
+        }
+        let (to, why) = tier::hand_off(&row, State::Queued, Reason::Released, &row.owner);
+        let next = moved(&row, to, why, row.owner.clone(), now);
+        let event = event_of(Some(&row), &next, why, Some(reason), caller, now);
+        let op_id = record_and_announce(
+            state,
+            repo,
+            vec![(next.clone(), event)],
+            workspace.map(|w| w.id.as_hex()).as_deref(),
+            caller.marked_agent.as_deref(),
+            &mut unblocked,
+        )
+        .await?
+        .last;
+        Ok(Outcome { row: next, op_id })
     }
-    let now = Timestamp::now();
-    let next = moved(
-        &row,
-        State::Queued,
-        Reason::Released,
-        row.owner.clone(),
-        now,
-    );
-    let event = event_of(
-        Some(&row),
-        &next,
-        Reason::Released,
-        Some(reason),
-        caller,
-        now,
-    );
-    let op_id = record_and_announce(
-        state,
-        repo,
-        vec![(next.clone(), event)],
-        workspace.map(|w| w.id.as_hex()).as_deref(),
-        caller.marked_agent.as_deref(),
-    )
-    .await?
-    .last;
-    Ok(Outcome { row: next, op_id })
+    .await;
+    withdraw_help(state, repo, &unblocked).await;
+    result
 }
 
 /// Where [`assign`] puts an assignment.
@@ -1501,6 +1948,9 @@ pub enum Target {
     Queue,
     /// A person takes it over.
     Take,
+    /// A person's go-ahead (R3.28): a blocked assignment goes on to its
+    /// kept owner, else the queue; one out of attempts gets more.
+    Allow,
     /// Only the priority changes.
     Priority,
 }
@@ -1516,26 +1966,85 @@ pub struct AssignRequest<'a> {
     pub target: &'a Target,
     /// The new priority, if any.
     pub priority: Option<i32>,
+    /// Attempts a person grants (R3.28).
+    pub attempts: Option<u32>,
     /// Why.
     pub reason: &'a str,
 }
 
-/// Assigns an assignment (decision 7).
-pub async fn assign(
-    state: &Arc<AppState>,
-    repo: RepoId,
-    request: AssignRequest<'_>,
+/// Where `target` puts `row` for `caller`: its state, reason and owner.
+/// Blocking.
+fn destination(
+    state: &AppState,
+    row: &AssignmentRow,
+    target: &Target,
     caller: &Caller,
-) -> Result<Outcome, AssignError> {
+) -> Result<(State, Reason, OwnerColumns), AssignError> {
+    Ok(match target {
+        Target::Workspace(workspace) => (
+            State::Assigned,
+            Reason::Assigned,
+            live_owner(state, workspace)?,
+        ),
+        Target::Queue => {
+            let (to, why) = tier::hand_off(row, State::Queued, Reason::Assigned, &row.owner);
+            (to, why, row.owner.clone())
+        }
+        Target::Allow if row.state == State::Blocked.as_str() => {
+            let live = match row.owner.workspace_id.as_deref() {
+                Some(workspace) => state.db.live_provenance_session(workspace)?,
+                None => None,
+            };
+            match live {
+                Some(session) => (State::Assigned, Reason::Allowed, owner_of(state, &session)),
+                None => (State::Queued, Reason::Allowed, row.owner.clone()),
+            }
+        }
+        Target::Allow => (
+            State::parse(&row.state).unwrap_or(State::Unowned),
+            Reason::Allowed,
+            row.owner.clone(),
+        ),
+        Target::Take => (
+            State::Taken,
+            Reason::Taken,
+            OwnerColumns {
+                identity_id: caller.person_identity_id.clone(),
+                actor: Some("human".to_owned()),
+                agent: caller.agent.clone(),
+                ..OwnerColumns::default()
+            },
+        ),
+        Target::Priority => (
+            State::parse(&row.state).unwrap_or(State::Unowned),
+            Reason::Assigned,
+            row.owner.clone(),
+        ),
+    })
+}
+
+/// What [`assign`] refuses before reading the assignment.
+fn check_request(request: &AssignRequest<'_>, caller: &Caller) -> Result<(), AssignError> {
     let AssignRequest {
-        named,
-        expected,
         target,
         priority,
+        attempts,
         reason,
-    } = request;
+        ..
+    } = *request;
     if !valid_reason(reason) {
         return Err(AssignError::InvalidReason);
+    }
+    if attempts.is_some_and(|n| !(1..=tier::MAX_GRANT).contains(&n)) {
+        return Err(AssignError::InvalidAttempts);
+    }
+    if matches!(target, Target::Allow) || attempts.is_some() {
+        if caller.remote.is_some() {
+            return Err(AssignError::RemoteHuman);
+        }
+        if caller.actor != "human" {
+            return Err(AssignError::AllowNeedsPerson);
+        }
     }
     if let Some(priority) = priority
         && !(MIN_PRIORITY..=MAX_PRIORITY).contains(&priority)
@@ -1553,75 +2062,223 @@ pub async fn assign(
             return Err(AssignError::TakeNeedsPerson);
         }
     }
-    let lock = state.assignments.lock(repo);
-    let mut looked = lock.lock().await;
-    look_locked(state, repo, &mut looked).await?;
-    let row = find(state, repo, named)?;
-    check_open(&row, expected, !matches!(target, Target::Take))?;
-    // An agent that assigns a conflict to a workspace is held to a claim's
-    // rules (S-152): queued ones only, through R3.28's gate.
-    if matches!(target, Target::Workspace(_)) && caller.actor != "human" {
-        match State::parse(&row.state) {
-            Some(State::Queued) => {}
-            Some(State::Unowned) => {
-                return Err(AssignError::Unowned {
-                    assignment: row.id.clone(),
-                });
-            }
-            _ => return Err(held(&row)),
-        }
-        may_claim(&row, caller)?;
-    }
-    let now = Timestamp::now();
-    let (state_to, why, owner) = match target {
-        Target::Workspace(workspace) => (
-            State::Assigned,
-            Reason::Assigned,
-            live_owner(state, workspace)?,
-        ),
-        Target::Queue => (State::Queued, Reason::Assigned, row.owner.clone()),
-        Target::Take => (
-            State::Taken,
-            Reason::Taken,
-            OwnerColumns {
-                identity_id: caller.person_identity_id.clone(),
-                actor: Some("human".to_owned()),
-                agent: caller.agent.clone(),
-                ..OwnerColumns::default()
-            },
-        ),
-        Target::Priority => (
-            State::parse(&row.state).unwrap_or(State::Unowned),
-            Reason::Assigned,
-            row.owner.clone(),
-        ),
-    };
-    let mut next = moved(&row, state_to, why, owner, now);
-    if matches!(target, Target::Priority) {
-        // Only the priority: the state and its reason stay.
-        next.reason.clone_from(&row.reason);
-    }
-    if let Some(priority) = priority {
-        next.priority = priority;
-    }
-    let event = event_of(Some(&row), &next, why, Some(reason), caller, now);
-    let op_id = record_and_announce(
-        state,
-        repo,
-        vec![(next.clone(), event)],
-        caller.workspace.as_deref(),
-        caller.marked_agent.as_deref(),
-    )
-    .await?
-    .last;
-    Ok(Outcome { row: next, op_id })
+    Ok(())
 }
+
+/// Assigns an assignment (decision 7).
+pub async fn assign(
+    state: &Arc<AppState>,
+    repo: RepoId,
+    request: AssignRequest<'_>,
+    caller: &Caller,
+) -> Result<Outcome, AssignError> {
+    let AssignRequest {
+        named,
+        expected,
+        target,
+        priority,
+        attempts,
+        reason,
+    } = request;
+    check_request(&request, caller)?;
+    let mut unblocked = Unblocked::new();
+    let result: Result<Outcome, AssignError> = async {
+        let lock = state.assignments.lock(repo);
+        let mut looked = lock.lock().await;
+        look_locked(state, repo, &mut looked, &mut unblocked).await?;
+        let row = find(state, repo, named)?;
+        check_open(&row, expected, !matches!(target, Target::Take))?;
+        // An agent that assigns a conflict to a workspace is held to a claim's
+        // rules (S-152): queued ones only, through R3.28's gate; nor may it
+        // queue one that waits for a person.
+        if !is_person(caller) && matches!(target, Target::Queue) {
+            not_blocked(&row)?;
+        }
+        if matches!(target, Target::Workspace(_)) && caller.actor != "human" {
+            not_blocked(&row)?;
+            match State::parse(&row.state) {
+                Some(State::Queued) => {}
+                Some(State::Unowned) => {
+                    return Err(AssignError::Unowned {
+                        assignment: row.id.clone(),
+                    });
+                }
+                _ => return Err(held(&row)),
+            }
+            may_claim(&row, caller)?;
+        }
+        let now = Timestamp::now();
+        let mut row = row;
+        // A person's assignment to a workspace or the queue, and an allow, is
+        // a go-ahead (R3.28).
+        if is_person(caller)
+            && matches!(target, Target::Workspace(_) | Target::Queue | Target::Allow)
+        {
+            tier::grant(
+                &mut row,
+                caller.person_identity_id.as_deref(),
+                attempts,
+                now,
+            );
+        }
+        let (state_to, why, owner) = destination(state, &row, target, caller)?;
+        let mut next = moved(&row, state_to, why, owner, now);
+        if matches!(target, Target::Priority)
+            || (matches!(target, Target::Allow) && state_to.as_str() == row.state)
+        {
+            // Only the priority, or a grant: the state and its reason stay.
+            next.reason.clone_from(&row.reason);
+        }
+        if let Some(priority) = priority {
+            next.priority = priority;
+        }
+        let event = event_of(Some(&row), &next, why, Some(reason), caller, now);
+        let op_id = record_and_announce(
+            state,
+            repo,
+            vec![(next.clone(), event)],
+            caller.workspace.as_deref(),
+            caller.marked_agent.as_deref(),
+            &mut unblocked,
+        )
+        .await?
+        .last;
+        Ok(Outcome { row: next, op_id })
+    }
+    .await;
+    withdraw_help(state, repo, &unblocked).await;
+    result
+}
+
+/// The conflicts `change` resolved, as policy reads them at `commit`
+/// (`change.resolutions`, R3.28): its assignments closed resolved, and,
+/// when `commit` carries no conflict but an assignment of the change is
+/// still open (the follower has not looked since the resolving snapshot),
+/// that one as the close will record it, so a gate that runs first never
+/// judges a resolution as ordinary work (S-234). Blocking.
+pub fn resolutions(
+    state: &AppState,
+    repo: RepoId,
+    change: &str,
+    commit: &str,
+    conflicted: bool,
+) -> Result<Vec<reef_policy::input::Resolution>, DbError> {
+    let actor = |session: Option<&str>| -> Result<String, DbError> {
+        Ok(match session {
+            Some(session) => state
+                .db
+                .provenance_session(session)?
+                .map(|s| s.actor)
+                .unwrap_or_default(),
+            None => String::new(),
+        })
+    };
+    // The open row first, then the closed ones: a close the follower
+    // commits between the two reads shows in the second, never in neither.
+    let pending = match state.db.assignment_of_change(repo, change)? {
+        Some(open) if !conflicted && open.closed_at.is_none() => {
+            let session = resolver_of(state, repo, commit, open.opened_at)?;
+            let resolver_actor = actor(session.as_deref())?;
+            let approval = tier::approval(
+                &open,
+                Some(resolver_actor.as_str()).filter(|a| !a.is_empty()),
+            );
+            Some(resolution_input(&open, resolver_actor, approval))
+        }
+        _ => None,
+    };
+    let mut resolutions = Vec::new();
+    for row in state.db.resolutions_of(repo, change)? {
+        resolutions.push(resolution_input(
+            &row,
+            actor(row.resolved_session_id.as_deref())?,
+            row.approval,
+        ));
+    }
+    if let Some(pending) = pending
+        && !resolutions
+            .iter()
+            .any(|r| r.assignment == pending.assignment)
+    {
+        resolutions.push(pending);
+    }
+    Ok(resolutions)
+}
+
+fn resolution_input(
+    row: &AssignmentRow,
+    resolver_actor: String,
+    approval: bool,
+) -> reef_policy::input::Resolution {
+    reef_policy::input::Resolution {
+        assignment: row.id.clone(),
+        tier: tier::tier_of(row).as_str().to_owned(),
+        attempts: i64::from(row.attempts),
+        limit: i64::from(tier::limit(row)),
+        approval,
+        resolver_actor,
+        conflicted_commit: row.commit_id.clone(),
+    }
+}
+
+/// Resolutions awaiting approval GC looks at in one run, at most; the
+/// rest are kept until a later run.
+const APPROVALS_SWEPT: usize = 1000;
 
 /// GC's tenth step: deletes `repo`'s assignments closed more than
 /// [`RETENTION`] ago and before `keep_newer`, with their events; how many.
-pub fn sweep(db: &crate::db::Db, repo: RepoId, keep_newer: Timestamp) -> Result<u64, DbError> {
+/// A resolution whose landing needs a person's sign-off is kept while its
+/// change is visible and not landed (R3.28, S-234).
+pub async fn sweep(
+    state: &AppState,
+    repo: RepoId,
+    keep_newer: Timestamp,
+) -> Result<u64, AssignError> {
     let before = ago(Timestamp::now(), RETENTION).min(keep_newer);
-    db.delete_closed_assignments(repo, before)
+    let awaiting = state
+        .db
+        .resolutions_awaiting_approval(repo, before, APPROVALS_SWEPT)?;
+    let mut released = Vec::new();
+    if !awaiting.is_empty() {
+        let Ok(handle) = state.manager.handle(repo) else {
+            // Unreadable: keep every resolution awaiting approval.
+            return Ok(state.db.delete_closed_assignments(repo, before, &[])?);
+        };
+        let head = state
+            .reads
+            .current(&handle)
+            .await
+            .map_err(|error| AssignError::Read(Box::new(error)))?;
+        let changes: Vec<String> = awaiting.iter().map(|(_, change)| change.clone()).collect();
+        let visible: HashSet<String> = state
+            .reads
+            .run(&handle, move || async move {
+                let mut visible = HashSet::new();
+                for change in changes {
+                    let Ok(hex) = change.parse::<ChangeIdHex>() else {
+                        continue;
+                    };
+                    if jj_assignment::visible_commit(&head, &hex).await?.is_some() {
+                        visible.insert(change);
+                    }
+                }
+                Ok::<_, ConflictError>(visible)
+            })
+            .await
+            .map_err(|error| AssignError::Read(Box::new(error)))??;
+        for (id, change) in awaiting {
+            let landed = state
+                .db
+                .lifecycle_row(repo, &change)?
+                .is_some_and(|row| row.state == "landed");
+            if landed || !visible.contains(&change) {
+                released.push(id);
+            }
+        }
+    }
+    Ok(state
+        .db
+        .delete_closed_assignments(repo, before, &released)?)
 }
 
 #[cfg(test)]
@@ -1636,6 +2293,7 @@ mod tests {
             State::Taken,
             State::Unowned,
             State::Closed,
+            State::Blocked,
         ] {
             assert_eq!(State::parse(state.as_str()), Some(state));
         }
@@ -1670,6 +2328,12 @@ mod tests {
             closed_at: None,
             closed_commit_id: None,
             resolved_session_id: None,
+            tier: TierColumns::default(),
+            attempts: 0,
+            granted: 0,
+            go_ahead_identity_id: None,
+            go_ahead_at: None,
+            approval: false,
         };
         assert!(check_open(&row, "", true).is_ok());
         assert!(check_open(&row, "cfl_1", true).is_ok());

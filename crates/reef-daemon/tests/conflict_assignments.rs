@@ -590,10 +590,13 @@ async fn claims_and_releases() {
         .assignment
         .unwrap();
     assert_eq!(reclaimed.claims, 2);
+    assert_eq!((reclaimed.attempts, reclaimed.attempt_limit), (3, 3));
+    // Its third attempt ends: out of attempts (R3.28's default cap of 3),
+    // it waits for a person instead of the queue.
     release(client, &repo.id, &other).await;
     let back = the_one(client, &repo.id).await;
-    assert_eq!(back.state(), State::Queued);
-    assert_eq!(back.reason(), Reason::OwnerEnded);
+    assert_eq!(back.state(), State::Blocked);
+    assert_eq!(back.reason(), Reason::Attempts);
     // Its events, oldest first.
     let got = client
         .get_conflict_assignment(GetConflictAssignmentRequest {
@@ -616,7 +619,7 @@ async fn claims_and_releases() {
             Reason::Claimed,
             Reason::Released,
             Reason::Claimed,
-            Reason::OwnerEnded
+            Reason::Attempts
         ],
         "{got:#?}"
     );
@@ -782,6 +785,21 @@ async fn assigns_prioritizes_and_takes_over() {
         reef_api::error::REMOTE_HUMAN_REQUIRED,
         "{remote_take}"
     );
+    // R3.28: nor give the go-ahead (S-231).
+    let remote_allow = remote
+        .assign_conflict(AssignConflictRequest {
+            repo: repo.id.clone(),
+            assignment: queued.id.clone(),
+            target: Some(v1::assign_conflict_request::Target::Allow(true)),
+            ..AssignConflictRequest::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(
+        remote_allow.reason(),
+        reef_api::error::REMOTE_HUMAN_REQUIRED,
+        "{remote_allow}"
+    );
     let own = create(&remote, &repo.id, "remote@test").await;
     remote
         .assign_conflict(AssignConflictRequest {
@@ -914,6 +932,8 @@ async fn closes_changes_and_reopens() {
     let reopened = the_one(client, &repo.id).await;
     assert_eq!(reopened.id, first.id);
     assert_eq!(reopened.conflict_id, changed.conflict_id);
+    // R3.28: the undone resolution used an attempt; the reopen starts one.
+    assert_eq!(reopened.attempts, first.attempts + 1);
     // Abandoning the change closes it.
     client
         .abandon_change(v1::AbandonChangeRequest {
@@ -971,7 +991,8 @@ async fn undo_refuses_assignment_operations() {
 }
 
 // 10: GC deletes closed assignments past their retention, with their
-// events; open ones stay.
+// events; open ones stay, and so does a resolution awaiting a person's
+// sign-off while its change is visible (R3.28, S-234).
 #[tokio::test]
 async fn retention_deletes_old_closed_assignments() {
     let (daemon, repo) = fixture().await;
@@ -986,15 +1007,37 @@ async fn retention_deletes_old_closed_assignments() {
         Some(&s.b.change_id),
     )
     .await;
-    write(client, &resolver, "conflict.txt", "one\nmerged\nthree\n").await;
+    let merged = write(client, &resolver, "conflict.txt", "one\nmerged\nthree\n").await;
     assert_eq!(open(client, &repo.id).await, []);
     let state = daemon.handle.state();
     let repo_id = repo.id.parse().unwrap();
     let old = reef_daemon::model::Timestamp(1);
     state.db.age_assignment(repo_id, &first.id, old).unwrap();
-    let removed =
-        reef_daemon::assign::sweep(&state.db, repo_id, reef_daemon::model::Timestamp::now())
-            .unwrap();
+    let now = reef_daemon::model::Timestamp::now();
+    let kept = reef_daemon::assign::sweep(state, repo_id, now)
+        .await
+        .unwrap();
+    assert_eq!(kept, 0, "awaiting a person's sign-off, its change visible");
+    assert!(
+        state
+            .db
+            .assignment(repo_id, &first.id)
+            .unwrap()
+            .unwrap()
+            .approval
+    );
+    release(client, &repo.id, &resolver).await;
+    client
+        .abandon_change(v1::AbandonChangeRequest {
+            repo: repo.id.clone(),
+            revision: merged,
+            ..v1::AbandonChangeRequest::default()
+        })
+        .await
+        .unwrap();
+    let removed = reef_daemon::assign::sweep(state, repo_id, now)
+        .await
+        .unwrap();
     assert_eq!(removed, 1);
     assert!(state.db.assignment(repo_id, &first.id).unwrap().is_none());
     assert_eq!(
@@ -1028,6 +1071,7 @@ async fn help_request_names_a_conflict() {
             tried: "nothing: the policy says ask first".to_owned(),
             question: "Which name wins?".to_owned(),
             conflict: conflict.to_owned(),
+            while_blocked: false,
         }),
         client_session: session.to_owned(),
         ..CreateCommentRequest::default()

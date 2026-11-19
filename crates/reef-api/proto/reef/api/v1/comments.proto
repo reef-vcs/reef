@@ -49,8 +49,10 @@ service CommentService {
   // (reason CONFLICT on a commit with no conflict; metadata `commit_id`),
   // CONFLICT_CHANGED (`help.conflict` is a conflict id the change no
   // longer has; metadata `conflict_id`), HELP_ALREADY_OPEN (the asking session has an
-  // open help request on the change; metadata `id`) or SELF_ANSWER (an
-  // answer from the session that asked; metadata `id`);
+  // open help request on the change; metadata `id`), CONFLICT_NOT_BLOCKED
+  // (`help.while_blocked` and the assignment does not wait for a person;
+  // metadata `assignment`) or SELF_ANSWER (an answer from the session that
+  // asked; metadata `id`);
   // UNAVAILABLE with reason TOO_MANY_COMMENTS, TOO_MANY_INSTRUCTIONS or
   // TOO_MANY_HELP_REQUESTS (metadata `max`); PERMISSION_DENIED with reason
   // REMOTE_IDENTITY_REQUIRED; a failed snapshot's own error.
@@ -344,13 +346,19 @@ message HelpInput {
   // (`asg_`, R3.27) or a conflict id (`cfl_`, R3.25) of the change; empty
   // for the change's conflict as it is now.
   string conflict = 4;
+  // With reason CONFLICT: ask only while the conflict's assignment waits
+  // for a person (BLOCKED, R3.28); otherwise FAILED_PRECONDITION with
+  // reason CONFLICT_NOT_BLOCKED. `reef here`'s `ask` step sets it, so a
+  // question it suggested is refused once a person let the agent go on.
+  bool while_blocked = 5;
 }
 
 // A help request's state, and what it asked.
 message HelpRequest {
   // Where it is.
   HelpState state = 1;
-  // Why it got there: REQUEST, CHANGE_FINAL, EXPIRED or ANSWER_CANCELLED.
+  // Why it got there: REQUEST, CHANGE_FINAL, EXPIRED, ANSWER_CANCELLED or
+  // CONFLICT_UNBLOCKED.
   InstructionCause cause = 2;
   // Why it was asked.
   HelpReason reason = 3;

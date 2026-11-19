@@ -279,6 +279,8 @@ impl From<WorkspaceView<'_>> for v1::Workspace {
             lifecycle: None,
             conflicted_path_count: 0,
             help_request_id: String::new(),
+            conflict_assignment_id: String::new(),
+            conflict_block_reason: v1::ConflictAssignmentReason::Unspecified.into(),
         }
     }
 }

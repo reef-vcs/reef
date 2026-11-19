@@ -1,4 +1,4 @@
-//! `reef conflict queue|assignments|assignment|claim|release|assign|take`
+//! `reef conflict queue|assignments|assignment|claim|release|assign|take|allow`
 //! (R3.27, ADR 0068): who resolves each conflict a change introduces.
 //!
 //! An assignment is the daemon's: the change's originating agent by
@@ -44,8 +44,8 @@ pub(crate) struct AssignmentsArgs {
     /// Only those your workspace's session owns.
     #[arg(long)]
     mine: bool,
-    /// Only these states: assigned, queued, taken, unowned, closed (repeatable).
-    #[arg(long = "state", value_name = "STATE", value_parser = ["assigned", "queued", "taken", "unowned", "closed"])]
+    /// Only these states: assigned, queued, taken, unowned, blocked, closed (repeatable).
+    #[arg(long = "state", value_name = "STATE", value_parser = ["assigned", "queued", "taken", "unowned", "blocked", "closed"])]
     states: Vec<String>,
     /// Only this change's (a change id prefix, repeatable).
     #[arg(long = "change", value_name = "CHANGE")]
@@ -134,6 +134,22 @@ pub(crate) struct TakeArgs {
     scope: ScopeArgs,
 }
 
+/// `reef conflict allow`.
+#[derive(Debug, clap::Args)]
+pub(crate) struct AllowArgs {
+    /// An assignment id (asg_…), or a revision naming its change.
+    #[arg(value_name = "ASSIGNMENT")]
+    assignment: String,
+    /// Attempts to add, 1 to 20; one when it is out of attempts and this is not given.
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..=20))]
+    attempts: Option<u32>,
+    /// Why.
+    #[arg(long, value_name = "TEXT")]
+    reason: Option<String>,
+    #[command(flatten)]
+    scope: ScopeArgs,
+}
+
 fn short(id: &str) -> String {
     id.chars().take(12).collect()
 }
@@ -162,7 +178,8 @@ fn owner_text(row: &ConflictAssignment) -> String {
             )
         ),
         Some("unowned") => "nobody".to_owned(),
-        Some("queued") if who.is_empty() => "-".to_owned(),
+        Some("blocked" | "queued") if who.is_empty() => "-".to_owned(),
+        Some("blocked") => format!("(for {who})"),
         Some("queued") => format!("(was {who})"),
         Some("assigned") if owner.is_some_and(|o| !o.live) => format!("{who} (ended)"),
         _ if who.is_empty() => "-".to_owned(),
@@ -193,7 +210,8 @@ impl TextRow for ConflictAssignment {
         "REASON",
         "OWNER",
         "PRIORITY",
-        "CLAIMS",
+        "TIER",
+        "ATTEMPTS",
         "FILES",
     ];
 
@@ -205,10 +223,36 @@ impl TextRow for ConflictAssignment {
             self.reason.clone().unwrap_or_else(|| "-".to_owned()),
             owner_text(self),
             self.priority.to_string(),
-            self.claims.to_string(),
+            tier_name(self).to_owned(),
+            format!("{}/{}", self.attempts, self.attempt_limit),
             format!("{} ({} new)", self.files_total, self.introduced),
         ]
     }
+}
+
+/// The tier of `row`'s conflict; `-` until looked up.
+fn tier_name(row: &ConflictAssignment) -> &str {
+    row.tier
+        .as_ref()
+        .and_then(|tier| tier.tier.as_deref())
+        .unwrap_or("-")
+}
+
+/// Where `row`'s tier came from, in a few words.
+fn tier_text(row: &ConflictAssignment) -> String {
+    let Some(tier) = &row.tier else {
+        return "not looked up yet".to_owned();
+    };
+    let name = tier.tier.as_deref().unwrap_or("-");
+    if let Some(error) = &tier.error {
+        return format!("{name}: {}", clean(error));
+    }
+    let from = match (tier.rule, tier.policy_sha256.as_deref()) {
+        (_, None) => "no reef-policy.toml at trunk(), the defaults".to_owned(),
+        (Some(rule), Some(sha)) => format!("[[conflicts.rule]] {rule}, policy {}", short(sha)),
+        (None, Some(sha)) => format!("[conflicts], policy {}", short(sha)),
+    };
+    format!("{name} ({from})")
 }
 
 /// What brief mode prints of an assignment.
@@ -226,6 +270,10 @@ pub(crate) struct BriefAssignment<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     queue_position: Option<u32>,
     conflict_id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tier: Option<&'a str>,
+    attempts: u32,
+    attempt_limit: u32,
 }
 
 impl<'a> From<&'a ConflictAssignment> for BriefAssignment<'a> {
@@ -240,6 +288,9 @@ impl<'a> From<&'a ConflictAssignment> for BriefAssignment<'a> {
             priority: row.priority,
             queue_position: row.queue_position,
             conflict_id: &row.conflict_id,
+            tier: row.tier.as_ref().and_then(|tier| tier.tier.as_deref()),
+            attempts: row.attempts,
+            attempt_limit: row.attempt_limit,
         }
     }
 }
@@ -273,6 +324,29 @@ fn render_assignment(row: &ConflictAssignment, w: &mut dyn Write) -> io::Result<
         "  priority  {}  claims {}  events {}",
         row.priority, row.claims, row.events
     )?;
+    writeln!(
+        w,
+        "  tier      {}  attempts {} of {}",
+        tier_text(row),
+        row.attempts,
+        row.attempt_limit
+    )?;
+    if let Some(at) = &row.go_ahead_at {
+        writeln!(w, "  go-ahead  {at}")?;
+    }
+    if row.state.as_deref() == Some("blocked") {
+        writeln!(
+            w,
+            "  waits for a person: `reef conflict allow {}` lets it go on, `reef conflict take {}` takes it over",
+            row.id, row.id
+        )?;
+    }
+    if row.approval {
+        writeln!(
+            w,
+            "  approval  landing the resolution needs a person's sign-off"
+        )?;
+    }
     if let Some(after) = &row.queue_after {
         writeln!(w, "  queued after {after} unless its owner is followed")?;
     }
@@ -408,6 +482,7 @@ pub(crate) async fn assignments(ctx: &Ctx, args: AssignmentsArgs) -> Result<(), 
                 "queued" => v1::ConflictAssignmentState::Queued,
                 "taken" => v1::ConflictAssignmentState::Taken,
                 "unowned" => v1::ConflictAssignmentState::Unowned,
+                "blocked" => v1::ConflictAssignmentState::Blocked,
                 _ => v1::ConflictAssignmentState::Closed,
             })
         })
@@ -713,6 +788,25 @@ pub(crate) async fn assign(ctx: &Ctx, args: AssignArgs) -> Result<(), CliError> 
     .await
 }
 
+pub(crate) async fn allow(ctx: &Ctx, args: AllowArgs) -> Result<(), CliError> {
+    let scope = scope::resolve(ctx, &args.scope).await?;
+    let advice = AdviceCtx::new(&scope);
+    send_assign(
+        ctx,
+        &advice,
+        AssignConflictRequest {
+            repo: scope.repo_id.clone(),
+            assignment: args.assignment,
+            target: Some(v1::assign_conflict_request::Target::Allow(true)),
+            attempts: args.attempts,
+            reason: reason_of(args.reason),
+            caller_workspace: scope.workspace_id(),
+            ..AssignConflictRequest::default()
+        },
+    )
+    .await
+}
+
 pub(crate) async fn take(ctx: &Ctx, args: TakeArgs) -> Result<(), CliError> {
     let scope = scope::resolve(ctx, &args.scope).await?;
     let advice = AdviceCtx::new(&scope);
@@ -786,6 +880,12 @@ mod tests {
             closed_at: None,
             closed_commit_id: None,
             resolved_session_id: None,
+            tier: None,
+            attempts: 1,
+            attempt_limit: 3,
+            go_ahead_identity_id: None,
+            go_ahead_at: None,
+            approval: false,
         }
     }
 
@@ -802,5 +902,39 @@ mod tests {
         assert_eq!(owner_text(&row("taken")), "taken by alice");
         assert_eq!(owner_text(&row("unowned")), "nobody");
         assert_eq!(state_text(&row("queued")), "queued #2");
+        assert_eq!(
+            owner_text(&row("blocked")),
+            "(for agent bot\\u{1b}[31m ws 7d73d9d4a6c9)"
+        );
+    }
+
+    #[test]
+    fn tiers_say_where_they_came_from() {
+        let mut blocked = row("blocked");
+        assert_eq!(tier_text(&blocked), "not looked up yet");
+        blocked.tier = Some(json::ConflictTierDecision {
+            tier: Some("ask".into()),
+            attempts: 3,
+            rule: Some(1),
+            policy_commit: Some("c0".into()),
+            policy_sha256: Some("0123456789abcdef0123".into()),
+            error: None,
+            conflict_id: Some("cfl_1".into()),
+            looked_up_at: None,
+        });
+        assert_eq!(
+            tier_text(&blocked),
+            "ask ([[conflicts.rule]] 1, policy 0123456789ab)"
+        );
+        assert_eq!(blocked.row()[6..8], ["ask".to_owned(), "1/3".to_owned()]);
+        let mut shown = Vec::new();
+        render_assignment(&blocked, &mut shown).unwrap();
+        let shown = String::from_utf8(shown).unwrap();
+        assert!(
+            shown.contains("reef conflict allow asg_0123456789abcdef"),
+            "{shown}"
+        );
+        blocked.tier.as_mut().unwrap().error = Some("the policy at trunk() is invalid".into());
+        assert_eq!(tier_text(&blocked), "ask: the policy at trunk() is invalid");
     }
 }

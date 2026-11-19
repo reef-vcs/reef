@@ -202,6 +202,7 @@ names_schema! {
     change_step_name_schema_or_null = change_step_name, true;
     transition_actor_name_schema_or_null = transition_actor_name, true;
     assignment_state_name_schema_or_null = assignment_state_name, true;
+    conflict_tier_name_schema_or_null = conflict_tier_name, true;
     publication_update_name_schema_or_null = publication_update_name, true;
     git_host_kind_name_schema_or_null = git_host_kind_name, true;
     assignment_reason_name_schema_or_null = assignment_reason_name, true;
@@ -454,9 +455,20 @@ pub struct Workspace {
     /// none.
     #[serde(skip_serializing_if = "is_zero_u32")]
     pub conflicted_path_count: u32,
-    /// With step `await_help`: the help request it waits on (R3.32).
+    /// With step `await_help`: the help request it waits on (R3.32). With
+    /// step `ask`: the session's answered help request about the blocked
+    /// conflict, asked since it last became blocked or changed; asking
+    /// again is no use, a person must allow or take it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub help_request_id: Option<String>,
+    /// With step `ask`: the conflict's assignment that waits for a person
+    /// (R3.28).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conflict_assignment_id: Option<String>,
+    /// With step `ask`: why the conflict waits, `ask` (its policy tier) or
+    /// `attempts` (its attempt limit is used up).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conflict_block_reason: Option<String>,
 }
 
 /// Another open change that changes a path a workspace's change changes
@@ -784,6 +796,9 @@ impl From<&v1::Workspace> for Workspace {
                 .map(|lifecycle| Box::new(ChangeLifecycle::from(lifecycle))),
             conflicted_path_count: ws.conflicted_path_count,
             help_request_id: text(&ws.help_request_id),
+            conflict_assignment_id: text(&ws.conflict_assignment_id),
+            conflict_block_reason: assignment_reason_name(ws.conflict_block_reason)
+                .map(str::to_owned),
         }
     }
 }
@@ -1717,8 +1732,9 @@ pub fn lifecycle_state_name(state: i32) -> Option<&'static str> {
     Some(name)
 }
 
-/// A change's next step (#262): `work`, `resolve`, `describe`, `propose`,
-/// `land`, `wait`, `revise`, `publish` or `done`; `None` when unset.
+/// A change's next step (#262): `work`, `resolve`, `ask` (R3.28),
+/// `describe`, `propose`, `land`, `wait`, `revise`, `publish`, `done` or
+/// `await_help` (R3.32); `None` when unset.
 pub fn change_step_name(step: i32) -> Option<&'static str> {
     let name = match v1::ChangeStep::try_from(step) {
         Ok(v1::ChangeStep::Unspecified) => return None,
@@ -1732,6 +1748,7 @@ pub fn change_step_name(step: i32) -> Option<&'static str> {
         Ok(v1::ChangeStep::Publish) => "publish",
         Ok(v1::ChangeStep::Done) => "done",
         Ok(v1::ChangeStep::AwaitHelp) => "await_help",
+        Ok(v1::ChangeStep::Ask) => "ask",
         Err(_) => UNKNOWN,
     };
     Some(name)
@@ -1789,8 +1806,8 @@ pub fn instruction_state_name(state: i32) -> Option<&'static str> {
 }
 
 /// Why an instruction or a help request moved (R3.12, R3.32): `request`,
-/// `reproposed`, `change_final`, `expired` or `answer_cancelled`; `None`
-/// when unset.
+/// `reproposed`, `change_final`, `expired`, `answer_cancelled` or (R3.28)
+/// `conflict_unblocked`; `None` when unset.
 pub fn instruction_cause_name(cause: i32) -> Option<&'static str> {
     let name = match v1::InstructionCause::try_from(cause) {
         Ok(v1::InstructionCause::Unspecified) => return None,
@@ -1799,6 +1816,7 @@ pub fn instruction_cause_name(cause: i32) -> Option<&'static str> {
         Ok(v1::InstructionCause::ChangeFinal) => "change_final",
         Ok(v1::InstructionCause::Expired) => "expired",
         Ok(v1::InstructionCause::AnswerCancelled) => "answer_cancelled",
+        Ok(v1::InstructionCause::ConflictUnblocked) => "conflict_unblocked",
         Err(_) => UNKNOWN,
     };
     Some(name)
@@ -1856,7 +1874,7 @@ fn name(value: Option<&'static str>) -> Option<String> {
 }
 
 /// A resolver assignment's state (R3.27): `assigned`, `queued`, `taken`,
-/// `unowned` or `closed`; `None` when unset.
+/// `unowned`, `closed` or (R3.28) `blocked`; `None` when unset.
 pub fn assignment_state_name(state: i32) -> Option<&'static str> {
     let name = match v1::ConflictAssignmentState::try_from(state) {
         Ok(v1::ConflictAssignmentState::Unspecified) => return None,
@@ -1865,6 +1883,7 @@ pub fn assignment_state_name(state: i32) -> Option<&'static str> {
         Ok(v1::ConflictAssignmentState::Taken) => "taken",
         Ok(v1::ConflictAssignmentState::Unowned) => "unowned",
         Ok(v1::ConflictAssignmentState::Closed) => "closed",
+        Ok(v1::ConflictAssignmentState::Blocked) => "blocked",
         Err(_) => UNKNOWN,
     };
     Some(name)
@@ -1873,7 +1892,8 @@ pub fn assignment_state_name(state: i32) -> Option<&'static str> {
 /// Why a resolver assignment is where it is (R3.27): `default`,
 /// `followed`, `returned`, `owner-ended`, `no-owner`, `claimed`,
 /// `released`, `assigned`, `taken`, `changed`, `resolved`, `inherited`,
-/// `abandoned`, `immutable` or `reopened`; `None` when unset.
+/// `abandoned`, `immutable`, `reopened`, or (R3.28) `ask`, `attempts` or
+/// `allowed`; `None` when unset.
 pub fn assignment_reason_name(reason: i32) -> Option<&'static str> {
     use v1::ConflictAssignmentReason as R;
     let name = match R::try_from(reason) {
@@ -1893,9 +1913,109 @@ pub fn assignment_reason_name(reason: i32) -> Option<&'static str> {
         Ok(R::Abandoned) => "abandoned",
         Ok(R::Immutable) => "immutable",
         Ok(R::Reopened) => "reopened",
+        Ok(R::Ask) => "ask",
+        Ok(R::Attempts) => "attempts",
+        Ok(R::Allowed) => "allowed",
         Err(_) => UNKNOWN,
     };
     Some(name)
+}
+
+/// A conflict's tier (R3.28): `land`, `approve` or `ask`; `None` when
+/// not looked up.
+pub fn conflict_tier_name(tier: i32) -> Option<&'static str> {
+    let name = match v1::ConflictTier::try_from(tier) {
+        Ok(v1::ConflictTier::Unspecified) => return None,
+        Ok(v1::ConflictTier::Land) => "land",
+        Ok(v1::ConflictTier::Approve) => "approve",
+        Ok(v1::ConflictTier::Ask) => "ask",
+        Err(_) => UNKNOWN,
+    };
+    Some(name)
+}
+
+/// What policy gives an assignment's conflict (R3.28).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct ConflictTierDecision {
+    /// The tier.
+    #[schemars(schema_with = "conflict_tier_name_schema_or_null")]
+    pub tier: Option<String>,
+    /// The policy's attempt cap.
+    pub attempts: u32,
+    /// The `[[conflicts.rule]]` that decided; `null` for the defaults.
+    pub rule: Option<u32>,
+    /// `trunk()`'s commit the policy was read at.
+    pub policy_commit: Option<String>,
+    /// The policy's SHA-256; `null` when there was none.
+    pub policy_sha256: Option<String>,
+    /// Why the tier is `ask` by failure.
+    pub error: Option<String>,
+    /// The conflict id it was looked up for.
+    pub conflict_id: Option<String>,
+    /// When.
+    pub looked_up_at: Option<String>,
+}
+
+impl From<&v1::ConflictTierDecision> for ConflictTierDecision {
+    fn from(tier: &v1::ConflictTierDecision) -> Self {
+        Self {
+            tier: name(conflict_tier_name(tier.tier)),
+            attempts: tier.attempts,
+            rule: tier.rule,
+            policy_commit: text(&tier.policy_commit),
+            policy_sha256: text(&tier.policy_sha256),
+            error: text(&tier.error),
+            conflict_id: text(&tier.conflict_id),
+            looked_up_at: time(tier.looked_up_at.as_ref()),
+        }
+    }
+}
+
+/// One conflict a change resolved (R3.28).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct ConflictResolution {
+    /// The assignment.
+    pub assignment_id: String,
+    /// The last conflicted commit: `reef conflict show -r` it for both
+    /// sides.
+    pub conflicted_commit_id: String,
+    /// The commit that no longer carried the conflict.
+    pub resolved_commit_id: Option<String>,
+    /// The tier when it was resolved.
+    #[schemars(schema_with = "conflict_tier_name_schema_or_null")]
+    pub tier: Option<String>,
+    /// Attempts started.
+    pub attempts: u32,
+    /// Attempts allowed.
+    pub attempt_limit: u32,
+    /// Landing it needs a person's sign-off.
+    pub approval: bool,
+    /// The session that recorded the resolving commit.
+    pub resolved_session_id: Option<String>,
+    /// That session's agent.
+    pub resolved_agent: Option<String>,
+    /// That session's actor.
+    pub resolved_actor: Option<String>,
+    /// When it closed.
+    pub resolved_at: Option<String>,
+}
+
+impl From<&v1::ConflictResolution> for ConflictResolution {
+    fn from(row: &v1::ConflictResolution) -> Self {
+        Self {
+            assignment_id: row.assignment_id.clone(),
+            conflicted_commit_id: row.conflicted_commit_id.clone(),
+            resolved_commit_id: text(&row.resolved_commit_id),
+            tier: name(conflict_tier_name(row.tier)),
+            attempts: row.attempts,
+            attempt_limit: row.attempt_limit,
+            approval: row.approval,
+            resolved_session_id: text(&row.resolved_session_id),
+            resolved_agent: text(&row.resolved_agent),
+            resolved_actor: text(&row.resolved_actor),
+            resolved_at: time(row.resolved_at.as_ref()),
+        }
+    }
 }
 
 /// Who owns a resolver assignment (R3.27): a provenance session and its
@@ -1989,6 +2109,18 @@ pub struct ConflictAssignment {
     pub closed_commit_id: Option<String>,
     /// The session that recorded that commit, when the daemon did.
     pub resolved_session_id: Option<String>,
+    /// What policy gives its conflict (R3.28); `null` until looked up.
+    pub tier: Option<ConflictTierDecision>,
+    /// Resolution attempts started.
+    pub attempts: u32,
+    /// Attempts allowed: the cap plus grants.
+    pub attempt_limit: u32,
+    /// The person identity that gave the go-ahead.
+    pub go_ahead_identity_id: Option<String>,
+    /// When a person gave the go-ahead.
+    pub go_ahead_at: Option<String>,
+    /// Closed resolved: landing the change needs a person's sign-off.
+    pub approval: bool,
 }
 
 impl From<&v1::ConflictAssignment> for ConflictAssignment {
@@ -2016,6 +2148,12 @@ impl From<&v1::ConflictAssignment> for ConflictAssignment {
             closed_at: time(row.closed_at.as_ref()),
             closed_commit_id: text(&row.closed_commit_id),
             resolved_session_id: text(&row.resolved_session_id),
+            tier: row.tier.as_ref().map(ConflictTierDecision::from),
+            attempts: row.attempts,
+            attempt_limit: row.attempt_limit,
+            go_ahead_identity_id: text(&row.go_ahead_identity_id),
+            go_ahead_at: time(row.go_ahead_at.as_ref()),
+            approval: row.approval,
         }
     }
 }
@@ -2331,6 +2469,8 @@ pub struct Proposal {
     /// What the automatic service is doing about it (R3.45); `null` when
     /// it is not proposed, or not looked at yet.
     pub automatic: Option<AutomaticStatus>,
+    /// The conflicts it resolved (R3.28).
+    pub resolutions: Vec<ConflictResolution>,
 }
 
 impl From<&v1::ProposalEntry> for Proposal {
@@ -2342,6 +2482,11 @@ impl From<&v1::ProposalEntry> for Proposal {
             change: entry.change.as_ref().map(Change::from),
             proposed_by: text(&entry.proposed_by),
             automatic: entry.automatic.as_ref().map(AutomaticStatus::from),
+            resolutions: entry
+                .resolutions
+                .iter()
+                .map(ConflictResolution::from)
+                .collect(),
         }
     }
 }
@@ -2443,6 +2588,8 @@ pub struct ProposalHistory {
     /// What the automatic service is doing about it (R3.45); `null` when
     /// it is not proposed.
     pub automatic: Option<AutomaticStatus>,
+    /// The conflicts it resolved (R3.28).
+    pub resolutions: Vec<ConflictResolution>,
 }
 
 /// `description`'s first line that is not blank, without its newline,

@@ -243,6 +243,8 @@ message PolicyInputSummary {
   uint32 provenance = 6;
   // The change is conflicted.
   bool conflicted = 7;
+  // Conflicts the change resolved (R3.28).
+  uint32 resolutions = 8;
 }
 
 // A policy's decision about one change.

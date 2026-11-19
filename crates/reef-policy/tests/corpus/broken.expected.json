@@ -13,7 +13,7 @@
       "column": 15,
       "field": "expr",
       "line": 8,
-      "message": "no field `pahts` here; the fields are author, commit, conflicted, description, empty, files, id, lines_added, lines_removed, parents, paths, state, tree",
+      "message": "no field `pahts` here; the fields are author, commit, conflicted, description, empty, files, id, lines_added, lines_removed, parents, paths, resolutions, state, tree",
       "rule": "typo"
     }
   ],
@@ -24,7 +24,8 @@
     "lines_added": 13,
     "lines_removed": 4,
     "paths": 2,
-    "provenance": 1
+    "provenance": 1,
+    "resolutions": 0
   },
   "rules": [],
   "sha256": "ee9f3b0be0dc8e60b1da5d022fcbde7b2e597fb52a4c1dd6c154d9a626243195",

@@ -129,6 +129,34 @@ pub struct Change {
     /// `landed`, `declined`, `withdrawn` or `superseded`; `queued` inside a
     /// landing (R3.13).
     pub state: String,
+    /// The conflicts this change resolved (R3.28): its resolver
+    /// assignments closed as resolved.
+    pub resolutions: Vec<Resolution>,
+}
+
+/// One conflict a change resolved (R3.28): a resolver assignment of the
+/// change closed because the change no longer carries the conflict.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+#[schemars(rename = "policy.Resolution")]
+pub struct Resolution {
+    /// The assignment, `asg_` and 16 hex digits.
+    pub assignment: String,
+    /// The conflict's tier when it was resolved: `land`, `approve` or `ask`.
+    pub tier: String,
+    /// Resolution attempts started.
+    pub attempts: i64,
+    /// The attempts allowed: the policy's cap plus what people granted.
+    pub limit: i64,
+    /// Whether landing it needs a person's sign-off (`builtin:resolution`):
+    /// an `approve` or `ask` tier, or resolved past a block, by anyone but
+    /// a person.
+    pub approval: bool,
+    /// The resolving session's actor: `human`, `agent`, or empty when Reef
+    /// did not record the resolving commit.
+    pub resolver_actor: String,
+    /// The last conflicted commit, whose sides a reviewer reads.
+    pub conflicted_commit: String,
 }
 
 /// A commit's author.
@@ -341,6 +369,9 @@ pub struct ConflictSide {
     pub identity: String,
     /// The agent that recorded it.
     pub agent: String,
+    /// The recording session's actor (R3.28): `human` or `agent`; empty
+    /// when the side's source is not verified.
+    pub actor: String,
 }
 
 /// What `reef policy check --input` reads: an input to evaluate, or a

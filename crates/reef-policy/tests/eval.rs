@@ -11,7 +11,9 @@
 
 use std::fmt::Write as _;
 
-use reef_policy::input::{Artifact, Change, Evidence, File, Key, ProposedPolicy, Provenance};
+use reef_policy::input::{
+    Artifact, Change, Evidence, File, Key, ProposedPolicy, Provenance, Resolution,
+};
 use reef_policy::{Decision, Evaluation, Input, Policy, RuleResult, Status};
 
 const ALICE_ID: &str = "idn_0000000000000001";
@@ -655,6 +657,75 @@ fn changes_to_the_policy_files_need_the_owners() {
     assert_eq!(rule(&other, "builtin:owners").status, Status::NotApplicable);
 }
 
+fn resolved(tier: &str, approval: bool) -> Resolution {
+    Resolution {
+        assignment: "asg_0000000000000001".to_owned(),
+        tier: tier.to_owned(),
+        attempts: 1,
+        limit: 3,
+        approval,
+        resolver_actor: "agent".to_owned(),
+        conflicted_commit: "3333".to_owned(),
+    }
+}
+
+// R3.28: a resolution that needs approval lands only with a person's
+// sign-off on its tree; any person counts, an agent's sign-off does not.
+#[test]
+fn a_resolution_needing_approval_needs_a_persons_signoff() {
+    let policy = policy("");
+    let mut resolving = input(&["src/a.rs"], Vec::new());
+    resolving.change.resolutions = vec![resolved("approve", true)];
+    let evaluation = policy.evaluate(&resolving);
+    let unmet = rule(&evaluation, "builtin:resolution");
+    assert_eq!(unmet.status, Status::Unsatisfied);
+    assert_eq!(evaluation.decision, Decision::Block);
+    assert!(
+        unmet
+            .message
+            .contains("resolves conflict asg_0000000000000001 (tier approve)"),
+        "{}",
+        unmet.message
+    );
+    assert_eq!(unmet.signoff.as_ref().map(|need| need.have), Some(0));
+    assert_eq!(evaluation.input.resolutions, 1);
+
+    resolving.evidence = vec![evidence(
+        "agent",
+        "signoff",
+        "pass",
+        1,
+        key("bot", "idn_00000000000000b0", "agent", "agent"),
+    )];
+    assert_eq!(
+        rule(&policy.evaluate(&resolving), "builtin:resolution").status,
+        Status::Unsatisfied,
+        "an agent's sign-off does not approve"
+    );
+    resolving.evidence = vec![signoff("s1", "carol", "idn_000000000000000c", 1)];
+    let signed = policy.evaluate(&resolving);
+    let met = rule(&signed, "builtin:resolution");
+    assert_eq!(met.status, Status::Satisfied, "any person approves");
+    assert_eq!(met.evidence_ids, ["s1"]);
+}
+
+#[test]
+fn a_resolution_without_approval_is_not_judged() {
+    let policy = policy("");
+    let mut resolving = input(&[], Vec::new());
+    resolving.change.resolutions = vec![resolved("land", false)];
+    assert_eq!(
+        rule(&policy.evaluate(&resolving), "builtin:resolution").status,
+        Status::NotApplicable
+    );
+    // An empty change (the resolution kept one side) still needs approval.
+    resolving.change.resolutions.push(resolved("ask", true));
+    assert_eq!(
+        rule(&policy.evaluate(&resolving), "builtin:resolution").status,
+        Status::Unsatisfied
+    );
+}
+
 #[test]
 fn a_changes_own_policy_must_load() {
     let policy = policy("");
@@ -782,6 +853,7 @@ expr = "change.files[3].size > 0"
             "builtin:description",
             "builtin:policy-file",
             "builtin:owners",
+            "builtin:resolution",
             "off",
             "true",
             "false",

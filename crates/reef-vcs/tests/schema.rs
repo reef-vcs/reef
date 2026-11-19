@@ -1033,6 +1033,10 @@ async fn outputs_match_their_schemas() {
     script
         .run(&root, &["conflict", "release", "--workspace", &left_id])
         .await;
+    script
+        .json(&root, &["conflict", "allow", &rebased, "--attempts", "2"])
+        .await;
+    script.run(&root, &["conflict", "allow", &rebased]).await;
     script.json(&root, &["conflict", "take", &rebased]).await;
     script.run(&root, &["conflict", "take", &rebased]).await;
     script

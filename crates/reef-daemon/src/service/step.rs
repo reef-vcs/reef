@@ -19,7 +19,8 @@ use reef_lib::jj::{ReadonlyRepo, files};
 
 use super::convert;
 use crate::daemon::AppState;
-use crate::model::{WorkspaceRecord, WorkspaceState};
+use crate::db::{AssignmentRow, DbError};
+use crate::model::{RepoId, WorkspaceRecord, WorkspaceState};
 
 /// A workspace's step and what it was read from.
 #[derive(Clone, Debug)]
@@ -28,8 +29,31 @@ pub(crate) struct Stepped {
     pub(crate) lifecycle: v1::ChangeLifecycle,
     pub(crate) changed_file_count: u32,
     pub(crate) conflicted_path_count: u32,
-    /// With step `AWAIT_HELP`, the help request it waits on (R3.32).
+    /// With step `AWAIT_HELP`, the help request it waits on (R3.32); with
+    /// step `ASK`, the session's answered help request about the blocked
+    /// conflict, asked since it last became blocked or changed.
     pub(crate) help_request_id: Option<String>,
+    /// With step `ASK`, the blocked conflict's assignment (R3.28).
+    pub(crate) conflict_assignment_id: Option<String>,
+    /// With step `ASK`, why it is blocked: `ASK` or `ATTEMPTS`.
+    pub(crate) conflict_block_reason: Option<v1::ConflictAssignmentReason>,
+}
+
+/// What a person holds a change for, as [`step`] ranks it: a help request
+/// the session waits on outranks every row but done, and a blocked
+/// conflict only the conflict row. So an agent that asked about its
+/// blocked conflict waits for the answer, then sees `ask` again, with the
+/// answered help request named, until a person allows it. A person's
+/// allow or take withdraws a help request still open about it
+/// (`comments::after_unblocked`), so the agent then resolves.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Waits {
+    /// The change's open conflict assignment is blocked (R3.28): its tier
+    /// is `ask` with no go-ahead, or its attempts are used.
+    pub(crate) conflict: bool,
+    /// The workspace's session asked a help request on the change that is
+    /// open, or whose answer it has not taken (R3.32).
+    pub(crate) help: bool,
 }
 
 /// The facts [`step`] reads, besides the change's lifecycle.
@@ -42,6 +66,10 @@ struct Facts {
 
 /// The step of `record`'s change at head; `None` for a workspace that is
 /// not active, or when it cannot be read, which is logged.
+#[expect(
+    clippy::too_many_lines,
+    reason = "reads each fact the step table takes, in order"
+)]
 pub(crate) async fn of_workspace(
     state: &Arc<AppState>,
     record: &WorkspaceRecord,
@@ -96,6 +124,15 @@ pub(crate) async fn of_workspace(
             .has_lifecycle(repo)
             .inspect_err(|error| warn(error))
             .unwrap_or(false);
+    // R3.28: a conflict that waits for a person is the person's to move.
+    let blocked = if change.conflict || conflicted > 0 {
+        blocked_assignment(state, repo, &change.change_id)
+            .inspect_err(|error| warn(error))
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
     let automatic = lifecycle.state() == LifecycleState::Proposed
         && state
             .automatic
@@ -103,30 +140,10 @@ pub(crate) async fn of_workspace(
             .is_some_and(|status| {
                 status.lands_unasked(&lifecycle.destination, &lifecycle.commit_id)
             });
-    // A help request this workspace's session asked on its change, open or
-    // with an answer no session took yet (R3.32). Another session's help
-    // request leaves this workspace's step alone.
-    let session = state
-        .db
-        .live_provenance_session(&record.id.as_hex())
+    let help_request_id = awaited_help_request(state, record, &change.change_id)
         .inspect_err(|error| warn(error))
         .ok()
         .flatten();
-    let help_request_id = session
-        .and_then(|session| {
-            state
-                .db
-                .awaited_help_request(
-                    repo,
-                    &change.change_id,
-                    session.declared.client_session.as_deref(),
-                    &session.session_id,
-                )
-                .inspect_err(|error| warn(error))
-                .ok()
-                .flatten()
-        })
-        .map(|row| row.id);
     let next = step(
         &change,
         &lifecycle,
@@ -134,15 +151,89 @@ pub(crate) async fn of_workspace(
         conflicted,
         proposals,
         automatic,
-        help_request_id.is_some(),
+        Waits {
+            conflict: blocked.is_some(),
+            help: help_request_id.is_some(),
+        },
     );
+    let blocked = blocked.filter(|_| next == ChangeStep::Ask);
+    let help_request_id = match (next, &blocked) {
+        (ChangeStep::AwaitHelp, _) => help_request_id,
+        (ChangeStep::Ask, Some(row)) => answered_help_request(state, record, row)
+            .inspect_err(|error| warn(error))
+            .ok()
+            .flatten(),
+        _ => None,
+    };
     Some(Stepped {
-        help_request_id: help_request_id.filter(|_| next == ChangeStep::AwaitHelp),
+        help_request_id,
+        conflict_block_reason: blocked
+            .as_ref()
+            .map(|row| crate::assign::messages::reason_message(&row.reason)),
+        conflict_assignment_id: blocked.map(|row| row.id),
         step: next,
         lifecycle,
         changed_file_count: changed,
         conflicted_path_count: conflicted,
     })
+}
+
+/// The id of a help request `record`'s session asked on `change`, open or
+/// with an answer no session took yet (R3.32). Another session's help
+/// request leaves this workspace's step alone.
+fn awaited_help_request(
+    state: &AppState,
+    record: &WorkspaceRecord,
+    change: &str,
+) -> Result<Option<String>, DbError> {
+    let Some(session) = state.db.live_provenance_session(&record.id.as_hex())? else {
+        return Ok(None);
+    };
+    Ok(state
+        .db
+        .awaited_help_request(
+            record.repo_id,
+            change,
+            session.declared.client_session.as_deref(),
+            &session.session_id,
+        )?
+        .map(|row| row.id))
+}
+
+/// The id of a help request with reason CONFLICT that `record`'s session
+/// asked about `blocked` since it last became blocked or its conflict last
+/// changed, and that is answered: with step ASK, asking again is no use.
+fn answered_help_request(
+    state: &AppState,
+    record: &WorkspaceRecord,
+    blocked: &AssignmentRow,
+) -> Result<Option<String>, DbError> {
+    let Some(session) = state.db.live_provenance_session(&record.id.as_hex())? else {
+        return Ok(None);
+    };
+    Ok(state
+        .db
+        .answered_conflict_help_request(
+            record.repo_id,
+            &blocked.change_id,
+            &blocked.id,
+            blocked.conflict_changed_at,
+            session.declared.client_session.as_deref(),
+            &session.session_id,
+        )?
+        .map(|row| row.id))
+}
+
+/// `change`'s open conflict assignment when it is blocked (R3.28): its id
+/// is what `reef ask --conflict` names.
+fn blocked_assignment(
+    state: &AppState,
+    repo: RepoId,
+    change: &str,
+) -> Result<Option<AssignmentRow>, DbError> {
+    Ok(state.db.assignment_of_change(repo, change)?.filter(|row| {
+        row.closed_at.is_none() && row.state == crate::assign::State::Blocked.as_str()
+    }))
 }
 
 type ReadResult = Result<Facts, Box<dyn std::error::Error + Send + Sync>>;
@@ -200,8 +291,7 @@ async fn read_facts(
 /// proposals; `automatic`, whether the automatic service will land a
 /// proposal with no request (R3.45): its destination says
 /// `[landing] automatic = true` and the service has not given up on it;
-/// `awaiting_help`, whether the change has an open help request or an
-/// untaken answer to one (R3.32), which outranks every row but done.
+/// `waits`, what a person holds the change for.
 pub(crate) fn step(
     change: &v1::Change,
     lifecycle: &v1::ChangeLifecycle,
@@ -209,17 +299,21 @@ pub(crate) fn step(
     conflicted: u32,
     proposals: bool,
     automatic: bool,
-    awaiting_help: bool,
+    waits: Waits,
 ) -> ChangeStep {
     let final_state = matches!(
         lifecycle.state(),
         LifecycleState::Landed | LifecycleState::Superseded
     );
-    if awaiting_help && !change.immutable && !final_state {
+    if waits.help && !change.immutable && !final_state {
         return ChangeStep::AwaitHelp;
     }
     if change.conflict || conflicted > 0 {
-        return ChangeStep::Resolve;
+        return if waits.conflict {
+            ChangeStep::Ask
+        } else {
+            ChangeStep::Resolve
+        };
     }
     match lifecycle.state() {
         LifecycleState::Queued => return ChangeStep::Wait,
@@ -353,12 +447,69 @@ mod tests {
         for (change, lifecycle, changed, conflicted, proposals, automatic, expected) in rows {
             assert_eq!(
                 step(
-                    change, &lifecycle, changed, conflicted, proposals, automatic, false
+                    change,
+                    &lifecycle,
+                    changed,
+                    conflicted,
+                    proposals,
+                    automatic,
+                    Waits::default()
                 ),
                 expected,
                 "{change:?} {lifecycle:?} {changed} {conflicted} {proposals} {automatic}"
             );
         }
+    }
+
+    /// R3.28: a conflict that waits for a person asks, and only a conflict.
+    #[test]
+    fn a_blocked_conflict_asks() {
+        let draft = lifecycle(LifecycleState::Draft, false);
+        let described = change("Fix the parser\n", false);
+        let conflicted = v1::Change {
+            conflict: true,
+            ..described.clone()
+        };
+        let blocked = Waits {
+            conflict: true,
+            help: false,
+        };
+        assert_eq!(
+            step(&conflicted, &draft, 3, 1, true, false, blocked),
+            ChangeStep::Ask
+        );
+        assert_eq!(
+            step(&described, &draft, 3, 0, true, false, blocked),
+            ChangeStep::Propose
+        );
+    }
+
+    /// A session that asked about its blocked conflict waits for the answer
+    /// (R3.32 over R3.28); once it takes the answer, the conflict asks again
+    /// until a person allows it.
+    #[test]
+    fn an_asked_help_request_outranks_a_blocked_conflict() {
+        let draft = lifecycle(LifecycleState::Draft, false);
+        let conflicted = v1::Change {
+            conflict: true,
+            ..change("Fix the parser\n", false)
+        };
+        let both = Waits {
+            conflict: true,
+            help: true,
+        };
+        assert_eq!(
+            step(&conflicted, &draft, 3, 1, true, false, both),
+            ChangeStep::AwaitHelp
+        );
+        let answered = Waits {
+            help: false,
+            ..both
+        };
+        assert_eq!(
+            step(&conflicted, &draft, 3, 1, true, false, answered),
+            ChangeStep::Ask
+        );
     }
 
     /// An open help request (R3.32) outranks every row but done: a
@@ -387,7 +538,18 @@ mod tests {
             (&immutable, at(State::Draft), Step::Done),
         ] {
             assert_eq!(
-                step(change, &lifecycle, 3, 0, true, true, true),
+                step(
+                    change,
+                    &lifecycle,
+                    3,
+                    0,
+                    true,
+                    true,
+                    Waits {
+                        conflict: false,
+                        help: true
+                    }
+                ),
                 expected,
                 "{change:?} {lifecycle:?}"
             );

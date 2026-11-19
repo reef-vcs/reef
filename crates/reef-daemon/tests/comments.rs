@@ -1520,6 +1520,7 @@ fn help(revision: &str, client_session: &str) -> CreateCommentRequest {
             tried: "read docs/config.md".to_owned(),
             question: "TOML or YAML?".to_owned(),
             conflict: String::new(),
+            while_blocked: false,
         }),
         client_session: client_session.to_owned(),
         ..CreateCommentRequest::default()

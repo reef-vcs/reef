@@ -46,8 +46,8 @@ pub struct CommentEventRecord {
     /// For an instruction, its state after.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub to: String,
-    /// Why: `request`, `reproposed`, `change_final`, `expired` or
-    /// `answer_cancelled`.
+    /// Why: `request`, `reproposed`, `change_final`, `expired`,
+    /// `answer_cancelled` or `conflict_unblocked`.
     pub cause: String,
     /// For a help request, its state before. Absent in records written
     /// before R3.32, which readers of format 1 skip.

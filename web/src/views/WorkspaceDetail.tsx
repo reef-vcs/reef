@@ -54,6 +54,7 @@ const STEP_WORDS: Record<ChangeStep, string> = {
   [ChangeStep.PUBLISH]: "publish it for review, or release the workspace",
   [ChangeStep.DONE]: "none: the change has landed, was superseded, or is on trunk",
   [ChangeStep.AWAIT_HELP]: "wait: its agent asked a person for help (reef comment answer)",
+  [ChangeStep.ASK]: "ask a person: its conflict waits for their go-ahead",
 };
 
 const PATHS_SHOWN = 20;
