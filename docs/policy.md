@@ -35,10 +35,13 @@ version = 1                                # required: the format version this f
 groups = ["maintainers"]                   # groups and identities; at least one between them
 identities = []
 count = 1                                  # distinct identities needed; default 1
-presence = "none"                          # none | user_verified (R3.43); default none
+presence = "none"                          # none | user_verified (a pinned passkey); default none
 
 [groups]                                   # named sets of identities, by name or by id (idn_...)
 maintainers = ["alice", "idn_8f3a0c2d91e4b675"]
+
+[passkeys]                                 # pinned passkeys, by identity name or id
+alice = ["3c9e0d5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f"]   # fingerprints: SHA-256 of each public key
 
 [attestors.ci]                             # a named set of signers whose evidence counts
 identities = ["ci-main"]                   # names or ids; with `groups`, at least one entry
@@ -47,7 +50,7 @@ identity_kinds = ["ci"]                    # person | ci; default either
 actors = ["executor"]                      # human | agent | executor; default ["executor"]
 authorities = []                           # authority key ids; empty: any authority this daemon verifies
 issuer_kinds = []                          # reef-daemon | sigstore (keyless, R3.42); default either
-presence = "none"                          # the least presence accepted; default none
+presence = "none"                          # the least effective presence accepted; default none
 self = "exclude"                           # exclude | allow: evidence from the change's own session or agent
 when = 'e.fresh && e.artifacts.exists(a, a.state == "stored")'   # optional CEL over `e`
 
@@ -108,7 +111,7 @@ expr = 'provenance.all(r, r.signature == "valid" && r.key.status == "bound")'
 message = "every commit of the change has a signed, bound provenance record"
 ```
 
-- **References are checked at load.** Every group an entry names exists in `[groups]`, every attestor set a `[[require]]` names exists, and every identity entry is an identity name (`[a-z0-9][a-z0-9._-]{0,62}`) or an id (`idn_` and 16 hex digits). Names are unique across `[[require]]`, `[[forbid]]`, `[[signoff]]` and `[[rule]]`; `limits` is the `[limits]` table's.
+- **References are checked at load.** Every group an entry names exists in `[groups]`, every attestor set a `[[require]]` names exists, and every identity entry, `[passkeys]`' keys included, is an identity name (`[a-z0-9][a-z0-9._-]{0,62}`) or an id (`idn_` and 16 hex digits). Names are unique across `[[require]]`, `[[forbid]]`, `[[signoff]]` and `[[rule]]`; `limits` is the `[limits]` table's.
 - **Sizes** are `"5MiB"`, `"512KiB"`, `"1GiB"` or a number of bytes.
 - **Every problem is reported**, each with its rule, key, line and column, except that a TOML syntax or schema error stops loading at the first.
 
@@ -127,17 +130,36 @@ An `[attestors.<name>]` set decides whose evidence counts, per evidence object, 
 1. The key is `bound`: certified by an authority this daemon verifies, witnessed within the key's window and before every revocation that applies ([identity.md](identity.md)). Unbound, expired, revoked and invalid keys never count.
 2. The key's identity is one of `identities`, or a member of one of `groups`: matched by id for `idn_...` entries and by the certificate's name otherwise.
 3. `identity_kinds`, `actors` (default `["executor"]`), `authorities` (64-hex authority key ids, a daemon's or a Fulcio CA's; empty for any authority this daemon verifies) and `issuer_kinds` (`reef-daemon`, or `sigstore` for keyless keys), when given.
-4. The key's presence is at least the set's (`none` < `user_verified`). Every key today has `none`, so a set that asks for `user_verified` matches nothing until R3.43.
+4. The key's effective presence is at least the set's (`none` < `user_verified`). A key's presence is `user_verified` only when its certificate says so and `[passkeys]` pins its passkey for its identity ([Pinned passkeys](#pinned-passkeys)); otherwise it is `none`.
 5. Unless `self = "allow"`, the object did not come from the change itself (below).
 6. `when`, a CEL expression over `e` (the object) and `groups`, holds. One that errors on an object (or costs too much) leaves that object out and makes `builtin:input` an error, which blocks: the object could be the newest verdict, and leaving it out must not let an older one decide. The diagnostics name the set and the object.
 
 The names of the sets an object satisfies are `e.attestors`, which free rules can use.
 
-**What `self` excludes.** An object is the change's own when its key was certified for a session that also recorded one of the change's provenance records ([provenance.md](provenance.md)), when its key's agent label, with the same identity, is the agent of one of those records, or when the `reef-agent` that added it is. That implements the design's "excludes the submitting agent signing its own test run" as far as Reef can know it. On one uid it is a speed bump, not a wall: an agent that wants to can obtain a key for its user's person identity with any declared actor, from another session, and add evidence under another agent label ([threat model](threat-model.md), S-59, S-92). What keeps an agent from attesting its own work is trusting an identity whose keys it cannot get: a `ci` identity, whose keys need its remote token or, keyless, its job's OIDC token (`issuer_kinds = ["sigstore"]`), and, after R3.43, `presence = "user_verified"` for sign-offs.
+**What `self` excludes.** An object is the change's own when its key was certified for a session that also recorded one of the change's provenance records ([provenance.md](provenance.md)), when its key's agent label, with the same identity, is the agent of one of those records, or when the `reef-agent` that added it is. That implements the design's "excludes the submitting agent signing its own test run" as far as Reef can know it. On one uid it is a speed bump, not a wall: an agent that wants to can obtain a key for its user's person identity with any declared actor, from another session, and add evidence under another agent label ([threat model](threat-model.md), S-59, S-92). What keeps an agent from attesting its own work is trusting an identity whose keys it cannot get: a `ci` identity, whose keys need its remote token or, keyless, its job's OIDC token (`issuer_kinds = ["sigstore"]`), and, for sign-offs, `presence = "user_verified"` with each person's passkeys pinned in `[passkeys]`.
 
 **Names and ids.** Identity names are never reused within one daemon's database, but restoring an old backup can bring a name back with a new id. A policy that must not be fooled pins ids, and authorities, rather than names (S-93).
 
 **Annotations** are the attestor's own claims, unverified: `e.annotations.sandbox.kind == "bubblewrap"` trusts what a trusted executor says about itself (S-97).
+
+## Pinned passkeys
+
+A person's sign-off can carry a passkey's approval: one touch, with a fingerprint, a face or a PIN, that approved exactly that sign-off ([identity.md](identity.md#passkeys-and-verified-presence)). Its key's certificate says `presence: user_verified` and names the passkey. A policy counts it only for the passkeys it pins, since an agent running as the person can register a software passkey of its own:
+
+```toml
+[passkeys]
+alice = ["3c9e0d5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f"]
+idn_41c9e07ab2d35f18 = ["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"]
+```
+
+- **Keys** are identities, by name or by id (`idn_` and 16 hex digits); a key matches a key's certificate by either. **Values** are passkey fingerprints: the SHA-256 of the passkey's DER public key, 64 lowercase hex digits. A malformed fingerprint, a key that is neither a name nor an id, and an empty list are load errors with their line and column.
+- **The effective presence.** A key's presence is `user_verified` only when its certificate says `user_verified` and its passkey's fingerprint is listed under its identity's id or name. Otherwise, for this policy, it is `none`: a passkey nobody pinned, one pinned for another identity, and every `presence: none` key. Every rule that compares presence uses it: attestor sets, `[[signoff]]` and `[owners]`. CEL reads it too: `e.key.presence` is the effective presence, and `e.key.passkey` is the fingerprint.
+- **A warning for a requirement no pin can meet.** When `presence = "user_verified"` appears in an attestor set, a `[[signoff]]` or `[owners]` and `[passkeys]` pins none of its identities, the policy loads with a warning ("no passkey pinned for alice: no key of theirs will meet presence user_verified; pin one in [passkeys]"), which every evaluation reports among its diagnostics and `reef policy eval` prints. A pin under an identity's id counts for a requirement that names it by name, and the other way round, since only the daemon maps one to the other.
+- **Pins change only with the owners.** `[passkeys]` is in `reef-policy.toml`, so changing it needs `[owners]`' sign-off (`builtin:owners`): an agent cannot pin a passkey of its own without them.
+- **Getting the line.** `reef identity passkey list` prints each identity's `[passkeys]` line with every live passkey, and the web UI's Passkeys page copies it (**Copy policy snippet**).
+- **Pin more than one.** A lost passkey stops counting until a new one is pinned, and pinning it is a policy change that needs the owners' sign-off. Pin each person's passkeys on two authenticators, or name more than one owner, so a lost passkey does not leave nobody able to approve the change that pins its replacement.
+
+`EvaluatePolicy` reports presence and pinning per signer.
 
 ## Required evidence, limits, forbidden paths and sign-offs
 
@@ -150,7 +172,7 @@ These tables are evaluated by Reef itself, not compiled to CEL, so their results
 
 - **`[landing] automatic`** (R3.45): `true` lands a proposal onto this branch as soon as the gate allows it, with nobody running `reef land` ([landing](landing.md#automatic-landing)). It is read at the destination's head, so the owners' sign-off on a policy change is what turns it on. A policy whose rules read `landing` or `batch` makes the daemon judge open proposals again each time the branch moves; one that does not, only when the policy itself changes.
 - **`[landing] push`** (R3.17): the git remote, by name (letters, digits, `.`, `_`, `-`; never a URL, never `git`), that each landing onto this branch is pushed to, fast forward onto the branch of the same name ([landing](landing.md#pushing-landed-history)). It is read at the head being pushed, so the landing that adds it is pushed, and the landing that removes it is the last.
-- **`[[signoff]]`** and **`builtin:owners`**: a sign-off is evidence on the change's tree of one of `kinds` (default `signoff`), `pass`, from a bound key with actor `human` certified for a `person` identity in `groups` or `identities`, with at least `presence`; `count` distinct identities are needed. Self-exclusion does not apply: a person signs off their own agents' work. Sign with `reef evidence add --kind signoff --result pass --actor human` today; R3.09 and R3.31 will sign from the proposal view, and R3.43 adds verified presence. A sign-off is on one exact tree; carrying it across a later edit is R3.15's.
+- **`[[signoff]]`** and **`builtin:owners`**: a sign-off is evidence on the change's tree of one of `kinds` (default `signoff`), `pass`, from a bound key with actor `human` certified for a `person` identity in `groups` or `identities`, with at least `presence`; `count` distinct identities are needed. Self-exclusion does not apply: a person signs off their own agents' work. Sign with `reef evidence add --kind signoff --result pass --actor human`, adding `--verified` for a sign-off your passkey approves ([identity.md](identity.md#approving-a-sign-off)), or with **Sign off** on a change in the web UI's smartlog, which always asks for your passkey; R3.31 will sign from the proposal view. A sign-off is on one exact tree; carrying it across a later edit is R3.15's.
 
 ### Sign-offs on a stack
 
@@ -172,7 +194,7 @@ What a policy sees about one change, built by the daemon. `reef schema policy in
 | `groups` | the policy's `[groups]`, from name to members as written |
 | `batch` | at landing only (R3.14): `{id, size, position, tree, commit}`, the batch the change lands in, its position from 1, and the tested tree and the trial commit carrying it (empty when none was needed); empty at the gate, in `reef policy eval` and in simulation |
 
-A `key` is `{id, status, identity, identity_id, identity_kind, actor, agent, session, presence, custody, authority, issuer_kind, oidc_issuer, oidc_subject}`: `status` one of `unbound`, `bound`, `expired`, `revoked`, `invalid`, judged at the object's witness time; `identity_kind` `person` or `ci`; `actor` `human`, `agent` or `executor`; `issuer_kind` `reef-daemon`, or `sigstore` for a keyless key, whose `oidc_issuer` and `oidc_subject` are its Fulcio certificate's (empty otherwise).
+A `key` is `{id, status, identity, identity_id, identity_kind, actor, agent, session, presence, passkey, custody, authority, issuer_kind, oidc_issuer, oidc_subject}`: `status` one of `unbound`, `bound`, `expired`, `revoked`, `invalid`, judged at the object's witness time; `identity_kind` `person` or `ci`; `actor` `human`, `agent` or `executor`; `presence` the key's effective presence under this policy, `none` or `user_verified` ([Pinned passkeys](#pinned-passkeys)), set before any rule or CEL expression reads it; `passkey` the fingerprint of the passkey that verified a `user_verified` key, empty otherwise; `issuer_kind` `reef-daemon`, or `sigstore` for a keyless key, whose `oidc_issuer` and `oidc_subject` are its Fulcio certificate's (empty otherwise).
 
 - **Evidence is filtered before CEL, not trusted by it.** Objects whose signature does not verify are counted, not shown (`evidence_ignored`). Every object some attestor set or sign-off rule accepts is kept, up to 10,000 (more is `builtin:input`'s error, which blocks); the rest are kept newest first up to 1,000, so junk on a tree cannot push trusted evidence out of view (S-94). The daemon reads at most the newest 20,000 objects of a tree, and an object's annotations only when they are at most 16 KiB as JSON (otherwise `{}`, so a condition over them fails and blocks).
 - **Provenance**: every record of the change, up to 10,000; more is `builtin:input`'s error.
@@ -339,6 +361,29 @@ kinds = ["test"]
 attestors = ["ci"]
 ```
 
+Owners and release reviewers who sign off with a passkey: a change to the policy files, or to the release scripts and CI configuration, needs a maintainer's sign-off that their pinned passkey approved, from `reef evidence add --actor human --verified` or the web UI's **Sign off**. Each maintainer pins two passkeys, so one lost passkey locks nobody out.
+
+```toml policy
+version = 1
+
+[owners]
+groups = ["maintainers"]
+presence = "user_verified"
+
+[groups]
+maintainers = ["alice", "bob"]
+
+[passkeys]
+alice = ["3c9e0d5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f", "8091a2b3c4d5e6f708192a3b4c5d6e7f3c9e0d5f6a7b8c9d0e1f2a3b4c5d6e7f"]
+bob = ["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"]
+
+[[signoff]]
+name = "release"
+paths = [".github/**", "scripts/release*"]
+groups = ["maintainers"]
+presence = "user_verified"
+```
+
 Every commit of the change recorded with a bound, signed provenance record, and paths restricted to ASCII.
 
 ```toml policy
@@ -444,6 +489,6 @@ message = "sign off the change: reef describe --signoff"
 
 ## Upgrading
 
-The format is versioned by `version`; this Reef reads 1 and reports any other as `invalid_policy` ("this Reef reads policy version 1"). Later tickets add tables (R3.15's transfer rules, R3.20's budgets) and input fields to version 1, additively; a daemon older than the policy then reports it `invalid_policy`, which blocks every landing. That is intended: a daemon must never land a change under rules it cannot read. Upgrade daemons before policies.
+The format is versioned by `version`; this Reef reads 1 and reports any other as `invalid_policy` ("this Reef reads policy version 1"). Later tickets add tables (R3.43's `[passkeys]`, R3.15's transfer rules, R3.20's budgets) and input fields to version 1, additively; a daemon older than the policy then reports it `invalid_policy`, which blocks every landing. That is intended: a daemon must never land a change under rules it cannot read. Upgrade daemons before policies.
 
 CEL runs on cel-rust pinned to an exact version, since each of its minor releases has changed its API and could change what an expression evaluates to. An upgrade is its own change that runs `reef-policy`'s corpus (`crates/reef-policy/tests/corpus/`).

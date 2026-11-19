@@ -3,7 +3,7 @@
 - Status: accepted
 - Date: 2026-11-06
 - Ticket: R3.03
-- Amended by: [0058](0058-provenance-records.md) (`custody: daemon` keys issued internally for provenance, without a proof of possession, for `max_lifetime`; records pin their keys; revocation drops held keys), [0066](0066-sigstore-keyless-session-keys.md) (a second issuer kind, `sigstore`; OIDC matches on identities; a binding's revocation beside the others)
+- Amended by: [0058](0058-provenance-records.md) (`custody: daemon` keys issued internally for provenance, without a proof of possession, for `max_lifetime`; records pin their keys; revocation drops held keys), [0066](0066-sigstore-keyless-session-keys.md) (a second issuer kind, `sigstore`; OIDC matches on identities; a binding's revocation beside the others), [0085](0085-verified-human-presence.md) (decision 5: the web listener issues keys, only through an approval a passkey resolved, for actor `human` with presence `user_verified`; decision 8: `user_verified` exists, with the passkey's assertion in the certificate's `presenceEvidence`, and policy counts it only for a passkey the destination pins)
 - Amends: [0055](0055-evidence-object-format.md) (identity beside the signature; a second predicate type in the format crate), [0049](0049-remote-listener.md) (tokens linked to identities, `Rule::LinkedIdentity`), [0029](0029-daemon-api-v1.md) (decision 12's exceptions gain `IssueSessionKey`), [0020](0020-local-backup-format.md) (the authority key is outside backups, and a restore retires it)
 
 ## Context

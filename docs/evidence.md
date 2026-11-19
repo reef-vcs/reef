@@ -45,7 +45,7 @@ Reef stores every envelope in one canonical form: compact JSON with exactly `pay
 
 ## Keys
 
-By default `reef evidence add` signs with a session key (R3.03): a fresh ed25519 key, generated in the command, certified by the daemon for an operator identity (yours by default, `--identity`, or through a remote daemon its token's) as `--actor` (`agent` by default, `executor`, or `human`), valid five minutes, used for the one envelope and never written anywhere. Evidence signed so reads `bound` to that identity. [docs/identity.md](identity.md) has identities, session keys, what each status means, and how a script in another language gets a key.
+By default `reef evidence add` signs with a session key (R3.03): a fresh ed25519 key, generated in the command, certified by the daemon for an operator identity (yours by default, `--identity`, or through a remote daemon its token's) as `--actor` (`agent` by default, `executor`, or `human`), valid five minutes, used for the one envelope and never written anywhere. Evidence signed so reads `bound` to that identity. With `--actor human --verified`, the key is certified only after your passkey approves the one sign-off ([A verified sign-off](#a-verified-sign-off)). [docs/identity.md](identity.md) has identities, session keys, what each status means, and how a script in another language gets a key.
 
 `reef evidence key generate <path>` writes a bare ed25519 key instead, for scripts and trials: a private key to `<path>` (PKCS#8 PEM, mode 0600, never overwriting a file) and its public key to `<path>.pub` (SPKI PEM), and prints the key id. Evidence signed with `--key` reads `unbound`: no identity answers for it. `reef evidence add --key` also reads OpenSSL 3's `openssl genpkey -algorithm ed25519` keys, and refuses a key file its group or others can read. macOS's `/usr/bin/openssl` is LibreSSL, which cannot make ed25519 keys; Homebrew's `openssl@3` can.
 
@@ -90,9 +90,28 @@ reef evidence add --envelope envelope.json --public-key ~/.config/reef/ci.pem.pu
 
 With `-r`, the evidence is linked to that change as well as to its tree, and Reef refuses it when the revision's tree is not the subject. Without `-r`, it is added by tree alone, as an executor adds it. The API is `EvidenceService.AddEvidence`: the envelope's bytes, the public key's DER, and an optional revision.
 
+### A verified sign-off
+
+A person's sign-off can carry a passkey's approval, which a policy can require (`presence = "user_verified"`, [policy.md](policy.md#pinned-passkeys)):
+
+```sh
+reef evidence add --kind signoff --result pass --actor human --verified -r @-
+```
+
+`--verified` needs `--actor human`, and takes any kind, result and target the command takes. The command:
+
+1. Builds the statement over the revision's tree and a fresh key, and asks the daemon to approve that one sign-off (`IdentityService.RequestApproval`).
+2. Opens the web UI's approval page for it, through a new web UI session, as `reef ui` opens the app, and says on stderr what it waits for. `--print-url` prints the page's URL instead of opening it, for a shell over SSH.
+3. Waits up to `--timeout` (default 2 minutes) for you to approve or decline on the page. Approving takes one touch of your passkey.
+4. When you approve, signs the statement with the key the approval certified and adds it with the revision. The evidence reads `presence user_verified`.
+
+A decline, the approval's expiry, an approval the daemon no longer holds (a restart drops pending ones) and the timeout each exit 5 with the reason. The command asks nothing on the terminal and runs no login; nothing but a touch on the page approves it. You need a passkey first: `reef identity passkey add` opens the web UI's Passkeys page. [docs/identity.md](identity.md#approving-a-sign-off) has the approval page, the API steps and what the key may sign: exactly that statement, for that change, once.
+
+In the web UI, **Sign off** on a change's detail panel in the smartlog does the same in the page, as `signoff` and `pass` on the change's tree.
+
 ## Reading evidence
 
-`reef evidence list` lists the repository's evidence, newest first; `-r <rev>` the evidence on a revision's tree, `--tree <id>` on a tree, and `--change <id>` the evidence added for a change on any tree it had, each marked `(not current)` once the change's tree has moved on. `reef evidence show <id>` prints one object, its statement exactly as signed, `signature: valid` or `invalid`, checked as it is read, and `identity:`, whom the key is bound to and its status when the daemon first saw the object ([docs/identity.md](identity.md#what-a-verifier-sees)). `--identity <name>` lists the evidence of keys certified for that identity. Every field Reef reports is read from the signed payload, so a stored row changed behind the daemon reads `invalid` with what was signed; adding the genuine envelope again repairs it. `--key` filters take the full 64-digit key id. It exits 0 either way: `invalid` means the stored object was changed, and is data about it.
+`reef evidence list` lists the repository's evidence, newest first; `-r <rev>` the evidence on a revision's tree, `--tree <id>` on a tree, and `--change <id>` the evidence added for a change on any tree it had, each marked `(not current)` once the change's tree has moved on. `reef evidence show <id>` prints one object, its statement exactly as signed, `signature: valid` or `invalid`, checked as it is read, and `identity:`, whom the key is bound to and its status when the daemon first saw the object ([docs/identity.md](identity.md#what-a-verifier-sees)). `--identity <name>` lists the evidence of keys certified for that identity. A key whose presence a passkey verified prints `presence user_verified (passkey "MacBook Touch ID", pinned here)`, or `(not pinned by this repository's policy)` when the policy at the revision's destination does not pin that passkey; where no destination is known, it names the passkey only. A key without one prints `presence none (not verified)`. Every field Reef reports is read from the signed payload, so a stored row changed behind the daemon reads `invalid` with what was signed; adding the genuine envelope again repairs it. `--key` filters take the full 64-digit key id. It exits 0 either way: `invalid` means the stored object was changed, and is data about it.
 
 Evidence binds to the tree, so it stays on a change across a describe, or a rebase that keeps the tree, and two changes with the same tree share it. Abandon and undo leave it alone; garbage collection deletes it only once it is off live work and past its retention ([Retention](#retention)); backups carry it; `reef repo forget` deletes it.
 
