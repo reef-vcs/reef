@@ -114,6 +114,9 @@ describe("the Passkeys page", () => {
     const fingerprint = hex(await sha256(held.row.publicKey));
     const snippet = `[passkeys]\narsood = ["${fingerprint}"]\n`;
     expect(card("arsood").querySelector("pre")?.textContent).toBe(snippet);
+    expect(within(card("arsood")).getByText(/^Confirmed by a touch:/).textContent).toContain(
+      `“MacBook Touch ID” (${fingerprint.slice(0, 12)})`,
+    );
 
     const writeText = vi.fn(() => Promise.resolve());
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });

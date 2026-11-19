@@ -348,14 +348,16 @@ export class Reef {
           return;
         }
         waiting.push({ match, found });
-        void closed.then(() => {
+        const gone = () => {
           failed(
             new Error(
               redact(`reef ${argv.join(" ")} exited before printing ${String(match)}:\n${stderr}`),
             ),
           );
-        });
+        };
+        closed.then(gone, gone);
       });
+    exit.catch(() => undefined);
     return { line, exit };
   }
 

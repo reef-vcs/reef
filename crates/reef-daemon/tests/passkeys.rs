@@ -938,6 +938,63 @@ async fn approvals() {
 
 // 6. `GetApproval { wait }` returns on a resolution and on the expiry; a
 // decline ends an approval.
+// An approve whose call is dropped mid-way (a closed tab, a client's
+// deadline) leaves the approval to expire, not stuck being approved.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dropped_approve_still_expires() {
+    use reef_daemon::identity::approvals::Resolution;
+    use reef_daemon::identity::issue::Channel;
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    create_identity(client, "alice").await;
+    let page = ui(client).await;
+    let mut passkey = Authenticator::new(Algorithm::EdDsa);
+    register(&page, &mut passkey, "alice", None).await.unwrap();
+    let change = commit_on(client, &repo.id, "root()", &[("a.txt", "a\n")]).await;
+    let identities = &daemon.handle.state().identity;
+    identities.set_approval_wait(Duration::from_millis(300));
+    let approval = request_approval(
+        client,
+        "alice",
+        &repo.id,
+        &change.commit_id,
+        payload(&signoff(None), &change.tree_id),
+        &fresh_key(),
+    )
+    .await
+    .unwrap();
+    let asserted = assertion(&mut passkey, &page.origin, &approval.challenge);
+    let web = Channel::Web {
+        session: "0123456789abcdef".to_owned(),
+    };
+    let dropped = tokio::time::timeout(
+        Duration::ZERO,
+        identities.resolve_approval(
+            &web,
+            Some(&page.origin),
+            &approval.id,
+            Resolution::Approve(asserted),
+        ),
+    )
+    .await;
+    assert!(
+        dropped.is_err(),
+        "the approve was still running when dropped"
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let ended = client
+        .get_approval(GetApprovalRequest {
+            id: approval.id.clone(),
+            wait: None,
+        })
+        .await
+        .unwrap()
+        .approval
+        .unwrap();
+    assert_eq!(ended.state(), ApprovalState::Expired);
+    daemon.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn approval_waits() {
     let (daemon, repo) = fixture().await;
