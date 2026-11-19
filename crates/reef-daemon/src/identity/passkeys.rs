@@ -8,9 +8,11 @@
 //! challenges are in memory: 32 random bytes, single use, 5 minutes, and
 //! only for the web UI session that started them. A reset (the socket's
 //! `ResetPasskeys`) removes them all and revokes the unexpired keys they
-//! certified. One lock serializes every change to the passkeys, so the
-//! check that an identity has none and the add that follows it are one
-//! step.
+//! certified, in one transaction. A key a passkey approved is stored only
+//! while the passkey is live, checked in the insert's transaction, so an
+//! approve in flight certifies nothing after a removal or a reset. One lock
+//! serializes every change to the passkeys, so the check that an identity
+//! has none and the add that follows it are one step.
 //!
 //! `Identities::verify_assertion` is the check every assertion goes
 //! through, an approval's too: a live passkey of the identity, the pure
@@ -406,9 +408,9 @@ impl Identities {
     }
 
     /// `ResetPasskeys`: every live passkey of `named` removed, and every
-    /// unexpired key they certified revoked from now. The removed passkeys,
-    /// and the keys revoked.
-    pub async fn reset_passkeys(
+    /// unexpired key they certified revoked from now, in one transaction.
+    /// The removed passkeys, and the keys revoked.
+    pub fn reset_passkeys(
         &self,
         named: &str,
         reason: &str,
@@ -424,16 +426,16 @@ impl Identities {
             "" => "reset".to_owned(),
             reason => format!("reset: {reason}"),
         };
+        let at = Timestamp::now();
         let (removed, keys) = {
             let _change = self.passkeys.change();
-            self.db
-                .reset_passkeys(&identity.id, Timestamp::now(), &reason)?
+            self.db.reset_passkeys(&identity.id, at, &reason)?
         };
         for row in &removed {
             audit::passkey_changed("reset", row, None);
         }
         for key_id in &keys {
-            self.revoke_key(key_id, None, false, &reason).await?;
+            audit::revoked("session_key", key_id, at, Some(&reason), 1);
         }
         tracing::warn!(
             target: "reef_daemon::identity::audit",

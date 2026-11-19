@@ -159,8 +159,8 @@ reef identity passkey reset alice      # remove every passkey of alice's, on the
 The Passkeys page, linked from the web UI's Settings panel, lists each person identity with its passkeys: label, fingerprint, when it was added and when it was last used. **Add** registers a passkey on this browser's authenticator under a label you type, and **Remove** removes one.
 
 - **The first passkey is trusted on first use.** Any web UI session can add an identity's first passkey. The daemon's registration challenge is single use, valid for 5 minutes, and only for the web UI session that started it.
-- **Every later add, and every removal, needs an existing passkey.** The daemon refuses one without a user-verified assertion by one of the identity's live passkeys (`PASSKEY_REQUIRED`), so the page asks for a touch on an existing passkey first. Removing a passkey leaves the keys it certified as they are.
-- **A reset is the way back.** `reef identity passkey reset IDENTITY` removes every live passkey of the identity and revokes every unexpired key they certified, from now. Use it when a passkey is lost, or when one is listed that you did not add. It runs on the socket only, and the daemon logs it as a warning. The next passkey is the first again.
+- **Every later add, and every removal, needs an existing passkey.** The daemon refuses one without a user-verified assertion by one of the identity's live passkeys (`PASSKEY_REQUIRED`), so the page asks for a touch on an existing passkey first. Removing a passkey leaves the keys it certified as they are. An approval that is being checked when its passkey is removed or reset certifies no key: it is refused (`PASSKEY_ASSERTION_INVALID`, check `passkey`) and stays pending.
+- **A reset is the way back.** `reef identity passkey reset IDENTITY` removes every live passkey of the identity and revokes every unexpired key they certified, from now, in one step. Use it when a passkey is lost, or when one is listed that you did not add. It runs on the socket only, and the daemon logs it as a warning. The next passkey is the first again.
 - Registration and removal need a browser: on the socket they are `PASSKEY_NEEDS_WEB`, and through the remote listener `PASSKEY_OVER_REMOTE`.
 - An identity holds at most 32 live passkeys. A label is 1 to 64 bytes. A passkey is ES256, EdDSA or RS256; any other algorithm is `PASSKEY_ALGORITHM`.
 
@@ -238,7 +238,7 @@ A `user_verified` certificate's predicate carries the assertion beside `presence
 - `signature` verifies over `authenticatorData` and the SHA-256 of `clientDataJSON`, with `publicKey` by `algorithm`;
 - `passkey` is the SHA-256 of `publicKey`.
 
-`reef_evidence::session::check_certificate` does that in Rust, and `certify` runs the same check before the authority signs. A reader older than R3.43 does not know `user_verified` and refuses the certificate. At approval the daemon also checks what the certificate cannot show: the passkey is a live one of the identity, the origin is exactly `http://localhost:<the listener's port>`, and the sign count went up (or both counts are 0, as synced passkeys report). With an EdDSA passkey a certificate is about 1 KB larger.
+`reef_evidence::session::check_certificate` does that in Rust, and `certify` runs the same check before the authority signs. A reader older than R3.43 does not know `user_verified` and refuses the certificate. At approval the daemon also checks what the certificate cannot show: the passkey is a live one of the identity, then and when the key is stored, the origin is exactly `http://localhost:<the listener's port>`, and the sign count went up (or both counts are 0, as synced passkeys report). With an EdDSA passkey a certificate is about 1 KB larger.
 
 ## What a verifier sees
 

@@ -307,7 +307,7 @@ fn key_from(row: &Row<'_>) -> rusqlite::Result<SessionKeyRow> {
 /// The revocation `table`'s row `id` ends up with after one at `new`:
 /// the first `revoked_at` kept, `invalid_from` the earlier of the two, and
 /// the latest reason given.
-fn revoke_in(
+pub(super) fn revoke_in(
     tx: &Transaction<'_>,
     table: &str,
     id_column: &str,
@@ -644,7 +644,9 @@ impl Db {
     /// transaction, unless its identity already holds `limit` keys that have
     /// not expired at `key.issued_at` (counted in the same transaction).
     /// `Err(DbError::Conflict)` when the key is already there: two requests
-    /// raced with one key.
+    /// raced with one key. `Err(DbError::NotFound)` when `key.passkey_id`
+    /// names no live passkey of its identity: a removal or a reset
+    /// committed first, and a reset revokes only the keys stored before it.
     pub fn insert_session_key(
         &self,
         session: Option<&SessionRow>,
@@ -652,6 +654,20 @@ impl Db {
         limit: usize,
     ) -> Result<Inserted, DbError> {
         self.in_transaction(|tx| {
+            if let Some(passkey) = &key.passkey_id {
+                let live: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM passkeys
+                                   WHERE id = ?1 AND identity_id = ?2 AND removed_at IS NULL)",
+                    params![passkey, key.identity_id],
+                    |row| row.get(0),
+                )?;
+                if !live {
+                    return Err(DbError::NotFound {
+                        what: "live passkey",
+                        id: passkey.clone(),
+                    });
+                }
+            }
             let held: i64 = tx.query_row(
                 "SELECT count(*) FROM session_keys WHERE identity_id = ?1 AND not_after >= ?2",
                 params![key.identity_id, key.issued_at],
@@ -1132,6 +1148,7 @@ impl Db {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::db::{PasskeyInserted, PasskeyRow};
 
     pub(crate) fn identity(id: &str, name: &str, at: i64) -> IdentityRow {
         IdentityRow {
@@ -1385,6 +1402,104 @@ pub(crate) mod tests {
             db.insert_session_key(None, &later, 1).unwrap(),
             Inserted::Stored
         );
+    }
+
+    fn passkey(id: &str, identity: &str, credential: u8) -> PasskeyRow {
+        PasskeyRow {
+            id: id.to_owned(),
+            identity_id: identity.to_owned(),
+            credential_id: vec![credential],
+            public_key: vec![credential],
+            algorithm: -8,
+            fingerprint: format!("{credential:064x}"),
+            rp_id: "localhost".into(),
+            label: "test".into(),
+            aaguid: "0".repeat(32),
+            sign_count: 0,
+            created_at: Timestamp(1),
+            created_web_session: None,
+            last_used_at: None,
+            removed_at: None,
+            removed_reason: None,
+            removed_web_session: None,
+        }
+    }
+
+    fn approved(id: &str, session: &str, passkey: &str) -> SessionKeyRow {
+        SessionKeyRow {
+            presence: "user_verified".into(),
+            passkey_id: Some(passkey.to_owned()),
+            ..key(id, session, "idn_1", 10, 100)
+        }
+    }
+
+    // A key a passkey approved is stored only while that passkey is live
+    // and its identity's, checked in the insert's transaction, so a removal
+    // or a reset that commits first refuses it; a reset revokes the keys
+    // stored before it in its own transaction. Review of df9d1598, F1.
+    #[test]
+    fn a_passkeys_key_is_stored_only_while_the_passkey_is_live() {
+        let db = Db::open_in_memory().unwrap();
+        db.insert_identity(&identity("idn_1", "alice", 1)).unwrap();
+        db.insert_identity(&identity("idn_2", "bob", 1)).unwrap();
+        db.replace_authority(&authority("a1", 1), None).unwrap();
+        for row in [
+            passkey("pk_1", "idn_1", 1),
+            passkey("pk_2", "idn_1", 2),
+            passkey("pk_3", "idn_2", 3),
+        ] {
+            assert_eq!(
+                db.insert_passkey(&row, 32).unwrap(),
+                PasskeyInserted::Stored
+            );
+        }
+        let insert = |key: &SessionKeyRow, id: &str| {
+            db.insert_session_key(Some(&session(id, "idn_1")), key, 8)
+        };
+        let refused = |result: Result<Inserted, DbError>, passkey: &str| {
+            assert!(
+                matches!(&result, Err(DbError::NotFound { id, .. }) if id == passkey),
+                "{result:?}"
+            );
+        };
+        assert_eq!(
+            insert(&approved("k1", "s1", "pk_1"), "s1").unwrap(),
+            Inserted::Stored
+        );
+        refused(insert(&approved("k2", "s2", "pk_3"), "s2"), "pk_3");
+
+        db.remove_passkey("pk_1", Timestamp(20), "removed", None)
+            .unwrap()
+            .unwrap();
+        refused(insert(&approved("k3", "s3", "pk_1"), "s3"), "pk_1");
+        assert!(
+            db.session("s3").unwrap().is_none(),
+            "nothing of it is stored"
+        );
+        // A credential id is never registered again, so the removed
+        // passkey's id stays removed.
+        assert_eq!(
+            db.insert_passkey(&passkey("pk_4", "idn_1", 1), 32).unwrap(),
+            PasskeyInserted::Exists("pk_1".into())
+        );
+        refused(insert(&approved("k3", "s3", "pk_1"), "s3"), "pk_1");
+
+        assert_eq!(
+            insert(&approved("k4", "s4", "pk_2"), "s4").unwrap(),
+            Inserted::Stored
+        );
+        let (removed, revoked) = db.reset_passkeys("idn_1", Timestamp(30), "reset").unwrap();
+        assert_eq!(removed.len(), 1);
+        assert_eq!(revoked, ["k4"]);
+        let k4 = db.session_keys_by_id(&["k4"]).unwrap().pop().unwrap();
+        assert_eq!(
+            k4.revocation.map(|row| (row.revoked_at, row.invalid_from)),
+            Some((Timestamp(30), Timestamp(30)))
+        );
+        refused(insert(&approved("k5", "s5", "pk_2"), "s5"), "pk_2");
+        // The removal revoked nothing: k1 was certified while pk_1 was live.
+        let k1 = db.session_keys_by_id(&["k1"]).unwrap().pop().unwrap();
+        assert_eq!(k1.revocation, None);
     }
 
     #[test]

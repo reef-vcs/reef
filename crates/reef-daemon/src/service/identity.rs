@@ -63,15 +63,20 @@ pub struct IdentityHandler {
 impl IdentityHandler {
     /// `approval` as a message, with its identity's live passkeys.
     fn approval_message(&self, approval: &Approval) -> Result<v1::Approval, Status> {
+        Ok(approval_message(
+            approval,
+            self.credential_ids(&approval.identity.id)?,
+        ))
+    }
+
+    /// The credential ids of `identity_id`'s live passkeys.
+    fn credential_ids(&self, identity_id: &str) -> Result<Vec<Vec<u8>>, Status> {
         let live = self
             .state
             .db
-            .passkeys(Some(&approval.identity.id), false)
+            .passkeys(Some(identity_id), false)
             .map_err(status)?;
-        Ok(approval_message(
-            approval,
-            live.into_iter().map(|row| row.credential_id).collect(),
-        ))
+        Ok(live.into_iter().map(|row| row.credential_id).collect())
     }
 
     /// `row` as a message, with its identity's name.
@@ -892,7 +897,6 @@ impl IdentityService for IdentityHandler {
             .state
             .identity
             .reset_passkeys(&request.identity, &request.reason)
-            .await
             .map_err(status)?;
         Ok(Response::new(ResetPasskeysResponse {
             removed: removed
@@ -1008,6 +1012,22 @@ impl IdentityService for IdentityHandler {
                 ));
             }
         };
+        if matches!(channel, Channel::Remote { .. }) {
+            return Err(status(IdentityError::PasskeyOverRemote {
+                method: "ResolveApproval",
+            }));
+        }
+        // Read first: a read that failed after the resolution would report
+        // one that happened, a key certified, as failed.
+        let identity_id = self
+            .state
+            .identity
+            .get_approval(&request.id, std::time::Duration::ZERO)
+            .await
+            .map_err(status)?
+            .identity
+            .id;
+        let credential_ids = self.credential_ids(&identity_id)?;
         let approval = self
             .state
             .identity
@@ -1015,7 +1035,7 @@ impl IdentityService for IdentityHandler {
             .await
             .map_err(status)?;
         Ok(Response::new(ResolveApprovalResponse {
-            approval: Some(self.approval_message(&approval)?),
+            approval: Some(approval_message(&approval, credential_ids)),
         }))
     }
 }

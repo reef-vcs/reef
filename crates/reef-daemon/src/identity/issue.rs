@@ -513,7 +513,8 @@ impl Identities {
     /// certificate, signed by the current authority unless it is no longer
     /// `issuance.audience` (`InvalidProof`), read as any read does, then the
     /// session (when new) and the key in one transaction under the
-    /// identity's limit, and logged. The insert is the last step that can
+    /// identity's limit and, for a key a passkey approved, only while that
+    /// passkey is live, and logged. The insert is the last step that can
     /// fail, so an error means no key was certified.
     #[expect(clippy::too_many_lines, reason = "the issuance steps, in their order")]
     pub(crate) async fn certify_key(&self, issuance: Issuance) -> Result<ReadKey, IdentityError> {
@@ -652,6 +653,14 @@ impl Identities {
                 return Err(IdentityError::KeyExists {
                     key_id,
                     state: "certified",
+                });
+            }
+            Err(DbError::NotFound { id, .. }) => {
+                return Err(IdentityError::PasskeyInvalid {
+                    check: "passkey",
+                    message: format!(
+                        "passkey {id} was removed while the approval was being checked; approve it with a live passkey"
+                    ),
                 });
             }
             Err(error) => return Err(error.into()),

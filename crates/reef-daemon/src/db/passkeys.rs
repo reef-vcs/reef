@@ -7,7 +7,8 @@ use rusqlite::types::Value as SqlValue;
 use rusqlite::{OptionalExtension as _, Row, params, params_from_iter};
 
 use super::evidence::{bytes_at, integer_at, text_at};
-use super::{Db, DbError};
+use super::identity::revoke_in;
+use super::{Db, DbError, RevocationRow};
 use crate::model::Timestamp;
 
 /// One row of `passkeys`.
@@ -264,10 +265,11 @@ impl Db {
         })
     }
 
-    /// Removes every live passkey of `identity_id` at `at`, in one
-    /// transaction. The passkeys as they are after, and the ids of the
-    /// session keys they certified that are unrevoked and unexpired at
-    /// `at`, for the caller to revoke.
+    /// Removes every live passkey of `identity_id` at `at` and revokes,
+    /// from `at`, the session keys they certified that are unrevoked and
+    /// unexpired, in one transaction: a key stored before it is revoked, and
+    /// one stored after it is refused (`insert_session_key`). The passkeys
+    /// as they are after, and the ids of the keys revoked.
     pub fn reset_passkeys(
         &self,
         identity_id: &str,
@@ -310,6 +312,14 @@ impl Db {
                 stmt.query_map(params_from_iter(values), |found| found.get(0))?
                     .collect::<rusqlite::Result<_>>()?
             };
+            let revocation = RevocationRow {
+                revoked_at: at,
+                invalid_from: at,
+                reason: Some(reason.to_owned()),
+            };
+            for key in &keys {
+                revoke_in(tx, "session_keys", "key_id", key, &revocation)?;
+            }
             Ok((rows, keys))
         })
     }

@@ -1700,3 +1700,223 @@ async fn a_resolution_during_an_approve_is_busy() {
     );
     daemon.stop().await;
 }
+
+// 9. A reset while an approve is between its passkey check and its key's
+// insert: whichever commits first, no live key is left certified by the
+// reset passkey. The approve's record of the passkey's use and its read
+// of the key before the insert are made slow, so the reset waits for the
+// database behind one of them and commits between them, or after the
+// read; the insert is then refused. Review of df9d1598, F1.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reset_during_an_approve_leaves_no_live_key() {
+    use reef_daemon::identity::IdentityError;
+    use reef_daemon::identity::approvals::Resolution;
+    use reef_daemon::identity::issue::Channel;
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    create_identity(client, "alice").await;
+    let page = ui(client).await;
+    let mut passkey = Authenticator::new(Algorithm::EdDsa);
+    register(&page, &mut passkey, "alice", None).await.unwrap();
+    let change = commit_on(client, &repo.id, "root()", &[("a.txt", "a\n")]).await;
+    let identities = std::sync::Arc::clone(&daemon.handle.state().identity);
+    let key = fresh_key();
+    let key_id = key.public_key().id().to_string();
+    let approval = request_approval(
+        client,
+        "alice",
+        &repo.id,
+        &change.commit_id,
+        payload(&signoff(None), &change.tree_id),
+        &key,
+    )
+    .await
+    .unwrap();
+    let asserted = assertion(&mut passkey, &page.origin, &approval.challenge);
+    let db =
+        rusqlite::Connection::open(daemon.tmp.path().join("state").join("reef.sqlite3")).unwrap();
+    db.execute_batch(
+        "CREATE VIEW slow AS WITH RECURSIVE c(x) AS
+           (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 15000000) SELECT count(*) AS n FROM c;
+         CREATE TRIGGER slow_use AFTER UPDATE OF sign_count ON passkeys
+         BEGIN SELECT n FROM slow; END;
+         ALTER TABLE identity_authorities RENAME TO identity_authorities_real;
+         CREATE VIEW identity_authorities AS SELECT * FROM identity_authorities_real
+           WHERE (SELECT n FROM slow) > 0;",
+    )
+    .unwrap();
+    let origin = page.origin.clone();
+    let id = approval.id.clone();
+    let approving = tokio::spawn(async move {
+        let web = Channel::Web {
+            session: "0123456789abcdef".to_owned(),
+        };
+        identities
+            .resolve_approval(&web, Some(&origin), &id, Resolution::Approve(asserted))
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let reset = client
+        .reset_passkeys(ResetPasskeysRequest {
+            identity: "alice".to_owned(),
+            reason: "lost my laptop".to_owned(),
+        })
+        .await
+        .unwrap();
+    let approved = approving.await.unwrap();
+    db.execute_batch(
+        "DROP VIEW identity_authorities;
+         ALTER TABLE identity_authorities_real RENAME TO identity_authorities;
+         DROP TRIGGER slow_use; DROP VIEW slow;",
+    )
+    .unwrap();
+    assert_eq!(reset.removed.len(), 1, "the reset removed the passkey");
+    match approved {
+        // The reset first: the insert is refused, and the approval is
+        // pending again.
+        Err(IdentityError::PasskeyInvalid { check, .. }) => {
+            assert_eq!(check, "passkey");
+            assert_eq!(
+                client.get_session_key(&key_id).await.unwrap_err().reason(),
+                "SESSION_KEY_NOT_FOUND",
+                "an approve refused at its insert certified key {key_id}"
+            );
+            assert_eq!(reset.revoked_key_ids, Vec::<String>::new());
+            let pending = client
+                .get_approval(GetApprovalRequest {
+                    id: approval.id.clone(),
+                    wait: None,
+                })
+                .await
+                .unwrap()
+                .approval
+                .unwrap();
+            assert_eq!(pending.state(), ApprovalState::Pending);
+        }
+        // The insert first: the reset revokes the key.
+        Ok(_) => {
+            assert_eq!(reset.revoked_key_ids, std::slice::from_ref(&key_id));
+            let key = client.get_session_key(&key_id).await.unwrap().key.unwrap();
+            assert!(
+                key.revocation.is_some(),
+                "key {key_id} certified by a reset passkey is live"
+            );
+        }
+        Err(error) => panic!("the approve failed otherwise: {error:?}"),
+    }
+    daemon.stop().await;
+}
+
+// A reset is one transaction: one that fails part way leaves the passkeys
+// live, so its retry still finds them and revokes their keys. Here the
+// key's revocation fails, as a full disk would make it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_reset_revokes_on_its_retry() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    create_identity(client, "alice").await;
+    let page = ui(client).await;
+    let mut passkey = Authenticator::new(Algorithm::EdDsa);
+    register(&page, &mut passkey, "alice", None).await.unwrap();
+    let change = commit_on(client, &repo.id, "root()", &[("a.txt", "a\n")]).await;
+    let (_, _, approved) =
+        signed_off(client, &page, &repo.id, "alice", &change, &mut passkey).await;
+    let key_id = approved.key.unwrap().key_id;
+    let db =
+        rusqlite::Connection::open(daemon.tmp.path().join("state").join("reef.sqlite3")).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER failing_revocation BEFORE UPDATE OF revoked_at ON session_keys
+         BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END;",
+    )
+    .unwrap();
+    let reset = ResetPasskeysRequest {
+        identity: "alice".to_owned(),
+        reason: "lost my laptop".to_owned(),
+    };
+    client.reset_passkeys(reset.clone()).await.unwrap_err();
+    db.execute_batch("DROP TRIGGER failing_revocation;")
+        .unwrap();
+    let retried = client.reset_passkeys(reset).await.unwrap();
+    assert_eq!(retried.removed.len(), 1, "the failed reset removed nothing");
+    assert_eq!(retried.revoked_key_ids, std::slice::from_ref(&key_id));
+    let key = client.get_session_key(&key_id).await.unwrap().key.unwrap();
+    assert!(
+        key.revocation.is_some(),
+        "key {key_id} is live after the reset"
+    );
+    daemon.stop().await;
+}
+
+// A decline keeps its reason trimmed and names the web UI session that
+// declined it; one on the socket names none. Review of df9d1598, F3.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_decline_records_its_reason_and_decliner() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    create_identity(client, "alice").await;
+    let page = ui(client).await;
+    let mut passkey = Authenticator::new(Algorithm::EdDsa);
+    let registered = register(&page, &mut passkey, "alice", None).await.unwrap();
+    let page_session = registered.created_web_session.unwrap();
+    let change = commit_on(client, &repo.id, "root()", &[("a.txt", "a\n")]).await;
+    let statement = payload(&signoff(None), &change.tree_id);
+    let decline = |id: String| ResolveApprovalRequest {
+        id,
+        resolution: Some(resolve_approval_request::Resolution::Decline(
+            "  not mine \n".to_owned(),
+        )),
+    };
+
+    let from_page = request_approval(
+        client,
+        "alice",
+        &repo.id,
+        &change.commit_id,
+        statement.clone(),
+        &fresh_key(),
+    )
+    .await
+    .unwrap();
+    let declined = page
+        .identities()
+        .resolve_approval(decline(from_page.id.clone()))
+        .await
+        .unwrap()
+        .into_inner()
+        .approval
+        .unwrap();
+    assert_eq!(declined.state(), ApprovalState::Declined);
+    assert_eq!(declined.declined_reason, "not mine");
+    assert_eq!(declined.resolved_web_session, Some(page_session.clone()));
+    let read = client
+        .get_approval(GetApprovalRequest {
+            id: from_page.id.clone(),
+            wait: None,
+        })
+        .await
+        .unwrap()
+        .approval
+        .unwrap();
+    assert_eq!(read.declined_reason, "not mine");
+    assert_eq!(read.resolved_web_session, Some(page_session));
+
+    let from_socket = request_approval(
+        client,
+        "alice",
+        &repo.id,
+        &change.commit_id,
+        statement,
+        &fresh_key(),
+    )
+    .await
+    .unwrap();
+    let declined = client
+        .resolve_approval(decline(from_socket.id.clone()))
+        .await
+        .unwrap()
+        .approval
+        .unwrap();
+    assert_eq!(declined.declined_reason, "not mine");
+    assert_eq!(declined.resolved_web_session, None);
+    daemon.stop().await;
+}
