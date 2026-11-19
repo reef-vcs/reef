@@ -856,13 +856,36 @@ async fn a_question_asked_after_an_allow_is_refused() {
 // rows committed) is caught by the sweep's reconcile at start.
 #[tokio::test(flavor = "multi_thread")]
 async fn reconcile_withdraws_a_help_request_an_unblock_missed() {
+    Box::pin(reconcile_withdraws_after_an_unblock_stamped(|_| {
+        reef_daemon::model::Timestamp::now()
+    }))
+    .await;
+}
+
+// #335 review, finding 3: an event's time is taken before it commits, so an
+// unblock that commits after the help request was asked can carry an
+// earlier time. Reconcile orders them by commit (event seq) and still
+// withdraws it.
+#[tokio::test(flavor = "multi_thread")]
+async fn reconcile_orders_an_unblock_by_commit_not_time() {
+    Box::pin(reconcile_withdraws_after_an_unblock_stamped(|asked| {
+        reef_daemon::model::Timestamp(asked.created_at.0 - 1_000)
+    }))
+    .await;
+}
+
+/// Asks about a blocked conflict, then writes a person's allow as
+/// `record_and_announce` writes it, its event stamped `at(the help
+/// request)`, with nothing after: what a crash before the withdrawal leaves.
+/// The restarted daemon's reconcile withdraws the help request.
+async fn reconcile_withdraws_after_an_unblock_stamped(
+    at: impl FnOnce(&reef_daemon::db::CommentRow) -> reef_daemon::model::Timestamp,
+) {
     let (daemon, repo) = fixture("[conflicts]\ntier = \"ask\"\n").await;
     let client = &daemon.client;
     let s = scene(&daemon, &repo, "conflict.txt").await;
     assert_eq!(the_one(client, &repo.id).await.state(), State::Blocked);
     let asked = ask_about_the_conflict(client, &repo.id, &s.b).await;
-    // The allow's rows, written as `record_and_announce` writes them, with
-    // nothing after: what a crash before the withdrawal leaves.
     let repo_id: reef_daemon::model::RepoId = repo.id.parse().unwrap();
     let db = &daemon.handle.state().db;
     let row = db
@@ -870,7 +893,7 @@ async fn reconcile_withdraws_a_help_request_an_unblock_missed() {
         .unwrap()
         .unwrap();
     assert_eq!(row.state, "blocked");
-    let at = reef_daemon::model::Timestamp::now();
+    let at = at(&db.comment(repo_id, &asked.id).unwrap().unwrap());
     let mut next = row.clone();
     "assigned".clone_into(&mut next.state);
     "allowed".clone_into(&mut next.reason);
@@ -918,5 +941,116 @@ async fn reconcile_withdraws_a_help_request_an_unblock_missed() {
         (HelpState::Withdrawn, InstructionCause::ConflictUnblocked)
     );
     assert_eq!(step(client, &s.b).await, ChangeStep::Resolve);
+    daemon.stop().await;
+}
+
+// #335 review, finding 2: the answered help request is named only until
+// the conflict enters BLOCKED again. Asked, answered and taken, then
+// allowed; its one attempt is used up and it is blocked again, so `ask`
+// names no help request and `next` asks a person again instead of watching
+// for a move that will not come.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_conflict_blocked_again_asks_again() {
+    let (daemon, repo) = fixture("[conflicts]\ntier = \"ask\"\nattempts = 1\n").await;
+    let client = &daemon.client;
+    let s = scene(&daemon, &repo, "conflict.txt").await;
+    let blocked = the_one(client, &repo.id).await;
+    let asked = ask_about_the_conflict(client, &repo.id, &s.b).await;
+    let waiting = read_workspace(client, &s.b).await;
+    client
+        .create_comment(CreateCommentRequest {
+            repo: repo.id.clone(),
+            revision: waiting.commit_id.clone(),
+            kind: CommentKind::Instruction.into(),
+            text: "I will allow it; try once.".to_owned(),
+            reply_to: asked.id.clone(),
+            ..CreateCommentRequest::default()
+        })
+        .await
+        .unwrap();
+    client
+        .claim_instruction(ClaimInstructionRequest {
+            workspace: s.b.id.clone(),
+            ..ClaimInstructionRequest::default()
+        })
+        .await
+        .unwrap();
+    let answered = read_workspace(client, &s.b).await;
+    assert_eq!(
+        (answered.step(), answered.help_request_id.as_str()),
+        (ChangeStep::Ask, asked.id.as_str())
+    );
+
+    let allowed = client
+        .assign_conflict(assign(&repo.id, &blocked.id, TransitionActor::Human))
+        .await
+        .unwrap()
+        .assignment
+        .unwrap();
+    assert_eq!((allowed.state(), allowed.attempts), (State::Assigned, 1));
+    client
+        .release_conflict(v1::ReleaseConflictRequest {
+            repo: repo.id.clone(),
+            workspace: s.b.id.clone(),
+            reason: "could not resolve it".to_owned(),
+            ..v1::ReleaseConflictRequest::default()
+        })
+        .await
+        .unwrap();
+    let again = the_one(client, &repo.id).await;
+    assert_eq!(
+        (again.state(), again.reason()),
+        (State::Blocked, Reason::Attempts)
+    );
+    let ws = read_workspace(client, &s.b).await;
+    assert_eq!(
+        (ws.step(), ws.conflict_block_reason()),
+        (ChangeStep::Ask, Reason::Attempts)
+    );
+    assert_eq!(
+        ws.help_request_id, "",
+        "the old answer is not this block's: ask again"
+    );
+    daemon.stop().await;
+}
+
+// Fix review of #335, F4: an unblock's withdrawal that runs late (it waits
+// for GC's create lock after the assignment lock is dropped) leaves alone a
+// help request asked after it, about a later block, as reconcile does.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_late_withdrawal_leaves_a_later_question() {
+    let (daemon, repo) = fixture("[conflicts]\ntier = \"ask\"\n").await;
+    let client = &daemon.client;
+    let s = scene(&daemon, &repo, "conflict.txt").await;
+    let blocked = the_one(client, &repo.id).await;
+    let asked = ask_about_the_conflict(client, &repo.id, &s.b).await;
+    let repo_id: reef_daemon::model::RepoId = repo.id.parse().unwrap();
+    let state = daemon.handle.state();
+    let seen = state
+        .db
+        .comment(repo_id, &asked.id)
+        .unwrap()
+        .unwrap()
+        .help
+        .unwrap()
+        .assignment_seq
+        .unwrap();
+    let earlier = [(asked.change_id.clone(), blocked.id.clone(), seen)];
+    reef_daemon::comments::after_unblocked(state, repo_id, &earlier)
+        .await
+        .unwrap();
+    assert_eq!(
+        help_of(client, &repo.id, &asked.id).await.state(),
+        HelpState::Open,
+        "asked after that unblock"
+    );
+    let later = [(asked.change_id.clone(), blocked.id.clone(), seen + 1)];
+    reef_daemon::comments::after_unblocked(state, repo_id, &later)
+        .await
+        .unwrap();
+    assert_eq!(
+        help_of(client, &repo.id, &asked.id).await.state(),
+        HelpState::Withdrawn
+    );
     daemon.stop().await;
 }

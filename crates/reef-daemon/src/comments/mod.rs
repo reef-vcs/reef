@@ -1403,11 +1403,25 @@ async fn create_inner(
         };
         // Read under the comment lock: an unblock commits its rows before
         // it withdraws (`after_unblocked`), so either this sees the row
-        // unblocked or the withdrawal sees this help request.
+        // unblocked or the withdrawal sees this help request. The seq is
+        // read first, so an unblock the check missed has a later one, which
+        // reconcile finds when that withdrawal never ran.
+        let seen = match conflict
+            .as_ref()
+            .and_then(|(_, assignment)| assignment.as_deref())
+        {
+            Some(assignment) => state.db.last_assignment_seq(repo, assignment)?,
+            None => None,
+        };
         if input.while_blocked {
             help::check_blocked(state, repo, conflict.as_ref())?;
         }
-        Some(help::columns(&input, client_session.clone(), conflict))
+        Some(help::columns(
+            &input,
+            client_session.clone(),
+            conflict,
+            seen,
+        ))
     } else {
         None
     };
@@ -2110,15 +2124,17 @@ pub async fn after_transitions(
 }
 
 /// Withdraws the open help requests with reason CONFLICT that name one of
-/// `unblocked`, `(change, assignment)` pairs whose assignment just left
-/// BLOCKED (R3.28): a person allowed or took the conflict, or a policy
-/// change lets an agent attempt it, so the asker need not wait for an
-/// answer (cause `conflict_unblocked`). One operation for the lot; automatic
+/// `unblocked`, `(change, assignment, seq)` triples whose assignment just
+/// left BLOCKED in its event `seq` (R3.28): a person allowed or took the
+/// conflict, or a policy change lets an agent attempt it, so the asker need
+/// not wait for an answer (cause `conflict_unblocked`). Only help requests
+/// asked before that event, as reconcile judges them: one asked after a
+/// later block is about that block. One operation for the lot; automatic
 /// landing judges the changes again.
 pub async fn after_unblocked(
     state: &AppState,
     repo: RepoId,
-    unblocked: &[(String, String)],
+    unblocked: &[(String, String, i64)],
 ) -> Result<Option<OperationIdHex>, CommentError> {
     if unblocked.is_empty() {
         return Ok(None);
@@ -2129,7 +2145,7 @@ pub async fn after_unblocked(
     let _held = comment_lock.lock().await;
     let mut planned = Vec::new();
     let mut released = Vec::new();
-    for (change, assignment) in unblocked {
+    for (change, assignment, seq) in unblocked {
         for asked in
             state
                 .db
@@ -2138,6 +2154,7 @@ pub async fn after_unblocked(
             let names_it = asked.help.as_ref().is_some_and(|columns| {
                 columns.reason == help::Reason::Conflict.as_str()
                     && columns.assignment_id.as_deref() == Some(assignment.as_str())
+                    && columns.assignment_seq.is_some_and(|seen| seen < *seq)
             });
             if names_it {
                 planned.extend(help::daemon_move(

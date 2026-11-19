@@ -45,3 +45,16 @@ pub(crate) fn rebase(root: &Path, commit: &str, onto: &str) -> String {
     pollster::block_on(tx.commit("rebase")).unwrap();
     new.id().hex()
 }
+
+/// Bookmark `name` set to `commit` outside the daemon.
+pub(crate) fn bookmark(root: &Path, name: &str, commit: &str) {
+    use jj_lib::op_store::RefTarget;
+    use jj_lib::ref_name::RefName;
+    let repo = load(root);
+    let mut tx = repo.start_transaction();
+    tx.repo_mut().set_local_bookmark_target(
+        RefName::new(name),
+        RefTarget::normal(CommitId::try_from_hex(commit).unwrap()),
+    );
+    pollster::block_on(tx.commit("bookmark set")).unwrap();
+}

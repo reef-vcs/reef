@@ -86,6 +86,9 @@ pub struct HelpColumns {
     pub conflict_id: Option<String>,
     /// With reason `conflict`: the open assignment when asked.
     pub assignment_id: Option<String>,
+    /// With an assignment: the seq of its last event when asked, so its
+    /// later moves are told from earlier ones by commit order.
+    pub assignment_seq: Option<i64>,
     /// The first answer.
     pub answer_id: Option<String>,
     /// Why it got there: `request`, `change_final`, `expired`,
@@ -270,11 +273,39 @@ const COMMENT_COLUMNS: &str = "repo_id, id, status, change_id, round, commit_id,
      claimed_token, channel, taken, summary, confirmed_at, delivered_at, started_at,
      finished_at, updated_at, help_state, help_reason, help_tried, help_question,
      help_client_session, help_conflict_id, help_assignment_id, help_answer_id, help_cause,
-     help_answered_at, help_closed_at";
+     help_answered_at, help_closed_at, help_assignment_seq";
 
 /// How many columns [`COMMENT_COLUMNS`] names: the index of a column a query
 /// selects after them.
-const COMMENT_COLUMN_COUNT: usize = 58;
+const COMMENT_COLUMN_COUNT: usize = 59;
+
+/// [`Db::answered_conflict_help_request`]'s query after its columns. The
+/// last entry into BLOCKED is read through
+/// `conflict_assignment_events_by_assignment`.
+const ANSWERED_CONFLICT_HELP: &str = "FROM comments
+     WHERE repo_id = ?1 AND change_id = ?2 AND status = 'committed'
+     AND help_state = 'answered' AND help_reason = 'conflict'
+     AND help_assignment_id = ?3 AND created_at >= ?4
+     AND help_assignment_seq >= COALESCE((
+          SELECT MAX(e.seq) FROM conflict_assignment_events e
+          WHERE e.repo_id = ?1 AND e.assignment_id = ?3
+          AND e.to_state = 'blocked'
+          AND (e.from_state IS NULL OR e.from_state <> 'blocked')), 0)
+     AND (help_client_session = ?5
+          OR (help_client_session IS NULL AND session_id = ?6))
+     ORDER BY created_at DESC, id DESC LIMIT 1";
+
+/// [`Db::unblocked_help_requests`]'s query after its columns, which read
+/// `c`. The order by `created_at` reads the open ones through
+/// `comments_help_open`.
+const UNBLOCKED_HELP: &str = "FROM comments c
+     WHERE c.repo_id = ?1 AND c.status = 'committed' AND c.help_state = 'open'
+     AND c.help_reason = 'conflict' AND c.help_assignment_id IS NOT NULL
+     AND EXISTS (SELECT 1 FROM conflict_assignment_events e
+                 WHERE e.repo_id = c.repo_id AND e.assignment_id = c.help_assignment_id
+                 AND e.from_state = 'blocked' AND e.to_state <> 'blocked'
+                 AND e.seq > c.help_assignment_seq)
+     ORDER BY c.created_at, c.id";
 
 const EVENT_COLUMNS: &str = "repo_id, id, seq, status, comment_id, change_id, event, from_state,
      to_state, cause, transition_id, agent, actor, identity_id, remote_token, summary,
@@ -370,6 +401,7 @@ fn comment_from_row(row: &Row<'_>) -> rusqlite::Result<CommentRow> {
             cause: text_at(row, 55)?.unwrap_or_default(),
             answered_at: at(row, 56)?,
             closed_at: at(row, 57)?,
+            assignment_seq: row.get(58)?,
             summary: text_at(row, 41)?,
         }),
         None => None,
@@ -482,7 +514,7 @@ impl Db {
                      ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21,
                      NULL, 0, NULL, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, NULL, NULL,
                      NULL, NULL, NULL, 0, NULL, ?32, NULL, NULL, NULL, ?21, ?33, ?34, ?35, ?36,
-                     ?37, ?38, ?39, NULL, ?40, NULL, NULL)"
+                     ?37, ?38, ?39, NULL, ?40, NULL, NULL, ?41)"
                 ),
                 params![
                     comment.repo_id,
@@ -525,6 +557,7 @@ impl Db {
                     h.and_then(|h| h.conflict_id.clone()),
                     h.and_then(|h| h.assignment_id.clone()),
                     h.map(|h| h.cause.clone()),
+                    h.and_then(|h| h.assignment_seq),
                 ],
             )?;
             insert_event_in(tx, event)?;
@@ -1220,10 +1253,10 @@ impl Db {
 
     /// The newest answered help request with reason CONFLICT that a session
     /// (as [`Self::awaited_help_request`] matches it) asked on `change`
-    /// about `assignment` since the assignment last entered BLOCKED and its
-    /// conflict last changed (`conflict_changed_at`), R3.28: the one that
-    /// makes asking again no use. A priority change or a grant that leaves
-    /// it blocked does not start a new question.
+    /// about `assignment` since the assignment last entered BLOCKED (by
+    /// event seq) and its conflict last changed (`conflict_changed_at`),
+    /// R3.28: the one that makes asking again no use. A priority change or a
+    /// grant that leaves it blocked does not start a new question.
     pub fn answered_conflict_help_request(
         &self,
         repo: RepoId,
@@ -1235,20 +1268,7 @@ impl Db {
     ) -> Result<Option<CommentRow>, DbError> {
         self.with(|conn| {
             conn.query_row(
-                &format!(
-                    "SELECT {COMMENT_COLUMNS} FROM comments
-                     WHERE repo_id = ?1 AND change_id = ?2 AND status = 'committed'
-                     AND help_state = 'answered' AND help_reason = 'conflict'
-                     AND help_assignment_id = ?3 AND created_at >= ?4
-                     AND created_at >= COALESCE((
-                          SELECT MAX(e.at) FROM conflict_assignment_events e
-                          WHERE e.repo_id = ?1 AND e.assignment_id = ?3
-                          AND e.to_state = 'blocked'
-                          AND (e.from_state IS NULL OR e.from_state <> 'blocked')), 0)
-                     AND (help_client_session = ?5
-                          OR (help_client_session IS NULL AND session_id = ?6))
-                     ORDER BY created_at DESC, id DESC LIMIT 1"
-                ),
+                &format!("SELECT {COMMENT_COLUMNS} {ANSWERED_CONFLICT_HELP}"),
                 params![
                     repo,
                     change,
@@ -1339,8 +1359,9 @@ impl Db {
     }
 
     /// `repo`'s open help requests with reason CONFLICT whose assignment
-    /// left BLOCKED after they were asked (R3.28): what
-    /// `comments::after_unblocked` withdraws, read from the rows alone.
+    /// left BLOCKED after they were asked (an event with a later seq than
+    /// the one they saw), R3.28: what `comments::after_unblocked` withdraws,
+    /// read from the rows alone.
     pub fn unblocked_help_requests(&self, repo: RepoId) -> Result<Vec<CommentRow>, DbError> {
         let columns = COMMENT_COLUMNS
             .split(',')
@@ -1348,15 +1369,7 @@ impl Db {
             .collect::<Vec<_>>()
             .join(", ");
         self.with(|conn| {
-            let mut statement = conn.prepare(&format!(
-                "SELECT {columns} FROM comments c
-                 WHERE c.repo_id = ?1 AND c.status = 'committed' AND c.help_state = 'open'
-                 AND c.help_reason = 'conflict' AND c.help_assignment_id IS NOT NULL
-                 AND EXISTS (SELECT 1 FROM conflict_assignment_events e
-                             WHERE e.repo_id = c.repo_id AND e.assignment_id = c.help_assignment_id
-                             AND e.from_state = 'blocked' AND e.to_state <> 'blocked'
-                             AND e.at >= c.created_at)"
-            ))?;
+            let mut statement = conn.prepare(&format!("SELECT {columns} {UNBLOCKED_HELP}"))?;
             statement
                 .query_map([repo], comment_from_row)?
                 .collect::<Result<_, _>>()
@@ -1579,5 +1592,45 @@ mod tests {
         assert_eq!(median(&mut [5]), 5);
         assert_eq!(median(&mut [9, 1, 5]), 5);
         assert_eq!(median(&mut [4, 2]), 3);
+    }
+
+    /// `EXPLAIN QUERY PLAN` of `SELECT c.id <from>` with `params`, one
+    /// line per step.
+    fn plan(from: &str, params: impl rusqlite::Params) -> Vec<String> {
+        let db = Db::open_in_memory().unwrap();
+        db.with(|conn| {
+            let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN SELECT c.id {from}"))?;
+            stmt.query_map(params, |row| row.get::<_, String>(3))?
+                .collect()
+        })
+        .unwrap()
+    }
+
+    // Neither reads the repository's every event (#335 review): with no
+    // ANALYZE, a range on `at` had the planner walk the primary key by
+    // `repo_id` alone.
+    #[test]
+    fn help_queries_use_the_indexes() {
+        let answered = plan(
+            &ANSWERED_CONFLICT_HELP.replacen("FROM comments", "FROM comments c", 1),
+            params!["r", "c", "a", 0, "s", "s"],
+        );
+        assert!(
+            answered
+                .iter()
+                .any(|step| step.contains("SEARCH e USING INDEX conflict_assignment_events_by_assignment (repo_id=? AND assignment_id=?)")),
+            "{answered:?}"
+        );
+        let unblocked = plan(UNBLOCKED_HELP, ["r"]);
+        assert!(
+            unblocked[0].contains("SEARCH c USING INDEX comments_help_open (repo_id=?)"),
+            "{unblocked:?}"
+        );
+        assert!(
+            unblocked.iter().any(|step| step.contains(
+                "SEARCH e EXISTS USING INDEX conflict_assignment_events_by_assignment (repo_id=? AND assignment_id=? AND seq>?)"
+            )),
+            "{unblocked:?}"
+        );
     }
 }

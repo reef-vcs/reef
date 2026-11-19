@@ -990,6 +990,9 @@ tool!(get_workspace, args::GetWorkspace, |call, args| {
             sync_first: true,
         }))
         .await?;
+    if let Some(ws) = &response.workspace {
+        call.server.showed(ws);
+    }
     to_value(&Inspected::from_response(&response).ok_or_else(|| missing("workspace"))?)
 });
 
@@ -1467,12 +1470,28 @@ pub(super) struct AskedForHelp<'a> {
     next: String,
 }
 
+/// The reason `ask_for_help` asks with. While its conflict waits for a
+/// person (`blocked`), a question is about that conflict unless it names a
+/// decision or something unclear, so a person's allow withdraws it.
+fn help_reason(given: Option<args::HelpReason>, blocked: bool) -> v1::HelpReason {
+    match given {
+        Some(args::HelpReason::Decision) => v1::HelpReason::Decision,
+        Some(args::HelpReason::Unclear) => v1::HelpReason::Unclear,
+        _ if blocked => v1::HelpReason::Conflict,
+        Some(reason) => reason.into(),
+        None => v1::HelpReason::Other,
+    }
+}
+
 tool!(ask_for_help, args::AskForHelp, |call, args| {
     let ctx = call.ctx;
     let scope = call.scope(None, None).await?;
-    let reason = args
-        .reason
-        .map_or(v1::HelpReason::Other, v1::HelpReason::from);
+    let blocked = scope
+        .workspace
+        .as_ref()
+        .is_some_and(|ws| call.server.asks_while_blocked(ws, args.revision.as_deref()));
+    let reason = help_reason(args.reason, blocked);
+    let while_blocked = blocked && reason == v1::HelpReason::Conflict;
     let response = Box::pin(
         ctx.call(
             ctx.client.create_comment(v1::CreateCommentRequest {
@@ -1488,7 +1507,7 @@ tool!(ask_for_help, args::AskForHelp, |call, args| {
                     // The change's conflict, with reason conflict; `reef ask
                     // --conflict` names one by id.
                     conflict: String::new(),
-                    while_blocked: false,
+                    while_blocked,
                 }),
                 // The answer goes to this server's session, whose wait takes it.
                 client_session: crate::cli::ambient::Ambient::current()
@@ -1765,6 +1784,27 @@ mod tests {
     use prost_reflect::prost_types::method_options::IdempotencyLevel;
 
     use super::*;
+
+    // #335 review: on a blocked conflict, "blocked", "other" or none is a
+    // question about the conflict, which the daemon reads only for reason
+    // conflict; elsewhere the agent's reason stands.
+    #[test]
+    fn a_blocked_conflict_asks_about_the_conflict() {
+        use args::HelpReason as Given;
+        use v1::HelpReason as Sent;
+        for (given, blocked, sent) in [
+            (None, true, Sent::Conflict),
+            (Some(Given::Blocked), true, Sent::Conflict),
+            (Some(Given::Other), true, Sent::Conflict),
+            (Some(Given::Conflict), true, Sent::Conflict),
+            (Some(Given::Decision), true, Sent::Decision),
+            (Some(Given::Unclear), true, Sent::Unclear),
+            (None, false, Sent::Other),
+            (Some(Given::Blocked), false, Sent::Blocked),
+        ] {
+            assert_eq!(help_reason(given, blocked), sent, "{given:?} {blocked}");
+        }
+    }
 
     /// #117: paths read as the CLI reads them under `--workspace`; one
     /// that leaves the directory goes to the daemon unchanged.

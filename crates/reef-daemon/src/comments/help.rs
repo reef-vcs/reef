@@ -320,11 +320,13 @@ pub fn is_self_answer(
     }
 }
 
-/// The columns of a new help request.
+/// The columns of a new help request; `assignment_seq` is its
+/// assignment's last event seq when asked.
 pub fn columns(
     input: &HelpInput,
     client_session: Option<String>,
     conflict: Option<(String, Option<String>)>,
+    assignment_seq: Option<i64>,
 ) -> HelpColumns {
     let (conflict_id, assignment_id) = match conflict {
         Some((conflict, assignment)) => (Some(conflict), assignment),
@@ -338,6 +340,7 @@ pub fn columns(
         client_session,
         conflict_id,
         assignment_id,
+        assignment_seq,
         cause: "request".to_owned(),
         ..HelpColumns::default()
     }

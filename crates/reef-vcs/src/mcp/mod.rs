@@ -19,10 +19,11 @@ mod results;
 mod tools;
 mod wait;
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::process::ExitCode;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, PoisonError};
 
 use reef_api::v1;
 use reef_client::json::ErrorObject;
@@ -102,6 +103,47 @@ pub(crate) struct ReefServer {
     /// Set once the launch workspace's provenance has been declared
     /// (R3.44): the harness and its session, at the first call there.
     launch_declared: AtomicBool,
+    /// The workspaces whose step `get_workspace` last returned as `ask`
+    /// (R3.28).
+    shown_ask: std::sync::Mutex<HashSet<String>>,
+}
+
+impl ReefServer {
+    /// Notes the step `get_workspace` returned for `ws`.
+    pub(super) fn showed(&self, ws: &v1::Workspace) {
+        let mut shown = self
+            .shown_ask
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if ws.step() == v1::ChangeStep::Ask {
+            shown.insert(ws.id.clone());
+        } else {
+            shown.remove(&ws.id);
+        }
+    }
+
+    /// Whether `ask_for_help` in `ws` about `revision` asks only while its
+    /// conflict waits for a person, as `reef here`'s `ask` does: on `ws`'s
+    /// own change, its step is `ask` now, or is `resolve` but was `ask` when
+    /// `get_workspace` last returned it. A person who allowed the conflict
+    /// in between has that question refused, so the agent resolves instead
+    /// of waiting for an answer nobody gives. The remembered step serves
+    /// one question.
+    pub(super) fn asks_while_blocked(&self, ws: &v1::Workspace, revision: Option<&str>) -> bool {
+        if revision.is_some_and(|revision| !matches!(revision.trim(), "" | "@")) {
+            return false;
+        }
+        let shown = self
+            .shown_ask
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&ws.id);
+        match ws.step() {
+            v1::ChangeStep::Ask => true,
+            v1::ChangeStep::Resolve => shown,
+            _ => false,
+        }
+    }
 }
 
 /// What a tool gets: the server, the connection, and the request.
@@ -318,6 +360,7 @@ pub(crate) async fn serve(global: Global, out: &Out) -> Result<ExitCode, CliErro
         activity: Arc::clone(&activity),
         launch_scope,
         launch_declared: AtomicBool::new(false),
+        shown_ask: std::sync::Mutex::default(),
     };
     let internal = |message: String| CliError::Refused {
         kind: ErrorKind::Internal,

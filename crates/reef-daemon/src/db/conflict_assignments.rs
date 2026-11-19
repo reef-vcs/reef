@@ -785,6 +785,18 @@ impl Db {
         })
     }
 
+    /// The seq of assignment `id`'s last event; `None` when it has none.
+    pub fn last_assignment_seq(&self, repo: RepoId, id: &str) -> Result<Option<i64>, DbError> {
+        self.with(|conn| {
+            conn.query_row(
+                "SELECT max(seq) FROM conflict_assignment_events
+                 WHERE repo_id = ?1 AND assignment_id = ?2",
+                params![repo, id],
+                |row| row.get(0),
+            )
+        })
+    }
+
     /// Up to `limit` of `repo`'s resolutions closed before `before` whose
     /// landing needs a person's sign-off (R3.28): `(id, change)`, oldest
     /// first.
