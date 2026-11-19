@@ -1,7 +1,6 @@
 // R2.19 test 9: the smartlog view over an in-memory daemon, with the route's
 // query driving it as the app's does.
 import { Code } from "@connectrpc/connect";
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { OperationStore } from "../live/operations";
 import { PresenceStore } from "../live/presence";
@@ -14,6 +13,7 @@ import {
   settle,
 } from "../test/fakes";
 import { entries, FakeRepoDaemon, hexId, REPO } from "../test/smartlog-daemon";
+import { act, cleanup, fireEvent, render, screen, within } from "../test/testing-library";
 import { reverseHex } from "../ui/ids";
 import { useSearch } from "../ui/router";
 import { Smartlog, smartlogParams } from "./Smartlog";
@@ -289,6 +289,8 @@ describe("Smartlog", () => {
     const field = screen.getByLabelText("Revset");
     act(() => {
       fireEvent.change(field, { target: { value: "nonsense(" } });
+    });
+    act(() => {
       fireEvent.submit(field);
     });
     await flush();

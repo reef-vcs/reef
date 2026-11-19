@@ -1,10 +1,13 @@
 // The design pass: the app bar is the one banner. It holds the brand, the
 // connection, and Settings with the developer-mode switch; on a repository
 // page the frame portals its name, tabs and scrubber into it.
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import { App } from "../App";
+import { DaemonService } from "../gen/reef/api/v1/daemon_pb";
+import { OperationService } from "../gen/reef/api/v1/operations_pb";
+import { RepositoryService } from "../gen/reef/api/v1/repositories_pb";
 import { environment, FakeStreams, manualFrames, settle } from "../test/fakes";
+import { act, cleanup, fireEvent, render, screen, within } from "../test/testing-library";
 import { DEV_MODE_KEY, reloadDevMode } from "./dev-mode";
 import { navigate } from "./router";
 
@@ -17,13 +20,15 @@ afterEach(() => {
 
 async function mount(path: string) {
   window.history.replaceState(null, "", path);
-  const streams = new FakeStreams();
-  const connection = streams.connection();
   const pending = () => new Promise(() => undefined);
-  Object.assign(connection.clients, {
-    daemon: { getDaemonStatus: () => Promise.resolve({ version: "0.2.0", apiRevision: 14 }) },
-    repositories: { listRepositories: pending, getRepository: pending },
-    operations: { ...connection.clients.operations, listOperations: pending },
+  const connection = new FakeStreams().connection({
+    services: {
+      [DaemonService.typeName]: {
+        getDaemonStatus: () => Promise.resolve({ version: "0.2.0", apiRevision: 14 }),
+      },
+      [RepositoryService.typeName]: { listRepositories: pending, getRepository: pending },
+      [OperationService.typeName]: { listOperations: pending },
+    },
   });
   render(
     <App session={{ connection, token: "tok" }} environment={environment(manualFrames().frame)} />,

@@ -1,7 +1,7 @@
 // The design pass: the one-minute clock ticks at minute boundaries, only
 // while read, and through `after` (setTimeout), never setInterval.
-import { act, cleanup, render } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { act, cleanup, render } from "../test/testing-library";
 import { useNow } from "./clock";
 
 function Reader({ onRender }: { onRender: (now: number) => void }) {

@@ -9,9 +9,9 @@
 // other (live/paced.ts) and start from an animation frame, so a hidden tab
 // reads nothing. `snapshot_first` is never sent: the page never makes the
 // daemon write.
-import type { Connection } from "../api/connection";
+import { client, type Connection } from "../api/connection";
 import { isSessionInvalid, reefError, type ReefError } from "../api/errors";
-import type { GetWorkspaceResponse } from "../gen/reef/api/v1/workspaces_pb";
+import { type GetWorkspaceResponse, WorkspaceService } from "../gen/reef/api/v1/workspaces_pb";
 import type { FrameScheduler } from "../live/frame";
 import { Paced } from "../live/paced";
 
@@ -123,7 +123,7 @@ export class DiskScheduler {
     // An operation that touched it while the walk ran may postdate what it saw.
     const touched = () => (this.marks.get(id) ?? 0) !== mark;
     try {
-      const response = await this.connection.clients.workspaces.getWorkspace({
+      const response = await client(this.connection, WorkspaceService).getWorkspace({
         repo: this.repo(),
         workspace: id,
         snapshotFirst: false,

@@ -2,35 +2,30 @@
 // listener that served it; a shell (R3.39, R3.40) or a store (R4.13)
 // supplies its own `Connection` instead, so nothing else in the app assumes
 // the API is same-origin.
+import type { DescService } from "@bufbuild/protobuf";
 import { createClient, type Client, type Interceptor, type Transport } from "@connectrpc/connect";
 import { createGrpcWebTransport } from "@connectrpc/connect-web";
-import { ChangeService } from "../gen/reef/api/v1/changes_pb";
-import { DaemonService } from "../gen/reef/api/v1/daemon_pb";
-import { DiffService } from "../gen/reef/api/v1/diff_pb";
-import { HistoryService } from "../gen/reef/api/v1/history_pb";
-import { OperationService } from "../gen/reef/api/v1/operations_pb";
-import { PresenceService } from "../gen/reef/api/v1/presence_pb";
-import { RepositoryService } from "../gen/reef/api/v1/repositories_pb";
-import { StatusService } from "../gen/reef/api/v1/status_pb";
-import { WorkspaceService } from "../gen/reef/api/v1/workspaces_pb";
-
-export interface Clients {
-  daemon: Client<typeof DaemonService>;
-  repositories: Client<typeof RepositoryService>;
-  operations: Client<typeof OperationService>;
-  presence: Client<typeof PresenceService>;
-  changes: Client<typeof ChangeService>;
-  status: Client<typeof StatusService>;
-  diff: Client<typeof DiffService>;
-  history: Client<typeof HistoryService>;
-  workspaces: Client<typeof WorkspaceService>;
-}
 
 export interface Connection {
   transport: Transport;
-  clients: Clients;
   /** Where the connection goes, for display. */
   label: string;
+}
+
+const clients = new WeakMap<Transport, Map<DescService, Client<DescService>>>();
+
+/**
+ * `service`'s client over `connection`, made once per transport. Callers
+ * import the services they call, so a page's bundle holds only their schemas
+ * (#252).
+ */
+export function client<S extends DescService>(connection: Connection, service: S): Client<S> {
+  let made = clients.get(connection.transport);
+  if (!made)
+    clients.set(connection.transport, (made = new Map<DescService, Client<DescService>>()));
+  let found = made.get(service);
+  if (!found) made.set(service, (found = createClient(service, connection.transport)));
+  return found as Client<S>;
 }
 
 /** Sends the session's token on every call. */
@@ -41,24 +36,6 @@ export function bearer(token: string): Interceptor {
   };
 }
 
-export function connectionOver(transport: Transport, label: string): Connection {
-  return {
-    transport,
-    label,
-    clients: {
-      daemon: createClient(DaemonService, transport),
-      repositories: createClient(RepositoryService, transport),
-      operations: createClient(OperationService, transport),
-      presence: createClient(PresenceService, transport),
-      changes: createClient(ChangeService, transport),
-      status: createClient(StatusService, transport),
-      diff: createClient(DiffService, transport),
-      history: createClient(HistoryService, transport),
-      workspaces: createClient(WorkspaceService, transport),
-    },
-  };
-}
-
 /** gRPC-web, binary only, to `baseUrl` (this page's origin by default). */
 export function browserConnection(token: string, baseUrl: string = location.origin): Connection {
   const transport = createGrpcWebTransport({
@@ -66,5 +43,5 @@ export function browserConnection(token: string, baseUrl: string = location.orig
     useBinaryFormat: true,
     interceptors: [bearer(token)],
   });
-  return connectionOver(transport, baseUrl);
+  return { transport, label: baseUrl };
 }

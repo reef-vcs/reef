@@ -29,16 +29,18 @@
 // At an operation (`at`), the page is frozen: the operation is looked up
 // once, both reads are made at it, and neither stream is consulted.
 import { Code, ConnectError } from "@connectrpc/connect";
-import type { Connection } from "../api/connection";
+import { client, type Connection } from "../api/connection";
 import { isSessionInvalid, reefError, type ReefError } from "../api/errors";
-import type { Change } from "../gen/reef/api/v1/changes_pb";
-import { OperationKind, type Operation } from "../gen/reef/api/v1/operations_pb";
-import type { Repository } from "../gen/reef/api/v1/repositories_pb";
+import { type Change, ChangeService } from "../gen/reef/api/v1/changes_pb";
+import { DaemonService } from "../gen/reef/api/v1/daemon_pb";
+import { type Operation, OperationKind, OperationService } from "../gen/reef/api/v1/operations_pb";
+import { type Repository, RepositoryService } from "../gen/reef/api/v1/repositories_pb";
 import {
-  WorkspaceState,
   type DiskStatus,
   type GetWorkspaceResponse,
   type Workspace,
+  WorkspaceService,
+  WorkspaceState,
 } from "../gen/reef/api/v1/workspaces_pb";
 import { joinAgents } from "../fleet/agents";
 import { DiskScheduler } from "../fleet/disk";
@@ -239,7 +241,7 @@ export class FleetModel {
     this.update({ frozenWorkspace: undefined });
     if (!this.frozen || !id) return;
     try {
-      const response = await this.connection.clients.workspaces.getWorkspace({
+      const response = await client(this.connection, WorkspaceService).getWorkspace({
         repo: this.repoId ?? this.repo,
         workspace: id,
         atOperation: this.snapshot.frozenAt?.id ?? this.at ?? "",
@@ -332,7 +334,7 @@ export class FleetModel {
   private async readLive() {
     try {
       if (!this.started) {
-        const { repository } = await this.connection.clients.repositories.getRepository({
+        const { repository } = await client(this.connection, RepositoryService).getRepository({
           repo: this.repo,
         });
         if (this.isStopped()) return;
@@ -387,7 +389,7 @@ export class FleetModel {
 
   private async readSettling(id: string): Promise<"releasing" | "settled" | "failed" | "invalid"> {
     try {
-      const { workspace } = await this.connection.clients.workspaces.getWorkspace({
+      const { workspace } = await client(this.connection, WorkspaceService).getWorkspace({
         repo: this.repoId ?? this.repo,
         workspace: id,
         skipDiskUsage: true,
@@ -405,7 +407,9 @@ export class FleetModel {
 
   private async readStatus() {
     try {
-      const status = await this.connection.clients.daemon.getDaemonStatus({ skipBackends: true });
+      const status = await client(this.connection, DaemonService).getDaemonStatus({
+        skipBackends: true,
+      });
       if (this.isStopped()) return;
       this.uptimeMs = Number(status.uptimeMs);
       this.uptimeReadAt = this.now();
@@ -442,7 +446,7 @@ export class FleetModel {
 
   private async readAt() {
     try {
-      const response = await this.connection.clients.operations.getOperation({
+      const response = await client(this.connection, OperationService).getOperation({
         repo: this.repo,
         operationId: this.at ?? "",
       });
@@ -467,7 +471,7 @@ export class FleetModel {
     let at = atOperation;
     let diskStatus: DiskStatus | undefined;
     do {
-      const page = await this.connection.clients.workspaces.listWorkspaces({
+      const page = await client(this.connection, WorkspaceService).listWorkspaces({
         repo,
         states: LISTED,
         changedFileCounts: true,
@@ -489,7 +493,7 @@ export class FleetModel {
     let at = atOperation;
     let pages = 0;
     do {
-      const page = await this.connection.clients.changes.listChanges({
+      const page = await client(this.connection, ChangeService).listChanges({
         repo,
         revset: WORKING_COPIES_REVSET,
         skipSnapshot: true,
@@ -557,7 +561,7 @@ export class FleetModel {
 
   private async readFinal(id: string): Promise<GetWorkspaceResponse | undefined> {
     try {
-      return await this.connection.clients.workspaces.getWorkspace({
+      return await client(this.connection, WorkspaceService).getWorkspace({
         repo: this.repoId ?? this.repo,
         workspace: id,
         skipDiskUsage: true,

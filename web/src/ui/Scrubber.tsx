@@ -21,8 +21,9 @@ import {
   type KeyboardEvent,
   type PointerEvent,
 } from "react";
-import type { Connection } from "../api/connection";
+import { client, type Connection } from "../api/connection";
 import { isSessionInvalid, reefError, type ReefError } from "../api/errors";
+import { OperationService } from "../gen/reef/api/v1/operations_pb";
 import { after, type Cancel } from "../live/backoff";
 import { userOf } from "../log/coalesce";
 import { bucketWidth, buckets } from "../log/counts";
@@ -200,7 +201,7 @@ export function Scrubber({
       return;
     }
     try {
-      const response = await connection.clients.operations.getOperation({
+      const response = await client(connection, OperationService).getOperation({
         repo: win.repositoryId ?? "",
         endedAtOrBefore: timestampFromMs(t),
       });

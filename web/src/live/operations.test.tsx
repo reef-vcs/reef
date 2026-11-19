@@ -2,9 +2,10 @@
 // resumes from the last cursor after a drop; starts over on TOO_FAR_BEHIND
 // and OPERATION_LOG_REWRITTEN; and ends the session on WEB_SESSION_INVALID.
 import { Code, ConnectError } from "@connectrpc/connect";
-import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "../App";
+import { DaemonService } from "../gen/reef/api/v1/daemon_pb";
+import { RepositoryService } from "../gen/reef/api/v1/repositories_pb";
 import { SESSION_KEY } from "../session";
 import {
   FakeStreams,
@@ -16,6 +17,7 @@ import {
   sessionInvalid,
   settle,
 } from "../test/fakes";
+import { act, cleanup, render, screen } from "../test/testing-library";
 import { Backoff, sleep } from "./backoff";
 import { OperationStore, PENDING_LIMIT, runOperations, type OperationBatch } from "./operations";
 
@@ -84,12 +86,10 @@ describe("runOperations", () => {
     const done = runOperations(
       (cursor, signal) => {
         opened.push(cursor);
-        return streams
-          .connection()
-          .clients.operations.subscribeOperations(
-            cursor === undefined ? {} : { start: { case: "cursor", value: cursor } },
-            { signal },
-          );
+        return streams.subscribeOperations(
+          cursor === undefined ? {} : { start: { case: "cursor", value: cursor } },
+          { signal },
+        );
       },
       store,
       {
@@ -202,12 +202,10 @@ describe("backoff", () => {
     const done = runOperations(
       (cursor, signal) => {
         opens += 1;
-        const stream = streams
-          .connection()
-          .clients.operations.subscribeOperations(
-            cursor === undefined ? {} : { start: { case: "cursor", value: cursor } },
-            { signal },
-          );
+        const stream = streams.subscribeOperations(
+          cursor === undefined ? {} : { start: { case: "cursor", value: cursor } },
+          { signal },
+        );
         streams.lastOperations().fail(new ConnectError("down", Code.Unavailable));
         return stream;
       },
@@ -235,10 +233,11 @@ describe("a refused session", () => {
   it("ends the live layer, clears the stored token and shows the no-session page", async () => {
     localStorage.setItem(SESSION_KEY, "tok");
     const streams = new FakeStreams();
-    const connection = streams.connection();
-    Object.assign(connection.clients, {
-      daemon: { getDaemonStatus: () => new Promise(() => undefined) },
-      repositories: { listRepositories: () => new Promise(() => undefined) },
+    const connection = streams.connection({
+      services: {
+        [DaemonService.typeName]: { getDaemonStatus: () => new Promise(() => undefined) },
+        [RepositoryService.typeName]: { listRepositories: () => new Promise(() => undefined) },
+      },
     });
     const frames = manualFrames();
     render(<App session={{ connection, token: "tok" }} environment={environment(frames.frame)} />);

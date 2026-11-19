@@ -6,10 +6,10 @@
 // time), and the model keeps whichever of the listed one and every streamed
 // one ended last. An operation recorded between the two calls arrives on the
 // stream, so none is missed in either order.
-import type { Connection } from "../api/connection";
+import { client, type Connection } from "../api/connection";
 import { isSessionInvalid, reefError, type ReefError } from "../api/errors";
-import type { Operation } from "../gen/reef/api/v1/operations_pb";
-import type { Repository } from "../gen/reef/api/v1/repositories_pb";
+import { type Operation, OperationService } from "../gen/reef/api/v1/operations_pb";
+import { type Repository, RepositoryService } from "../gen/reef/api/v1/repositories_pb";
 import { after, type Cancel } from "../live/backoff";
 import { FrameNotifier, type FrameScheduler } from "../live/frame";
 import type { OperationBatch, OperationStore } from "../live/operations";
@@ -137,7 +137,9 @@ export class OverviewModel {
       const repositories: Repository[] = [];
       let pageToken = "";
       do {
-        const page = await this.connection.clients.repositories.listRepositories({ pageToken });
+        const page = await client(this.connection, RepositoryService).listRepositories({
+          pageToken,
+        });
         repositories.push(...page.repositories);
         pageToken = page.nextPageToken;
       } while (pageToken);
@@ -166,7 +168,7 @@ export class OverviewModel {
     const worker = async () => {
       for (let repo = queue.shift(); repo !== undefined; repo = queue.shift()) {
         try {
-          const page = await this.connection.clients.operations.listOperations({
+          const page = await client(this.connection, OperationService).listOperations({
             repo,
             pageSize: 1,
           });

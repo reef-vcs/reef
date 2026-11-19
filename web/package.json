@@ -27,8 +27,7 @@
     "@bufbuild/protobuf": "2.16.0",
     "@connectrpc/connect": "2.3.0",
     "@connectrpc/connect-web": "2.3.0",
-    "react": "19.3.1",
-    "react-dom": "19.3.1"
+    "preact": "11.2.0"
   },
   "devDependencies": {
     "@bufbuild/buf": "1.74.0",
@@ -36,11 +35,10 @@
     "@eslint/js": "10.0.1",
     "@playwright/test": "1.64.1",
     "@testing-library/dom": "10.4.2",
-    "@testing-library/react": "16.3.3",
+    "@testing-library/preact": "3.2.6",
     "@types/node": "24.19.2",
     "@types/react": "19.3.0",
     "@types/react-dom": "19.3.0",
-    "@vitejs/plugin-react": "6.1.2",
     "eslint": "10.14.0",
     "eslint-plugin-react-hooks": "7.1.1",
     "globals": "17.13.0",

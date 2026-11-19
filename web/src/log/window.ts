@@ -31,15 +31,15 @@
 // At most `WINDOW_CAP` operations: older pages are offered until then, and
 // live operations past it drop the oldest from the bottom.
 import { Code } from "@connectrpc/connect";
-import type { Connection } from "../api/connection";
+import { client, type Connection } from "../api/connection";
 import {
   isSessionInvalid,
   OPERATION_LOG_REWRITTEN,
   reefError,
   type ReefError,
 } from "../api/errors";
-import type { Operation } from "../gen/reef/api/v1/operations_pb";
-import type { Repository } from "../gen/reef/api/v1/repositories_pb";
+import { type Operation, OperationService } from "../gen/reef/api/v1/operations_pb";
+import { type Repository, RepositoryService } from "../gen/reef/api/v1/repositories_pb";
 import { timestampMs } from "@bufbuild/protobuf/wkt";
 import { after, Backoff, type Cancel } from "../live/backoff";
 import { FrameNotifier, type FrameScheduler } from "../live/frame";
@@ -211,7 +211,7 @@ export class OperationWindow {
     const repo = this.repoId ?? this.repo;
     this.update({ loadingOlder: true });
     try {
-      const page = await this.connection.clients.operations.listOperations({
+      const page = await client(this.connection, OperationService).listOperations({
         repo,
         pageSize: Math.min(PAGE_SIZE, WINDOW_CAP - this.byId.size),
         pageToken: this.token,
@@ -301,7 +301,7 @@ export class OperationWindow {
   lookup(at: string): Promise<Operation> {
     let found = this.lookups.get(at);
     if (!found) {
-      found = this.connection.clients.operations
+      found = client(this.connection, OperationService)
         .getOperation({ repo: this.repoId ?? this.repo, operationId: at })
         .then((response) => {
           if (!response.operation) throw new Error("The daemon returned no operation.");
@@ -334,7 +334,7 @@ export class OperationWindow {
 
   private async resolve() {
     try {
-      const response = await this.connection.clients.repositories.getRepository({
+      const response = await client(this.connection, RepositoryService).getRepository({
         repo: this.repo,
       });
       if (this.isStopped()) return;
@@ -441,7 +441,7 @@ export class OperationWindow {
     try {
       const bottom = this.snapshot.records?.at(-1)?.endedAt ?? Number.NEGATIVE_INFINITY;
       for (const id of ids) {
-        const page = await this.connection.clients.operations.listOperations({
+        const page = await client(this.connection, OperationService).listOperations({
           repo: this.repoId ?? this.repo,
           atOperation: id,
           pageSize: 1,
@@ -468,7 +468,7 @@ export class OperationWindow {
     let token = "";
     try {
       for (;;) {
-        const page = await this.connection.clients.operations.listOperations({
+        const page = await client(this.connection, OperationService).listOperations({
           repo: this.repoId,
           pageSize: Math.min(PAGE_SIZE, WINDOW_CAP - listed.size),
           pageToken: token,
@@ -593,7 +593,7 @@ export class OperationWindow {
         set({ state: "inside", id: operation.id, operation });
         return;
       }
-      const page = await this.connection.clients.operations.listOperations({
+      const page = await client(this.connection, OperationService).listOperations({
         repo: this.repoId ?? this.repo,
         atOperation: operation.id,
         pageSize: PAGE_SIZE,

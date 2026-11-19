@@ -4,9 +4,9 @@
 // is its own (R2.21), and the three repository pages share a frame keyed by
 // the repository.
 import { useEffect, useMemo, useState } from "react";
-import type { Connection } from "./api/connection";
+import { client, type Connection } from "./api/connection";
 import { isSessionInvalid, reefError, type ReefError } from "./api/errors";
-import type { GetDaemonStatusResponse } from "./gen/reef/api/v1/daemon_pb";
+import { DaemonService, type GetDaemonStatusResponse } from "./gen/reef/api/v1/daemon_pb";
 import { animationFrame, type FrameScheduler } from "./live/frame";
 import { Live, type LiveEnvironment } from "./live/share";
 import { endSession } from "./session";
@@ -43,17 +43,19 @@ function useDaemonStatus(connection: Connection, onSessionInvalid: () => void) {
   const [error, setError] = useState<ReefError | null>(null);
   useEffect(() => {
     let current = true;
-    connection.clients.daemon.getDaemonStatus({}).then(
-      (response) => {
-        if (current) setStatus(response);
-      },
-      (thrown: unknown) => {
-        if (!current) return;
-        const error = reefError(thrown);
-        if (isSessionInvalid(error)) onSessionInvalid();
-        else setError(error);
-      },
-    );
+    client(connection, DaemonService)
+      .getDaemonStatus({})
+      .then(
+        (response) => {
+          if (current) setStatus(response);
+        },
+        (thrown: unknown) => {
+          if (!current) return;
+          const error = reefError(thrown);
+          if (isSessionInvalid(error)) onSessionInvalid();
+          else setError(error);
+        },
+      );
     return () => {
       current = false;
     };

@@ -1,11 +1,11 @@
 // R2.21 test 6: the scrubber over a window of an in-memory log.
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Operation } from "../gen/reef/api/v1/operations_pb";
 import { OperationStore } from "../live/operations";
 import { OperationWindow } from "../log/window";
 import { immediateFrames, operationsFrame, settle } from "../test/fakes";
 import { FakeOplog, REPO, T } from "../test/oplog-daemon";
+import { act, cleanup, fireEvent, render, screen } from "../test/testing-library";
 import { navigate, useSearch } from "./router";
 import { COMMIT_DELAY_MS, Scrubber } from "./Scrubber";
 import { withDevMode } from "../test/dev-mode";

@@ -23,7 +23,7 @@ function browser() {
   const streams = new FakeStreams();
   /** A tab; `refused` says whether the daemon refuses its token. */
   const tab = (frame = manualFrames(), refused: () => boolean = () => false) => {
-    const live = new Live(streams.connection(refused), environment(frame.frame, shared));
+    const live = new Live(streams.connection({ refused }), environment(frame.frame, shared));
     const ended = { value: false };
     live.onEnded(() => {
       ended.value = true;

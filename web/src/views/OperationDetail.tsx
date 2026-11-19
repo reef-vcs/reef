@@ -2,12 +2,13 @@
 // operation as `GetOperation` returns it, with its effects. All text is
 // rendered as text.
 import { useEffect, useState } from "react";
-import type { Connection } from "../api/connection";
+import { client, type Connection } from "../api/connection";
 import { isSessionInvalid, reefError, type ReefError } from "../api/errors";
 import {
-  ChangeEffectKind,
   type ChangeEffect,
+  ChangeEffectKind,
   type Operation,
+  OperationService,
 } from "../gen/reef/api/v1/operations_pb";
 import type { Row } from "../log/coalesce";
 import { Identity } from "../ui/Avatar";
@@ -203,19 +204,21 @@ export function OperationDetail({
     // Keyed by `op`, so a cached answer is already the initial state.
     if (cache.get(op)) return;
     let current = true;
-    connection.clients.operations.getOperation({ repo, operationId: op }).then(
-      (response) => {
-        if (!current || !response.operation) return;
-        cache.set(op, response.operation);
-        setAnswer({ op, operation: response.operation });
-      },
-      (thrown: unknown) => {
-        if (!current) return;
-        const error = reefError(thrown);
-        if (isSessionInvalid(error)) onSessionInvalid();
-        else setAnswer({ op, error });
-      },
-    );
+    client(connection, OperationService)
+      .getOperation({ repo, operationId: op })
+      .then(
+        (response) => {
+          if (!current || !response.operation) return;
+          cache.set(op, response.operation);
+          setAnswer({ op, operation: response.operation });
+        },
+        (thrown: unknown) => {
+          if (!current) return;
+          const error = reefError(thrown);
+          if (isSessionInvalid(error)) onSessionInvalid();
+          else setAnswer({ op, error });
+        },
+      );
     return () => {
       current = false;
     };

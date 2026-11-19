@@ -4,7 +4,7 @@
 import { create } from "@bufbuild/protobuf";
 import { timestampFromMs } from "@bufbuild/protobuf/wkt";
 import { createRouterTransport } from "@connectrpc/connect";
-import { connectionOver, type Connection } from "../api/connection";
+import type { Connection } from "../api/connection";
 import {
   ChangeSchema,
   ChangeService,
@@ -210,6 +210,6 @@ export class FakeRepoDaemon {
         },
       });
     });
-    return connectionOver(transport, "test");
+    return { transport, label: "test" };
   }
 }

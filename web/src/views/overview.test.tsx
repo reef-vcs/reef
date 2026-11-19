@@ -2,9 +2,7 @@
 // stores the test feeds.
 import { create } from "@bufbuild/protobuf";
 import { Code, createRouterTransport } from "@connectrpc/connect";
-import { act, cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { connectionOver } from "../api/connection";
 import {
   ListOperationsResponseSchema,
   OperationKind,
@@ -27,6 +25,7 @@ import {
   presenceFrame,
   settle,
 } from "../test/fakes";
+import { act, cleanup, render, screen, within } from "../test/testing-library";
 import { setDevMode } from "../ui/dev-mode";
 import { Overview } from "./Overview";
 import { RELOAD_EVERY_MS } from "./overview-model";
@@ -88,7 +87,7 @@ function setup(daemon: Partial<Daemon> = {}, live = true) {
   const onSessionInvalid = vi.fn();
   render(
     <Overview
-      connection={connectionOver(transport, "test")}
+      connection={{ transport, label: "test" }}
       live={{ operations, presence } as unknown as Live}
       frame={immediateFrames}
       onSessionInvalid={onSessionInvalid}

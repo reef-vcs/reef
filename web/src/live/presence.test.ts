@@ -62,18 +62,14 @@ describe("PresenceStore", () => {
     const store = new PresenceStore(manualFrames().frame);
     const streams = new FakeStreams();
     const controller = new AbortController();
-    const done = runPresence(
-      (signal) => streams.connection().clients.presence.subscribePresence({}, { signal }),
-      store,
-      {
-        signal: controller.signal,
-        backoff: new Backoff(),
-        sleep: async () => {
-          await settle(1);
-        },
-        onSessionInvalid: vi.fn(),
+    const done = runPresence((signal) => streams.subscribePresence({}, { signal }), store, {
+      signal: controller.signal,
+      backoff: new Backoff(),
+      sleep: async () => {
+        await settle(1);
       },
-    );
+      onSessionInvalid: vi.fn(),
+    });
     await settle();
     streams.lastPresence().push(presenceFrame([{ id: "p1" }, { id: "p2" }], true));
     await settle();

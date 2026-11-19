@@ -1,7 +1,7 @@
 // R2.21 test 9: a page loaded by `import()`, while it loads and when it fails.
-import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import { settle } from "../test/fakes";
+import { act, cleanup, render, screen } from "../test/testing-library";
 import { lazyRoute } from "./lazy-route";
 
 afterEach(cleanup);
