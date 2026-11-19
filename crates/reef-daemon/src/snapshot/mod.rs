@@ -825,9 +825,8 @@ impl Scheduler {
         let _ = id;
     }
 
-    /// Test hook: while set, every snapshot fails after the scan hold and
-    /// after taking its carry, before it scans, with an I/O error, as on a
-    /// full disk.
+    /// Test hook: while set, every snapshot fails after the scan hold,
+    /// before it scans, with an I/O error, as on a full disk.
     #[cfg(any(test, feature = "testing"))]
     pub fn fail_scans(&self, fail: bool) {
         self.inner.fail_scans.store(fail, Ordering::SeqCst);

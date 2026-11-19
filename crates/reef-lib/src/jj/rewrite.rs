@@ -323,10 +323,6 @@ pub struct WorkingCopy {
     pub tree: String,
     /// The change has more than one visible commit.
     pub divergent: bool,
-    /// Its parent's change and tree, when it has exactly one parent: what
-    /// tells a new empty change on a rewritten commit (a landing's new
-    /// working-copy commit) from any other move (ADR 0071).
-    pub parent: Option<(ChangeIdHex, String)>,
 }
 
 /// A commit's tree as comparable text.
@@ -360,20 +356,12 @@ async fn working_copy(
         .await
         .map_err(|error| RewriteError::Revision(RevisionError::Other(error.into())))?
         .is_some_and(|targets| targets.is_divergent());
-    let parent = match commit.parent_ids() {
-        [only] => {
-            let parent = repo.store().get_commit_async(only).await?;
-            Some((ChangeIdHex::of(parent.change_id()), tree_text(&parent)))
-        }
-        _ => None,
-    };
     Ok(WorkingCopy {
         workspace: name.to_owned(),
         commit_id: CommitIdHex::of(commit.id()),
         change_id: ChangeIdHex::of(commit.change_id()),
         tree: tree_text(&commit),
         divergent,
-        parent,
     })
 }
 

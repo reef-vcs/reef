@@ -17,13 +17,16 @@
 //!
 //! # Carried snapshots
 //!
-//! A write by Reef that moves a workspace to another commit of its change
-//! hands the workspace's next snapshot a [`Carry`] (issue #80, ADR 0039).
-//! When that snapshot finds the working copy stale with edits of its own,
-//! and the carry names exactly the move, it records the three-way merge of
-//! the write's tree and the files on disk, over the tree the working copy
-//! last recorded, as a rewrite of the write's commit, instead of diverging.
-//! The merged tree also holds the write's changes, which are not on disk:
+//! A stale working copy with edits of its own is not always ADR 0018's
+//! divergence. When Reef itself moved the workspace's working-copy commit
+//! (a write, issue #80 and ADR 0039, or another workspace's snapshot that
+//! rebased it, ADR 0084), the snapshot records the three-way merge of the
+//! commit's tree and the files on disk, over the tree of the commit the
+//! working copy was checked out from, as a rewrite of the view's commit,
+//! instead of diverging. Who moved it is read from the operation log
+//! ([`moved_by_reef`]), at the head the snapshot scans with or commits on:
+//! nothing is handed from the mover to the workspace. The merged tree also
+//! holds the mover's changes, which are not on disk:
 //! [`PendingSnapshot::check_out_carried`] writes them after the commit and
 //! before [`PendingSnapshot::finish`].
 //!
@@ -226,22 +229,18 @@ impl Classify for SnapshotError {
     }
 }
 
-/// Reef's own write moved this workspace's working copy from `from` to `to`,
-/// two commits of one change with different trees (ADR 0039). Given to
-/// [`Repo::begin_snapshot`], it carries the workspace's edits since its last
-/// snapshot onto `to` rather than diverging.
+/// A carried snapshot's commit whose check-out failed: the commit holds
+/// `disk`, the tree that snapshot scanned, and the files do not hold the
+/// rest of the commit yet (ADR 0039). Kept by the workspace and given to
+/// its next [`Repo::begin_snapshot`], which measures its edits from `disk`
+/// rather than from the commit the working copy was checked out from, so
+/// they are not taken twice.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Carry {
-    /// The commit the working copy was checked out from: the caller's
-    /// `expected_commit`.
-    pub from: CommitIdHex,
-    /// The commit the write put the working copy on: the view's.
-    pub to: CommitIdHex,
-    /// The tree the edits are measured from; `None` for the tree the
-    /// working copy last recorded. Set for a carry that is merged again
-    /// after its check-out failed: the disk tree that merge took
-    /// ([`SnapshotPlan::carried`]), so it is not taken twice.
-    pub base: Option<ScannedTree>,
+pub struct Unfinished {
+    /// The commit that snapshot wrote.
+    pub commit: CommitIdHex,
+    /// The tree it scanned.
+    pub disk: ScannedTree,
 }
 
 /// A tree by its ids and conflict labels: plain data.
@@ -275,9 +274,10 @@ pub struct SnapshotPlan {
     /// workspace, so a new commit on `parents`, with a new change id, is
     /// created instead of a rewrite.
     pub recover: Option<Vec<CommitIdHex>>,
-    /// `Some(disk)`: the scan was carried onto `rewrite_of`, a write's
-    /// commit ([`Carry`]): `tree_ids` is the merge, and `disk` is the tree
-    /// on disk it merged, to merge over again if the check-out fails.
+    /// `Some(disk)`: the scan was carried onto `rewrite_of`, the commit
+    /// Reef moved the workspace to ([`moved_by_reef`]): `tree_ids` is the merge,
+    /// and `disk` is the tree on disk it merged, to merge over again if the
+    /// check-out fails ([`Unfinished`]).
     pub carried: Option<ScannedTree>,
     /// `Some`: `rewrite_of` is immutable (on `trunk()` or under a tag), so
     /// the scanned tree is recorded as a new commit on it, with a new change
@@ -906,11 +906,23 @@ impl Repo {
             });
         }
 
+        let mut pending = pending;
         let plan = pending.plan().clone();
         let meta = OpMeta::new(OpKind::Snapshot, description);
         let committed = commit_snapshot(&head, &plan, &meta).await?;
         let finish_start = Instant::now();
-        let finished = pending.finish(&committed.op_id).await;
+        let finished = match plan.carried {
+            // The commit has the mover's changes, which are not on disk.
+            Some(_) => pending
+                .check_out_carried(&committed.repo, &committed.commit_id)
+                .await
+                .map(drop),
+            None => Ok(()),
+        };
+        let finished = match finished {
+            Ok(()) => pending.finish(&committed.op_id).await,
+            Err(error) => Err(error),
+        };
         // The operation is published once committed. Adopt it even if saving
         // the working-copy state failed, so the next snapshot sees a stale
         // working copy instead of building a sibling operation on the old one.
@@ -950,11 +962,13 @@ impl Repo {
     ///   edits since the last update, or with files that already match the
     ///   rewritten commit: check it out on disk
     ///   ([`PendingSnapshot::adopted`]); nothing to commit;
-    /// - stale with edits, and `carry` names this move (its `to` is the
-    ///   view's commit and its `from` is `expected_commit`): plan a rewrite
-    ///   of `to` with the three-way merge of `to`'s tree and the scanned
-    ///   one over the carry's base ([`SnapshotPlan::carried`]), or, when the
-    ///   merge is `to`'s tree, check it out as above (ADR 0039);
+    /// - stale with edits, and Reef moved the working-copy commit from
+    ///   `expected_commit` to the view's ([`moved_by_reef`]): plan a rewrite of
+    ///   the view's commit with the three-way merge of its tree and the
+    ///   scanned one over `expected_commit`'s tree, or over `unfinished`'s
+    ///   when the move includes that commit ([`SnapshotPlan::carried`]),
+    ///   or, when the merge is the view's tree, check it out as above (ADR
+    ///   0039, ADR 0084);
     /// - stale with edits otherwise: plan a rewrite of `expected_commit`
     ///   instead, which makes the change divergent
     ///   ([`SnapshotPlan::divergent`]);
@@ -976,7 +990,7 @@ impl Repo {
     pub async fn begin_snapshot(
         &mut self,
         expected_commit: Option<&CommitIdHex>,
-        carry: Option<&Carry>,
+        unfinished: Option<&Unfinished>,
         extra: &IgnoreSources<'_>,
         prefixes: Option<&[PathBuf]>,
     ) -> Result<PendingSnapshot<'_>, SnapshotError> {
@@ -1071,9 +1085,9 @@ impl Repo {
             }
             Some(wc) => {
                 let last = own_last().await?;
-                match carried_tree(&repo, (wc, &last), carry, &new_tree).await? {
+                match carried_tree(&repo, &name, (wc, &last), unfinished, &new_tree).await? {
                     Some(merged) if merged.tree_ids() == wc.tree_ids() => {
-                        // The edits were already the write's.
+                        // The edits were already the commit's.
                         updated_files = check_out(&mut locked, wc).await?;
                         adopted = true;
                         (CommitIdHex::of(wc.id()), false, false, None)
@@ -1278,37 +1292,180 @@ async fn check_out(
     Ok(stats.updated_files + stats.added_files + stats.removed_files)
 }
 
-/// A carried snapshot's tree, when `carry` names this move: `to` is `wc`,
-/// the view's commit (the write's), and `from` is `last`, the commit the
-/// working copy was checked out from. The tree is the merge of `wc`'s and
-/// the scanned `disk` over the carry's base, by default `last`'s tree
-/// (ADR 0039). `None` otherwise.
+/// A carried snapshot's tree, when Reef moved the working copy from `last`,
+/// the commit it was checked out from, to `wc`, the view's commit
+/// ([`followed`]): the merge of `wc`'s tree and the scanned `disk` over
+/// `last`'s tree, or over `unfinished`'s when the move includes its commit
+/// (ADR 0039). `None` otherwise, and when `wc` is `last`.
 async fn carried_tree(
     repo: &ReadonlyRepo,
+    name: &WorkspaceName,
     (wc, last): (&Commit, &Commit),
-    carry: Option<&Carry>,
+    unfinished: Option<&Unfinished>,
     disk: &MergedTree,
-) -> Result<Option<MergedTree>, BackendError> {
-    let Some(carry) = carry.filter(|carry| {
-        carry.to.as_str() == wc.id().hex() && carry.from.as_str() == last.id().hex()
-    }) else {
+) -> Result<Option<MergedTree>, SnapshotError> {
+    if wc.id() == last.id() {
+        return Ok(None);
+    }
+    let Some(followed) = followed(repo, name, last.id(), unfinished).await? else {
         return Ok(None);
     };
-    let base = match &carry.base {
-        Some(base) => MergedTree::new(
-            Arc::clone(repo.store()),
-            base.tree_ids.clone(),
-            base.labels.clone(),
-        ),
+    let base = match followed.base {
+        Some(base) => MergedTree::new(Arc::clone(repo.store()), base.tree_ids, base.labels),
         None => last.tree(),
     };
-    MergedTree::merge(Merge::from_vec(vec![
+    let merged = MergedTree::merge(Merge::from_vec(vec![
         (wc.tree(), format!("{} (rewritten)", wc.conflict_label())),
         (base, format!("{} (snapshotted)", last.conflict_label())),
         (disk.clone(), "working copy".to_owned()),
     ]))
-    .await
-    .map(Some)
+    .await?;
+    Ok(Some(merged))
+}
+
+/// The most operations [`followed`] reads back from the head.
+const FOLLOW_LIMIT: usize = 1024;
+
+/// What [`followed`] found.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Followed {
+    /// The tree to measure the workspace's edits from, when the move
+    /// includes the [`Unfinished`] commit; `None` for `from`'s tree.
+    base: Option<ScannedTree>,
+}
+
+/// Whether Reef moved workspace `name`'s working-copy commit from `from`
+/// to the commit `repo`'s view has for it, so that edits made on `from`
+/// belong on that commit (ADR 0039, ADR 0084). Read from the operation
+/// log, newest first, back to the operation whose view has `from`: every
+/// operation on the way that moved the commit must be one Reef wrote, and
+/// must have kept the workspace on its change, or put it on a new empty
+/// change on it (a landing, ADR 0071). These moves are not Reef's, and
+/// give `None`, ADR 0018's divergence:
+///
+/// - another jj client's operation, or a merge of operations;
+/// - another workspace's snapshot of the same change (ADR 0018);
+/// - this workspace's own snapshot, other than `unfinished`'s (a crash
+///   between its commit and its row), or `unfinished`'s under a later undo;
+/// - a move further back than [`FOLLOW_LIMIT`] operations, or than the
+///   operations the store still has.
+async fn followed(
+    repo: &ReadonlyRepo,
+    name: &WorkspaceName,
+    from: &CommitId,
+    unfinished: Option<&Unfinished>,
+) -> Result<Option<Followed>, SnapshotError> {
+    let Some(mut now) = repo.view().get_wc_commit_id(name).cloned() else {
+        return Ok(None);
+    };
+    let mut op = repo.operation().clone();
+    let mut base = None;
+    let mut undone = false;
+    for _ in 0..FOLLOW_LIMIT {
+        if now == *from {
+            return Ok(Some(Followed { base }));
+        }
+        let [parent] = op.parent_ids() else {
+            return Ok(None);
+        };
+        let parent = match repo.loader().load_operation(parent).await {
+            Ok(parent) => parent,
+            Err(OpStoreError::ObjectNotFound { .. }) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let Some(was) = parent.view().await?.get_wc_commit_id(name).cloned() else {
+            return Ok(None);
+        };
+        if was != now {
+            let class = super::oplog::classify(&super::oplog::entry(&op));
+            let mover = class
+                .workspace_id
+                .map(|id| format!("{}{id}", super::workspace::REEF_WORKSPACE_PREFIX));
+            let reefs = match class.kind {
+                None | Some(OpKind::External) => false,
+                Some(OpKind::Snapshot) if mover.as_deref() == Some(name.as_str()) => {
+                    let unfinished = unfinished.filter(|own| {
+                        base.is_none() && !undone && own.commit.as_str() == now.hex()
+                    });
+                    if let Some(own) = unfinished {
+                        base = Some(own.disk.clone());
+                    }
+                    base.is_some()
+                }
+                Some(OpKind::Snapshot) => match mover {
+                    Some(mover) => !same_change(repo, &op, &mover, &now).await?,
+                    None => false,
+                },
+                Some(kind) => {
+                    undone |= kind == OpKind::Undo;
+                    true
+                }
+            };
+            if !reefs || !kept_change(repo, &was, &now).await? {
+                return Ok(None);
+            }
+        }
+        now = was;
+        op = parent;
+    }
+    Ok(None)
+}
+
+/// Whether Reef moved workspace `workspace`'s working-copy commit from
+/// `from` to the commit `repo`'s view has for it, read from the operation
+/// log (ADR 0084): every operation since that moved it is one Reef wrote,
+/// and none is another workspace's snapshot of the same change (ADR 0018).
+/// A snapshot planned on `from` is then recorded on the view's commit
+/// ([`onto_moved`]); [`Repo::begin_snapshot`] asks the same of the commit
+/// its working copy was checked out from.
+pub async fn moved_by_reef(
+    repo: &ReadonlyRepo,
+    workspace: &str,
+    from: &CommitIdHex,
+) -> Result<bool, SnapshotError> {
+    let from = commit_id(repo, from)?;
+    let followed = followed(repo, WorkspaceName::new(workspace), &from, None).await?;
+    Ok(followed.is_some())
+}
+
+/// Whether workspace `mover`'s working-copy commit after `op` is in the
+/// change of `commit`: `op`, the mover's snapshot, rewrote the commit both
+/// were on (ADR 0018). True when the mover has none: not known to be
+/// another change's.
+async fn same_change(
+    repo: &ReadonlyRepo,
+    op: &jj_lib::operation::Operation,
+    mover: &str,
+    commit: &CommitId,
+) -> Result<bool, SnapshotError> {
+    let view = op.view().await?;
+    let Some(movers) = view.get_wc_commit_id(WorkspaceName::new(mover)) else {
+        return Ok(true);
+    };
+    let movers = repo.store().get_commit_async(movers).await?;
+    let commit = repo.store().get_commit_async(commit).await?;
+    Ok(movers.change_id() == commit.change_id())
+}
+
+/// Whether a move from `was` to `now` kept the workspace's edits in their
+/// change: `now` is in `was`'s change, or is a new empty change on it (a
+/// landing that rebased the change, ADR 0071), where edits made meanwhile
+/// go, never into the landed commit.
+async fn kept_change(
+    repo: &ReadonlyRepo,
+    was: &CommitId,
+    now: &CommitId,
+) -> Result<bool, SnapshotError> {
+    let was = repo.store().get_commit_async(was).await?;
+    let now = repo.store().get_commit_async(now).await?;
+    if was.change_id() == now.change_id() {
+        return Ok(true);
+    }
+    let [parent] = now.parent_ids() else {
+        return Ok(false);
+    };
+    let parent = repo.store().get_commit_async(parent).await?;
+    Ok(parent.change_id() == was.change_id() && parent.tree_ids() == now.tree_ids())
 }
 
 /// The files on disk under `root` that checking `merged` out over the

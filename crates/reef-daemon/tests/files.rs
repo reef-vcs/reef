@@ -1477,8 +1477,8 @@ async fn edit_late_overlap_is_a_conflict() {
     daemon.stop().await;
 }
 
-// Issue #80, 9: a follow-up that fails leaves the carry on the workspace,
-// and its next snapshot carries.
+// Issue #80, 9: after a follow-up that fails, the workspace's next
+// snapshot carries.
 #[tokio::test(flavor = "multi_thread")]
 async fn failed_follow_carries_at_the_next_snapshot() {
     let (daemon, repo) = fixture().await;
@@ -1530,8 +1530,8 @@ async fn failed_follow_carries_at_the_next_snapshot() {
 }
 
 // Issue #80 (review): a carried follow whose check-out fails after its
-// commit leaves a re-merge carry; the next snapshot checks the commit out
-// and records nothing.
+// commit is merged again over the tree it scanned; the next snapshot
+// checks the commit out and records nothing.
 #[tokio::test(flavor = "multi_thread")]
 async fn failed_check_out_merges_again() {
     let (daemon, repo) = fixture().await;
@@ -1673,7 +1673,7 @@ async fn y_current(client: &Client, repo: &SyntheticRepo, y: &v1::Workspace, pat
 }
 
 // Issue #91 (second review, 1a): two ancestor snapshots before the busy
-// descendant's follow takes its carry join into one carry.
+// descendant's follow are carried as one move.
 #[tokio::test(flavor = "multi_thread")]
 async fn two_ancestor_snapshots_before_the_follow_carry_once() {
     let (daemon, repo) = fixture().await;
@@ -1861,9 +1861,9 @@ async fn a_narrowed_snapshot_merged_at_commit_keeps_a_later_edit() {
     daemon.stop().await;
 }
 
-// Second R3.11 review, F2: a snapshot that took the carry an ancestor's
-// commit handed it, and found nothing changed at the older head, gives the
-// carry back, so the follow carries the edits made since.
+// Second R3.11 review, F2: a snapshot that loaded the head before an
+// ancestor's commit, and found nothing changed there, does not stop the
+// follow from carrying the edits made since.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_unchanged_snapshot_gives_back_the_carry_it_took() {
     let (daemon, repo) = fixture().await;
@@ -1878,17 +1878,17 @@ async fn an_unchanged_snapshot_gives_back_the_carry_it_took() {
         tokio::spawn(async move { client.snapshot_workspace(&repo, &id, "").await.map(drop) })
     };
     until("X waits at its commit", || scheduler.held_commits() == 1).await;
-    // Y's snapshot loads the head, then waits before it takes its carry.
+    // Y's snapshot loads the head, then waits before its scan.
     let scans = scheduler.hold_scans().await;
     let y_task = {
         let (client, repo, id) = (client.clone(), repo.id.clone(), y.id.clone());
         tokio::spawn(async move { client.snapshot_workspace(&repo, &id, "").await.map(drop) })
     };
     until("Y waits before its scan", || scheduler.held_scans() == 1).await;
-    // X commits, handing Y a carry and queueing its follow.
+    // X commits, moving Y and queueing its follow.
     drop(x_hold);
     x_task.await.unwrap().unwrap();
-    // Y's snapshot takes the carry and finds nothing changed; the agent
+    // Y's snapshot finds nothing changed; the agent
     // writes before the follow scans.
     let y_hold = scheduler.hold_commits(y.id.parse().unwrap()).await;
     drop(scans);
@@ -1907,8 +1907,7 @@ async fn an_unchanged_snapshot_gives_back_the_carry_it_took() {
 }
 
 // Third R3.11 review, R3-1: a follow that loaded the head between two
-// ancestor commits takes the carry the second joined onto the first, and
-// scans at the head that carry ends on.
+// ancestor commits carries onto the second at its commit.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_follow_that_loaded_the_head_between_two_ancestor_commits_carries_both() {
     let (daemon, repo) = fixture().await;
@@ -1925,7 +1924,7 @@ async fn a_follow_that_loaded_the_head_between_two_ancestor_commits_carries_both
         scheduler.held_commits() == 1
     })
     .await;
-    // X's first commit hands Y a carry and queues its follow, which waits
+    // X's first commit moves Y and queues its follow, which waits
     // for Y's scan lock.
     write(&x, "x2.txt", "x2\n");
     snapshot(client, &repo, &x).await;
@@ -1949,7 +1948,7 @@ async fn a_follow_that_loaded_the_head_between_two_ancestor_commits_carries_both
         scheduler.held_scans() >= 1
     })
     .await;
-    // X's second commit hands Y a carry that joins the pending one.
+    // X's second commit moves Y again.
     drop(x_hold);
     x_task.await.unwrap().unwrap();
     write(&y, "y-late.txt", "late\n");
@@ -2028,9 +2027,8 @@ async fn a_describe_below_then_an_ancestor_snapshot_carries() {
 }
 
 // Fifth R3.11 review, R5-1: a describe pauses Y, X's snapshot then rebases
-// Y's commit without a carry (a paused workspace is the write's to follow),
-// and the describe keeps that tree. Y's files are still its row's, so the
-// describe's follow checks X's file out and carries Y's edit.
+// Y's commit, and the describe keeps that tree. Y's files are still its
+// row's, so the describe's follow checks X's file out and carries Y's edit.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_write_follows_a_descendant_an_ancestor_moved_while_it_was_paused() {
     let (daemon, repo) = fixture().await;
@@ -2186,5 +2184,91 @@ async fn busy_descendant_carries_through_an_ancestors_snapshot() {
         );
     }
     assert_eq!(divergent_changes(client, &repo).await, Vec::<String>::new());
+    daemon.stop().await;
+}
+
+// Sixth R3.11 review, R6-1: a describe of Y, by change id, pauses Y. After
+// its write and before its follow, X's snapshot rebases Y's commit. Y
+// carries its edit onto that commit and gets X's file.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_ancestor_commit_between_a_describe_and_its_follow_is_followed() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let scheduler = daemon.handle.state().manager.scheduler();
+    let (x, y) = stacked(client, &repo).await;
+    let hold = scheduler.hold_follows().await;
+    let describe = {
+        let (client, repo, change) = (client.clone(), repo.id.clone(), y.change_id.clone());
+        tokio::spawn(async move {
+            client
+                .describe_change(v1::DescribeChangeRequest {
+                    repo,
+                    revision: change,
+                    description: "y\n".to_owned(),
+                    ..v1::DescribeChangeRequest::default()
+                })
+                .await
+                .map(drop)
+        })
+    };
+    until("the describe waits at its follow", || {
+        scheduler.held_follows() == 1
+    })
+    .await;
+    write(&x, "x2.txt", "x2\n");
+    snapshot(client, &repo, &x).await;
+    write(&y, "y-late.txt", "late\n");
+    drop(hold);
+    describe.await.unwrap().unwrap();
+    snapshot(client, &repo, &y).await;
+    y_current(
+        client,
+        &repo,
+        &y,
+        &["x.txt", "x2.txt", "y.txt", "y-late.txt"],
+    )
+    .await;
+    daemon.stop().await;
+}
+
+// Sixth R3.11 review, R6-1: the same with an edit of Y's change, which
+// changes its tree: the follow's snapshot carries across the edit and X's
+// snapshot after it.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_ancestor_commit_between_an_edit_and_its_follow_is_followed() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let scheduler = daemon.handle.state().manager.scheduler();
+    let (x, y) = stacked(client, &repo).await;
+    let hold = scheduler.hold_follows().await;
+    let editing = {
+        let (client, request) = (
+            client.clone(),
+            rewrite(
+                &repo,
+                None,
+                &y.change_id,
+                vec![content("y-edit.txt", "e\n")],
+            ),
+        );
+        tokio::spawn(async move { client.edit_files(request).await.map(drop) })
+    };
+    until("the edit waits at its follow", || {
+        scheduler.held_follows() == 1
+    })
+    .await;
+    write(&x, "x2.txt", "x2\n");
+    snapshot(client, &repo, &x).await;
+    write(&y, "y-late.txt", "late\n");
+    drop(hold);
+    editing.await.unwrap().unwrap();
+    snapshot(client, &repo, &y).await;
+    y_current(
+        client,
+        &repo,
+        &y,
+        &["x.txt", "x2.txt", "y.txt", "y-edit.txt", "y-late.txt"],
+    )
+    .await;
     daemon.stop().await;
 }

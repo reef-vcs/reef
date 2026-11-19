@@ -17,7 +17,7 @@ use reef_lib::jj::{
 };
 
 use super::reclaim::ending;
-use super::{CarrySlot, Inspected, ManagerError, ReadSnapshot, WorkspaceEntry, op_meta};
+use super::{Inspected, ManagerError, ReadSnapshot, WorkspaceEntry, op_meta};
 use crate::backend::fs_util::remove_tree_async;
 use crate::backend::{BackendKind, BaseCache, WorkspacePaths, backend_for};
 use crate::config::Config;
@@ -739,7 +739,7 @@ impl Manager {
                 last_scan: Mutex::new(None),
                 spec: Mutex::new(spec),
                 stores: Mutex::new(stores),
-                carry: CarrySlot::default(),
+                unfinished: Mutex::new(None),
                 follow_pending: std::sync::atomic::AtomicBool::new(false),
             };
             self.insert_entry(id, Arc::new(entry));

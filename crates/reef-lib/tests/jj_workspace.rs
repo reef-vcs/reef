@@ -30,10 +30,10 @@ use reef_lib::jj::settings::user_settings_with_max_new_file_size;
 use reef_lib::jj::settings::{Identity, user_settings};
 use reef_lib::jj::workspace::CommitLookupError;
 use reef_lib::jj::{
-    Carry, ChangeIdHex, CommitIdHex, CreateWorkspaceError, ForgetWorkspaceError, IgnoreSources,
-    OpenError, Repo, StartPoint, commit_snapshot,
+    ChangeIdHex, CommitIdHex, CreateWorkspaceError, ForgetWorkspaceError, IgnoreSources, OpenError,
+    Repo, StartPoint, commit_snapshot,
 };
-use reef_lib::jj::{OpKind, OpMeta};
+use reef_lib::jj::{OpKind, OpMeta, Unfinished};
 use tempfile::TempDir;
 
 fn settings() -> UserSettings {
@@ -695,9 +695,18 @@ async fn stale_diverges_when_dirty() {
 
 /// One Reef workspace, `reef-y`, on a new change with `files` snapshotted
 /// at commit C; the fixture's `main` is loaded at head to write on it.
+/// The busy workspace's id: its snapshots name it, as the daemon's do.
+const Y: &str = "00000000000000bb";
+
+fn y_snapshot() -> OpMeta {
+    OpMeta::new(OpKind::Snapshot, "reef: snapshot workspace y").workspace(Y)
+}
+
 async fn busy_workspace(fx: &mut Fixture, files: &[(&str, &str)]) -> (Repo, PathBuf, CommitIdHex) {
     let base = fx.main.wc_change().unwrap().commit_id;
-    let (mut y, y_root, _) = fx.create("reef-y", StartPoint::NewOn(base)).await;
+    let (mut y, y_root, _) = fx
+        .create(&format!("reef-{Y}"), StartPoint::NewOn(base))
+        .await;
     for (path, contents) in files {
         write(&y_root, path, contents);
     }
@@ -749,33 +758,29 @@ async fn visible_commits(fx: &Fixture, change: &ChangeIdHex) -> BTreeSet<CommitI
     }
 }
 
-/// Snapshots `y` with `carry` against `main`'s head, commits and checks the
-/// carried commit out, and finishes. Returns the committed snapshot and how
-/// many files the check-out wrote.
+/// Snapshots `y`, which `main`'s head moved from `expected` to `to`,
+/// against that head, commits and checks the carried commit out, and
+/// saves; returns the commit and the files checked out.
 async fn carry_snapshot(
     fx: &Fixture,
     y: &mut Repo,
-    expected: &CommitIdHex,
-    carry: &Carry,
+    (expected, to): (&CommitIdHex, &CommitIdHex),
+    unfinished: Option<&Unfinished>,
 ) -> (reef_lib::jj::SnapshotCommit, u32) {
     y.set_head(Arc::clone(fx.main.head()));
     let mut pending = y
-        .begin_snapshot(Some(expected), Some(carry), &IgnoreSources::default(), None)
+        .begin_snapshot(Some(expected), unfinished, &IgnoreSources::default(), None)
         .await
         .unwrap();
     assert!(pending.changed());
     assert!(pending.carried());
     assert!(!pending.adopted());
     let plan = pending.plan().clone();
-    assert_eq!(plan.rewrite_of, carry.to);
+    assert_eq!(&plan.rewrite_of, to);
     assert!(!plan.divergent);
-    let committed = commit_snapshot(
-        fx.main.head(),
-        &plan,
-        &OpMeta::new(OpKind::Snapshot, "reef: snapshot workspace y"),
-    )
-    .await
-    .unwrap();
+    let committed = commit_snapshot(fx.main.head(), &plan, &y_snapshot())
+        .await
+        .unwrap();
     assert!(!committed.divergent);
     let files = pending
         .check_out_carried(&committed.repo, &committed.commit_id)
@@ -786,9 +791,10 @@ async fn carry_snapshot(
     (committed, files)
 }
 
-// Issue #80: a stale working copy with edits, given the carry of the write
-// that moved it, records the merge of the write and its edits as a rewrite
-// of the write's commit, in the same change, and checks it out.
+// Issue #80: a stale working copy with edits, moved by a write of Reef's,
+// records the merge of the write and its edits as a rewrite of the write's
+// commit, in the same change, and checks it out. Nothing tells it of the
+// write: it reads the operation log (ADR 0084).
 #[tokio::test]
 async fn stale_carries_onto_the_rewrite() {
     let mut fx = Fixture::new().await;
@@ -803,12 +809,7 @@ async fn stale_carries_onto_the_rewrite() {
     write(&y_root, "late.txt", "late\n");
     write(&y_root, "b.txt", "late b\n");
 
-    let carry = Carry {
-        from: c.clone(),
-        to: c2,
-        base: None,
-    };
-    let (committed, files) = carry_snapshot(&fx, &mut y, &c, &carry).await;
+    let (committed, files) = carry_snapshot(&fx, &mut y, (&c, &c2), None).await;
     assert_eq!(committed.change_id, change);
     assert_eq!(files, 2, "the write's a.txt and api.txt");
     for (path, contents) in [
@@ -837,7 +838,7 @@ async fn stale_carries_onto_the_rewrite() {
     );
 
     // The working copy is fresh again: the next edit rewrites the carried
-    // commit, with no carry.
+    // commit.
     write(&y_root, "after.txt", "after\n");
     let pending = y
         .begin_snapshot(
@@ -864,12 +865,7 @@ async fn carry_leaves_overlap_as_a_conflict() {
     let c2 = write_on(&mut fx, &c, &[content("a.txt", "two\n")]).await;
     write(&y_root, "a.txt", "three\n");
 
-    let carry = Carry {
-        from: c.clone(),
-        to: c2,
-        base: None,
-    };
-    let (committed, _) = carry_snapshot(&fx, &mut y, &c, &carry).await;
+    let (committed, _) = carry_snapshot(&fx, &mut y, (&c, &c2), None).await;
     assert_eq!(
         conflicted_paths(&committed.repo, &committed.commit_id, 10).unwrap(),
         (vec!["a.txt".to_owned()], 1)
@@ -931,13 +927,8 @@ async fn carry_merges_modes_and_deletions() {
     write(&y_root, "big.bin", &"x".repeat(2048));
 
     y.set_head(Arc::clone(fx.main.head()));
-    let carry = Carry {
-        from: c.clone(),
-        to: c2,
-        base: None,
-    };
     let pending = y
-        .begin_snapshot(Some(&c), Some(&carry), &IgnoreSources::default(), None)
+        .begin_snapshot(Some(&c), None, &IgnoreSources::default(), None)
         .await
         .unwrap();
     assert_eq!(
@@ -949,7 +940,7 @@ async fn carry_merges_modes_and_deletions() {
         ["big.bin"]
     );
     drop(pending);
-    let (committed, _) = carry_snapshot(&fx, &mut y, &c, &carry).await;
+    let (committed, _) = carry_snapshot(&fx, &mut y, (&c, &c2), None).await;
     let (repo, id) = (&committed.repo, &committed.commit_id);
     assert_eq!(
         file_in(repo, id, "run.sh").await.as_deref(),
@@ -983,61 +974,152 @@ async fn carry_merges_modes_and_deletions() {
     assert!(y_root.join("big.bin").is_file());
 }
 
-// Issue #80: a carry that does not name this move is ignored, and ADR
-// 0018's fourth arm diverges as before; the carry, not the shape of the
-// change, decides.
+// ADR 0084: two writes of Reef's before the snapshot are followed as one
+// move, from the commit the working copy was checked out from to the
+// view's.
 #[tokio::test]
-async fn carry_that_does_not_match_takes_arm_four() {
+async fn two_writes_carry_as_one_move() {
     let mut fx = Fixture::new().await;
     let (mut y, y_root, c) = busy_workspace(&mut fx, &[("a.txt", "a\n")]).await;
     let c2 = write_on(&mut fx, &c, &[content("api.txt", "api\n")]).await;
     let c3 = write_on(&mut fx, &c2, &[content("api2.txt", "api\n")]).await;
     write(&y_root, "late.txt", "late\n");
-    y.set_head(Arc::clone(fx.main.head()));
-    let other = fx.main.commit_parents(&c).await.unwrap().remove(0);
-    for carry in [
-        // (a) another write moved the working copy on since.
-        Carry {
-            from: c.clone(),
-            to: c2.clone(),
-            base: None,
-        },
-        // (b) not the commit it was checked out from.
-        Carry {
-            from: other,
-            to: c3.clone(),
-            base: None,
-        },
-    ] {
-        let pending = y
-            .begin_snapshot(Some(&c), Some(&carry), &IgnoreSources::default(), None)
-            .await
-            .unwrap();
-        assert!(pending.changed());
-        assert!(!pending.carried(), "{carry:?}");
-        assert_eq!(pending.plan().rewrite_of, c);
-        assert!(pending.plan().divergent);
+    let (committed, files) = carry_snapshot(&fx, &mut y, (&c, &c3), None).await;
+    assert_eq!(files, 2, "both writes' files");
+    for path in ["a.txt", "api.txt", "api2.txt", "late.txt"] {
+        assert!(y_root.join(path).is_file(), "{path} on disk");
+        assert!(
+            file_in(&committed.repo, &committed.commit_id, path)
+                .await
+                .is_some(),
+            "{path} in the commit"
+        );
     }
+}
 
-    // (c) two workspaces on one change: a carry naming x's snapshot carries
-    // y's edits onto it (the daemon never makes this carry).
-    let (_fx, mut x, x_root, mut y, y_root) = two_on_one_change().await;
-    let shared = y.wc_change().unwrap().commit_id;
-    write(&x_root, "from-x.txt", "x\n");
-    write(&y_root, "from-y.txt", "y\n");
-    let x_snapshot = x.snapshot("reef: snapshot workspace x").await.unwrap();
-    y.set_head(Arc::clone(x.head()));
-    let carry = Carry {
-        from: shared.clone(),
-        to: x_snapshot.wc_commit.clone(),
-        base: None,
-    };
+// ADR 0018's fourth arm stands for a move that is not Reef's: another jj
+// client's rewrite, a commit the working copy was not checked out from,
+// and another workspace's snapshot of the same change. The operation log,
+// not the shape of the change, decides.
+#[tokio::test]
+async fn a_move_that_is_not_reefs_takes_arm_four() {
+    // (a) another jj client rewrote the commit.
+    let mut fx = Fixture::new().await;
+    let (mut y, y_root, c) = busy_workspace(&mut fx, &[("a.txt", "a\n")]).await;
+    fx.main
+        .edit_commit(
+            &c,
+            &[content("api.txt", "api\n")],
+            None,
+            &OpMeta::new(OpKind::External, "another client's rewrite"),
+        )
+        .await
+        .unwrap()
+        .expect("the edit changed the tree");
+    write(&y_root, "late.txt", "late\n");
+    y.set_head(Arc::clone(fx.main.head()));
     let pending = y
-        .begin_snapshot(Some(&shared), Some(&carry), &IgnoreSources::default(), None)
+        .begin_snapshot(Some(&c), None, &IgnoreSources::default(), None)
         .await
         .unwrap();
-    assert!(pending.carried());
-    assert_eq!(pending.plan().rewrite_of, x_snapshot.wc_commit);
+    assert!(pending.changed());
+    assert!(!pending.carried());
+    assert_eq!(pending.plan().rewrite_of, c);
+    assert!(pending.plan().divergent);
+    drop(pending);
+
+    // (b) Reef's write, but the row names a commit the view never had for
+    // this workspace.
+    let mut fx = Fixture::new().await;
+    let (mut y, y_root, c) = busy_workspace(&mut fx, &[("a.txt", "a\n")]).await;
+    write_on(&mut fx, &c, &[content("api.txt", "api\n")]).await;
+    write(&y_root, "late.txt", "late\n");
+    y.set_head(Arc::clone(fx.main.head()));
+    let other = fx.main.commit_parents(&c).await.unwrap().remove(0);
+    let pending = y
+        .begin_snapshot(Some(&other), None, &IgnoreSources::default(), None)
+        .await
+        .unwrap();
+    assert!(!pending.carried());
+    assert_eq!(pending.plan().rewrite_of, other);
+    drop(pending);
+
+    // (c) two workspaces on one change: x's snapshot is not y's to follow.
+    let x_id = "00000000000000aa";
+    let mut fx = Fixture::new().await;
+    let base = fx.main.wc_change().unwrap().commit_id;
+    let (mut x, x_root, _) = fx
+        .create(&format!("reef-{x_id}"), StartPoint::NewOn(base))
+        .await;
+    let shared = x.wc_change().unwrap().commit_id;
+    let (mut y, y_root, _) = fx
+        .create(&format!("reef-{Y}"), StartPoint::Edit(shared.clone()))
+        .await;
+    write(&x_root, "from-x.txt", "x\n");
+    write(&y_root, "from-y.txt", "y\n");
+    x.set_head(Arc::clone(fx.main.head()));
+    let pending = x
+        .begin_snapshot(Some(&shared), None, &IgnoreSources::default(), None)
+        .await
+        .unwrap();
+    let meta = OpMeta::new(OpKind::Snapshot, "reef: snapshot workspace x").workspace(x_id);
+    let x_snapshot = commit_snapshot(fx.main.head(), pending.plan(), &meta)
+        .await
+        .unwrap();
+    pending.finish(&x_snapshot.op_id).await.unwrap();
+    y.set_head(Arc::clone(&x_snapshot.repo));
+    let pending = y
+        .begin_snapshot(Some(&shared), None, &IgnoreSources::default(), None)
+        .await
+        .unwrap();
+    assert!(!pending.carried());
+    assert_eq!(pending.plan().rewrite_of, shared);
+    assert!(pending.plan().divergent);
+}
+
+// ADR 0084: a snapshot of the workspace below, which rebases this one's
+// commit, is Reef's move: the edits made meanwhile are carried onto the
+// rebased commit.
+#[tokio::test]
+async fn a_snapshot_below_carries() {
+    let x_id = "00000000000000aa";
+    let mut fx = Fixture::new().await;
+    let base = fx.main.wc_change().unwrap().commit_id;
+    let (mut x, x_root, _) = fx
+        .create(&format!("reef-{x_id}"), StartPoint::NewOn(base))
+        .await;
+    let below = x.wc_change().unwrap().commit_id;
+    let (mut y, y_root, _) = fx
+        .create(&format!("reef-{Y}"), StartPoint::NewOn(below.clone()))
+        .await;
+    let c = y.wc_change().unwrap().commit_id;
+    write(&x_root, "from-x.txt", "x\n");
+    write(&y_root, "from-y.txt", "y\n");
+    x.set_head(Arc::clone(fx.main.head()));
+    let pending = x
+        .begin_snapshot(Some(&below), None, &IgnoreSources::default(), None)
+        .await
+        .unwrap();
+    let meta = OpMeta::new(OpKind::Snapshot, "reef: snapshot workspace x").workspace(x_id);
+    let x_snapshot = commit_snapshot(fx.main.head(), pending.plan(), &meta)
+        .await
+        .unwrap();
+    pending.finish(&x_snapshot.op_id).await.unwrap();
+    fx.main.set_head(Arc::clone(&x_snapshot.repo));
+    let rebased = reef_lib::jj::view_wc_commit(fx.main.head(), &format!("reef-{Y}")).unwrap();
+    assert_ne!(rebased, c);
+
+    let (committed, files) = carry_snapshot(&fx, &mut y, (&c, &rebased), None).await;
+    assert_eq!(files, 1, "x's file");
+    for path in ["from-x.txt", "from-y.txt"] {
+        assert!(y_root.join(path).is_file(), "{path} on disk");
+        assert!(
+            file_in(&committed.repo, &committed.commit_id, path)
+                .await
+                .is_some(),
+            "{path} in the commit"
+        );
+    }
 }
 
 // Issue #80: a carried snapshot whose check-out failed is merged again over
@@ -1062,34 +1144,33 @@ async fn carry_is_idempotent() {
         write(&y_root, "late.txt", "late\n");
 
         y.set_head(Arc::clone(fx.main.head()));
-        let carry = Carry {
-            from: c.clone(),
-            to: c2,
-            base: None,
-        };
         let pending = y
-            .begin_snapshot(Some(&c), Some(&carry), &IgnoreSources::default(), None)
+            .begin_snapshot(Some(&c), None, &IgnoreSources::default(), None)
             .await
             .unwrap();
         assert!(pending.carried());
         let plan = pending.plan().clone();
-        let committed = commit_snapshot(
-            fx.main.head(),
-            &plan,
-            &OpMeta::new(OpKind::Snapshot, "reef: snapshot workspace y"),
-        )
-        .await
-        .unwrap();
+        assert_eq!(plan.rewrite_of, c2);
+        let committed = commit_snapshot(fx.main.head(), &plan, &y_snapshot())
+            .await
+            .unwrap();
         // The check-out fails: nothing is checked out or saved.
         drop(pending);
         let conflicts = conflicted_paths(&committed.repo, &committed.commit_id, 10).unwrap();
         assert_eq!(conflicts.1, usize::from(conflict));
 
         y.set_head(Arc::clone(&committed.repo));
-        let again = Carry {
-            from: c.clone(),
-            to: committed.commit_id.clone(),
-            base: plan.carried.clone(),
+        // Its own commit, unexplained (a crash between commit and row): arm
+        // four, as before ADR 0084.
+        let pending = y
+            .begin_snapshot(Some(&c), None, &IgnoreSources::default(), None)
+            .await
+            .unwrap();
+        assert!(!pending.carried() && pending.plan().divergent);
+        drop(pending);
+        let again = Unfinished {
+            commit: committed.commit_id.clone(),
+            disk: plan.carried.clone().unwrap(),
         };
         let pending = y
             .begin_snapshot(Some(&c), Some(&again), &IgnoreSources::default(), None)
@@ -1124,24 +1205,16 @@ async fn carry_does_not_overwrite_an_edit_after_the_scan() {
     write(&y_root, "late.txt", "late\n");
 
     y.set_head(Arc::clone(fx.main.head()));
-    let carry = Carry {
-        from: c.clone(),
-        to: c2,
-        base: None,
-    };
     let mut pending = y
-        .begin_snapshot(Some(&c), Some(&carry), &IgnoreSources::default(), None)
+        .begin_snapshot(Some(&c), None, &IgnoreSources::default(), None)
         .await
         .unwrap();
     assert!(pending.carried());
     let plan = pending.plan().clone();
-    let committed = commit_snapshot(
-        fx.main.head(),
-        &plan,
-        &OpMeta::new(OpKind::Snapshot, "reef: snapshot workspace y"),
-    )
-    .await
-    .unwrap();
+    assert_eq!(plan.rewrite_of, c2);
+    let committed = commit_snapshot(fx.main.head(), &plan, &y_snapshot())
+        .await
+        .unwrap();
     // The agent edits the write's path between the scan and the check-out.
     write(&y_root, "a.txt", "agent's a, written later\n");
     let error = pending
@@ -1158,14 +1231,13 @@ async fn carry_does_not_overwrite_an_edit_after_the_scan() {
         "agent's a, written later\n"
     );
 
-    // The daemon's re-merge carry: the new edit meets the write's.
+    // The daemon's re-merge: the new edit meets the write's.
     fx.main.set_head(Arc::clone(&committed.repo));
-    let again = Carry {
-        from: c.clone(),
-        to: committed.commit_id.clone(),
-        base: plan.carried.clone(),
+    let again = Unfinished {
+        commit: committed.commit_id.clone(),
+        disk: plan.carried.clone().unwrap(),
     };
-    let (merged, _) = carry_snapshot(&fx, &mut y, &c, &again).await;
+    let (merged, _) = carry_snapshot(&fx, &mut y, (&c, &committed.commit_id), Some(&again)).await;
     assert_eq!(
         conflicted_paths(&merged.repo, &merged.commit_id, 10).unwrap(),
         (vec!["a.txt".to_owned()], 1)

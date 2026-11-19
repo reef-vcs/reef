@@ -17,12 +17,24 @@ jj already rebases a change's descendants in the operation that rewrites it, kee
 
 ## Decision
 
-1. **Descendant workspaces follow an ancestor's snapshot.** In the repository-thread job that commits a snapshot, the daemon compares the working copies before and after. Every other Reef workspace on another change whose commit the snapshot's rebase moved gets a carry from its row's commit ([0039](0039-carrying-edits-through-a-write.md)), unless a write has paused it. The workspace is then snapshotted after the ancestor's snapshot, descendants first:
+1. **Descendant workspaces follow an ancestor's snapshot.** In the repository-thread job that commits a snapshot, the daemon compares the working copies before and after. Every other Reef workspace on another change whose commit the snapshot's rebase moved is marked as owed a follow, and is snapshotted after the ancestor's snapshot, descendants first:
    - an idle workspace checks the new tree out (#202);
    - a busy one carries its edits onto the rebased commit, in the same change (#91);
    - another workspace on the same change still diverges, as [0018](0018-snapshot-staleness-and-divergence.md) says.
 
-   A carry handed out while another is pending joins it: two ancestor snapshots before the follow give one carry from the first commit to the last. Every snapshot takes its carry in the repository-thread job that reads its head, the kind of job that hands carries out, so the carry ends on that head's view of the workspace; a carry handed out later is a move its commit finds, as below. A move that keeps the tree carries too, amending [0039](0039-carrying-edits-through-a-write.md): an ancestor that adds a descendant's own file with the same bytes, or a describe, moves the descendant's commit, and without the carry a snapshot that scanned the old commit would diverge the change. A write's follow updates only the row of a workspace whose row was on the commit it moved and whose tree it kept, and that spends the carry; any other locked workspace it moved is snapshotted, since its files are its row's commit's. A descendant that scanned before an ancestor's snapshot rebased its commit is not diverged either. On the repository thread, its commit finds the view's commit for it is the one the carry moved its planned commit to. It rewrites that commit instead, with the three-way merge of the rebased tree and the scanned tree over the planned commit's tree. The check-out then writes the ancestor's files, after checking that each file it overwrites still holds, byte for byte, what the scan read; after a watcher's narrowed scan that includes the files the scan itself recorded. A snapshot that took a carry and recorded nothing gives it back unless the working copy ended on the carry's commit, so the follow still carries.
+   **A carry is read from the operation log. Nothing is handed to the workspace.** This amends [0039](0039-carrying-edits-through-a-write.md), whose carry was a value the mover put in a slot of the moved workspace. A snapshot now asks one question: did Reef move this workspace's working-copy commit from commit A to the commit the view has for it? It asks at the two places where the answer decides between a merge and a divergent change:
+   - **After the scan**, when the working copy is stale and has edits. A is the commit the workspace's row names. If Reef moved it, the snapshot records [0039](0039-carrying-edits-through-a-write.md)'s three-way merge as a rewrite of the view's commit. If not, it diverges ([0018](0018-snapshot-staleness-and-divergence.md)).
+   - **In the repository-thread job that commits**, when the view's commit is no longer the one the scan planned to rewrite. A is the planned commit. If Reef moved it, the job rewrites the view's commit with the three-way merge of the rebased tree and the scanned tree over the planned commit's tree. The check-out then writes the ancestor's files, after checking that each file it overwrites still holds, byte for byte, what the scan read; after a watcher's narrowed scan that includes the files the scan itself recorded.
+
+   The answer is a function of the head the snapshot holds (`reef_lib::jj::snapshot::followed`). It walks the operations back from that head to the one whose view has A for the workspace. Every operation on the way that moved the workspace's commit must be one Reef wrote, by its `reef.kind`. It must also have kept the workspace on its change, or put it on a new empty change on that change (a landing, [0071](0071-rebasing-and-following-trunk.md)). The tree does not matter: a describe, or an ancestor that adds a descendant's own file with the same bytes, is a move like any other. These moves are not Reef's, and the snapshot diverges as before:
+   - another jj client's operation, or a merge of two operation heads;
+   - another workspace's snapshot of the same change, told by its `reef.workspace` ([0018](0018-snapshot-staleness-and-divergence.md));
+   - the workspace's own snapshot, when its row was never written (a crash between the commit and the row);
+   - a move further back than 1,024 operations, or than the operations garbage collection kept.
+
+   Two things stay in memory, and each has one owner. The follow mark is set by the commit that moves a workspace and cleared by the next job that loads a head for that workspace's snapshot, both on the repository thread. It only saves a second follow. The commit of a carried snapshot whose check-out failed is kept by the workspace with the tree that snapshot scanned, and read by the workspace's next snapshot under its own scan lock. It measures the edits from that tree, so they are not taken twice, when the walk finds that commit written by the workspace's own snapshot with no undo after it.
+
+   A write's follow ([0031](0031-writes-over-jj-state.md) step 5) updates only the row of a workspace whose row was on the commit the write moved and whose tree it kept. Any other locked workspace it moved is snapshotted, since its files are its row's commit's. A snapshot that commits while a write holds a descendant marks and queues that descendant's follow like any other. The follow waits for the write to let go, so a commit between the write and the write's own follow is not missed.
 2. **A proposal follows its dependency when its own work did not change.** A `proposed` change is **carried** to its visible commit when that commit meets all of these:
    - its parents are new commits of the recorded commit's parent changes (or of a superseded parent's successor);
    - it has no conflict;
@@ -43,6 +55,50 @@ jj already rebases a change's descendants in the operation that rewrites it, kee
 5. **The dependent's agent is told.** The daemon writes one instruction, on every destination, through [0081](0081-automatic-landing.md)'s writer: fixed templates over ids, and none while another of the daemon's is unfinished on the change. It goes to the session that proposed the dependent when its dependency leaves review, or when a rewrite below leaves it conflicted. A clean carry writes nothing. The same text is not written again since the dependent's latest transition other than a carry, nor since the dependency left review.
 6. **Supersede moves the dependents.** If the rebase is refused before it writes (a divergent dependent, too many to move, a commit that moved meanwhile), the supersede is recorded alone and `moved` reports them with `rebase_refused`. `TransitionChange` to `SUPERSEDED` rebases the superseded change's mutable children (a new `RebaseMode::Children`) and their descendants onto the superseding change. The rebase and the transition are one operation of kind `transition`, written through `Manager::rewrite`, so the dependents' workspaces follow. Dependents that still apply are carried at once with event `superseded`, each naming the successor, its children's children too. `UndoOperation` of that operation reverts the rebase and records the inverse transition in one operation of kind `undo`, its workspaces following. A child the successor descends from is left, and `TransitionChangeResponse.moved` reports it.
 7. **Bounds.** Schema 25 (`0027_dependent_lifecycle`: two columns on `lifecycle_transitions`), API revision 41, S-243 to S-249. The carry follower checks at most 64 moved proposals per look; missing dependencies cost one query when nothing was ever declined or withdrawn, else one index read before any stack is read. The daemon's instructions go out from the carry follower, outside every lock.
+
+## Why the carry is derived
+
+Five review rounds each found one more interleaving in which a descendant diverged or missed files. Each was in the same mechanism: a carry put in a per-workspace slot by the mover (set, join, take, give back) while snapshots, writes, pauses and ancestor commits interleaved. Each fix closed one ordering: a second carry replaced the first; a snapshot raced the ancestor's commit; the head was loaded before a joined carry; a same-tree rebase handed out no carry; a paused workspace was skipped.
+
+Every one of those fixes assumed that a workspace learns how its commit moved from what the mover hands it. We tested that assumption instead of patching a sixth ordering.
+
+**What the slot held, and where each part is read now.**
+
+| In the slot | Read from |
+| --- | --- |
+| `from` and `to` | The row's commit (or the plan's) and the view's commit at the head the snapshot holds. `begin_snapshot` already compared the carry with exactly these two. |
+| That Reef made the move | Each operation's `reef.kind` and `reef.workspace`. This is the one fact the two commits do not give. [0039](0039-carrying-edits-through-a-write.md) rejected inferring the carry from the change for that reason: another workspace's snapshot of a shared change and a Reef edit of it look the same in the commit graph. The operation log tells them apart. |
+| Two carries joined | The walk crosses every operation that moved the workspace. |
+| A carry for a move that kept the tree | The walk does not read trees. |
+| The carry taken in the job that loads the head | The answer is a function of that head. |
+| No carry for a paused workspace | There is no carry to withhold. |
+| A landing onto a new empty change | The same shape test, made per operation. |
+| The tree a failed check-out had merged (`base`) | Not in the repository. It stays in memory, written and read only by the workspace's own snapshots. |
+
+The stamps of a narrowed scan were never in the slot: they belong to the snapshot in flight. A working copy ahead of the daemon's head (the jj CLI) reloads the head and asks again.
+
+**Evidence.** `crates/reef-daemon/tests/stack_stress.rs` drives a stack of two or three workspaces through seeded scripts of agent writes, snapshots, and describes and edits by change id, with the daemon's hold hooks taken and released between them. Half the seeds end by superseding the bottom change while the workspaces above write. After each scene it checks that no change diverged, no agent's bytes were lost, and every workspace holds the files of the changes below it before any snapshot of it is asked for.
+
+| Code | Seeds 1 to 30 that fail |
+| --- | --- |
+| The slot, as reviewed (29b863f4) | 7: five workspaces that never follow, two divergent changes |
+| The slot, without the commit-time merge (second review, 1b) | 10, eight of them divergent |
+| The slot, without joined carries (second review, 1a) | 12, eleven of them divergent |
+| Derived | 0 |
+
+The three rows for the slot were measured before the supersede scene was added. The derived carry then passed seeds 1 to 1,500 with it, in 28 minutes on four daemons. A plain test run covers 12 seeds; `REEF_STACK_STRESS_SEEDS` sets the count.
+
+Reading the change alone, without asking who moved it, is not enough: with that one condition removed, six tests fail, among them `stale_diverges_when_dirty` in `reef-lib` and in the daemon, which hold [0018](0018-snapshot-staleness-and-divergence.md)'s rule for two workspaces on one change.
+
+The regression tests of all six reviews pass against the derived carry with their assertions unchanged. The unit tests of the slot and of the function that built carries went with them.
+
+**What it costs.** One operation and one view are read per operation since the move, only for a snapshot that is stale with edits or whose commit moved under its scan. A follow runs right after the move, so the walk is a few operations long.
+
+**What else changes.**
+
+- A daemon restart between a move and the follow no longer diverges the change: the operation log is still there. [0039](0039-carrying-edits-through-a-write.md)'s alternative of persisting carries is moot. This follows from the rule and has no test of its own.
+- Any operation Reef writes that moves a workspace within its change is followed, with no code at the writer. That now includes a fetch or a git ref import that rebases a workspace's commit, which diverged a busy workspace before.
+- A workspace with unsnapshotted edits that garbage collection of operations separates from its last snapshot diverges, where the slot would still have carried.
 
 ## Consequences
 
