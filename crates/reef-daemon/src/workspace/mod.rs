@@ -109,6 +109,9 @@ pub struct WorkspaceEntry {
     /// What a write that moved it within its change hands its next
     /// snapshot (issue #80, ADR 0039).
     pub carry: CarrySlot,
+    /// A follow snapshot after an ancestor's snapshot is queued and has not
+    /// started (#91, #202): another ancestor snapshot queues none.
+    pub follow_pending: std::sync::atomic::AtomicBool,
 }
 
 /// A workspace's last scans that succeeded ([`WorkspaceEntry::last_scan`]).

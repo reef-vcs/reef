@@ -519,9 +519,18 @@ pub(super) fn fill(state: &AppState, repo: RepoId, conflicts: &mut [v1::Conflict
         };
         if let Some(row) = rows
             .iter()
-            .find(|row| row.change_id == change && row.kind == assign::KIND_TREE)
+            .find(|row| row.change_id == change && row.kind == kind_of(conflict))
         {
             conflict.assignment = Some(assignment_message(state, &mut names, row, 0));
         }
+    }
+}
+
+/// The assignment kind a conflict's kind is assigned under (R3.11).
+fn kind_of(conflict: &v1::Conflict) -> &'static str {
+    if conflict.kind() == v1::ConflictKind::MissingDependency {
+        assign::KIND_DEPENDENCY
+    } else {
+        assign::KIND_TREE
     }
 }

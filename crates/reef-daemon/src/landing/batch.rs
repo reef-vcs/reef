@@ -1947,6 +1947,8 @@ async fn land_prefix_part(
             superseded_by: String::new(),
             destination: member.target.bookmark.clone(),
             undoes: String::new(),
+            dependency: String::new(),
+            dependency_event: String::new(),
         });
         rows.push(transition);
     }

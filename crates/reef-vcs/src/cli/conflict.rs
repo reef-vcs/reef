@@ -95,6 +95,10 @@ struct ListArgs {
 /// `reef conflict show`.
 #[derive(Debug, clap::Args)]
 struct ShowArgs {
+    /// The kind to show: `tree` (jj's stored conflict) or `dependency`
+    /// (`missing_dependency`: a change below it was declined or withdrawn).
+    #[arg(long, value_name = "KIND", default_value = "tree", value_parser = ["tree", "dependency", "missing_dependency"])]
+    kind: String,
     /// The conflicted revision [default: the workspace's change].
     #[arg(short = 'r', long = "revision", value_name = "REV")]
     revision: Option<String>,
@@ -111,11 +115,12 @@ struct ShowArgs {
     scope: ScopeArgs,
 }
 
-/// A conflict's kind: `tree` (jj's stored conflict); later tickets add
-/// others.
+/// A conflict's kind: `tree` (jj's stored conflict) or `missing_dependency`
+/// (R3.11).
 pub(crate) fn kind_name(kind: i32) -> Option<&'static str> {
     match v1::ConflictKind::try_from(kind) {
         Ok(v1::ConflictKind::Tree) => Some("tree"),
+        Ok(v1::ConflictKind::MissingDependency) => Some("missing_dependency"),
         Ok(v1::ConflictKind::Unspecified) => None,
         Err(_) => Some(json::UNKNOWN),
     }
@@ -317,7 +322,8 @@ pub(crate) struct ConflictFile {
 pub(crate) struct Conflict {
     /// `cfl_` and 32 hex digits.
     id: String,
-    /// `tree`: jj's stored conflict.
+    /// `tree`: jj's stored conflict; `missing_dependency`: a change below
+    /// the proposal was declined or withdrawn (R3.11).
     #[schemars(schema_with = "kind_schema")]
     kind: Option<String>,
     /// The conflicted commit.
@@ -339,6 +345,10 @@ pub(crate) struct Conflict {
     /// The change's open resolver assignment (R3.27), as it is now.
     #[serde(skip_serializing_if = "Option::is_none")]
     assignment: Option<json::ConflictAssignment>,
+    /// `missing_dependency`: the change below that was declined or
+    /// withdrawn, and the command that moves off it (R3.11).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dependency: Option<json::MissingDependency>,
 }
 
 fn provenance_of(summary: &v1::ConflictSideProvenance) -> ConflictSideProvenance {
@@ -437,6 +447,10 @@ impl From<&v1::Conflict> for Conflict {
                 .assignment
                 .as_ref()
                 .map(json::ConflictAssignment::from),
+            dependency: conflict
+                .dependency
+                .as_ref()
+                .map(json::MissingDependency::from),
         }
     }
 }
@@ -473,6 +487,12 @@ pub(crate) struct BriefConflict<'a> {
     assignment: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     assignment_state: Option<&'a str>,
+    /// `missing_dependency` (R3.11): the missing change and the command
+    /// that moves off it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dependency: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next: Option<&'a [String]>,
 }
 
 impl<'a> From<&'a Conflict> for BriefConflict<'a> {
@@ -495,6 +515,14 @@ impl<'a> From<&'a Conflict> for BriefConflict<'a> {
                 })
                 .collect(),
             assignment: conflict.assignment.as_ref().map(|a| a.id.as_str()),
+            dependency: conflict
+                .dependency
+                .as_ref()
+                .map(|missing| missing.change_id.as_str()),
+            next: conflict
+                .dependency
+                .as_ref()
+                .map(|missing| missing.next.as_slice()),
             assignment_state: conflict
                 .assignment
                 .as_ref()
@@ -676,6 +704,39 @@ impl Conflict {
 impl TextRender for Conflict {
     fn render(&self, w: &mut dyn Write) -> io::Result<()> {
         let change = self.change.as_ref();
+        if let Some(missing) = &self.dependency {
+            let transition = missing.transition.as_ref();
+            writeln!(
+                w,
+                "conflict {}  change {}  missing dependency: change {} was {}",
+                self.id,
+                change.map_or_else(String::new, |c| short_change(&c.change_id)),
+                short_change(&missing.change_id),
+                missing.state.as_deref().unwrap_or("declined"),
+            )?;
+            if let Some(transition) = transition {
+                writeln!(
+                    w,
+                    "  by {} {} at {}",
+                    transition.actor.as_deref().unwrap_or("someone"),
+                    clean(
+                        transition
+                            .agent
+                            .as_deref()
+                            .or(transition.identity.as_deref())
+                            .unwrap_or("")
+                    ),
+                    transition.recorded_at.as_deref().unwrap_or("")
+                )?;
+                if let Some(reason) = &transition.reason {
+                    writeln!(w, "  reason (untrusted): {}", clean(reason))?;
+                }
+            }
+            if !missing.next.is_empty() {
+                writeln!(w, "  move off it: {}", missing.next.join(" "))?;
+            }
+            return Ok(());
+        }
         writeln!(
             w,
             "conflict {}  change {}  commit {}  {} sides  {} files ({} introduced)",
@@ -848,6 +909,11 @@ async fn show(ctx: &Ctx, args: ShowArgs) -> Result<(), CliError> {
             paths: args.paths,
             hunks: args.hunks,
             policy_input: args.policy_input,
+            kind: if args.kind == "tree" {
+                v1::ConflictKind::Tree.into()
+            } else {
+                v1::ConflictKind::MissingDependency.into()
+            },
             ..GetConflictRequest::default()
         })))
         .await
@@ -876,7 +942,7 @@ mod tests {
 
     #[test]
     fn names_cover_every_value() {
-        for n in 1..=1 {
+        for n in 1..=2 {
             assert!(kind_name(n).is_some_and(|name| name != json::UNKNOWN));
         }
         for n in 1..=2 {

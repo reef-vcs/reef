@@ -128,9 +128,42 @@ pub(crate) async fn send(
         .as_ref()
         .and_then(|row| row.destination.clone())
         .unwrap_or_default();
+    let text = text(outcome, change, &destination, status);
+    // An amended change's instruction is about its visible commit.
+    let expected = if outcome == Outcome::Amended {
+        String::new()
+    } else {
+        status.commit.clone()
+    };
+    write(
+        state,
+        repo,
+        change,
+        text,
+        expected,
+        super::batch::AGENT,
+        &format!("{outcome:?}"),
+    )
+    .await;
+}
+
+/// Writes the daemon's instruction `text` on `change` as `agent`, about
+/// `expected` (its commit; empty for the visible one), unless it has one
+/// with the same text since its latest transition, or one still unfinished
+/// (S-229). Shared with R3.11's dependents. Failures are logged: an
+/// instruction never stops its caller.
+pub(crate) async fn write(
+    state: &std::sync::Arc<AppState>,
+    repo: RepoId,
+    change: &str,
+    text: String,
+    expected: String,
+    agent: &str,
+    what: &str,
+) {
+    let row = state.db.lifecycle_row(repo, change).ok().flatten();
     // One per proposal: a re-proposal (a new transition) may be told again.
     let since = row.map_or(crate::model::Timestamp(0), |row| row.updated_at);
-    let text = text(outcome, change, &destination, status);
     let digest = reef_policy::sha256_hex(text.as_bytes());
     match state.db.daemon_instructions(repo, change, since, &digest) {
         Ok((false, false)) => {}
@@ -149,12 +182,7 @@ pub(crate) async fn send(
         user_email: state.settings.user_email().to_owned(),
         root: record.root,
         revision: change_revision(change),
-        // An amended change's instruction is about its visible commit.
-        expected_commit: if outcome == Outcome::Amended {
-            String::new()
-        } else {
-            status.commit.clone()
-        },
+        expected_commit: expected,
         anchor: None,
         reply_to: String::new(),
         kind: Some(Kind::Instruction),
@@ -162,19 +190,24 @@ pub(crate) async fn send(
         actor: Some(Actor::Daemon),
         confirm: false,
         ceilings: None,
-        agent: Some(super::batch::AGENT.to_owned()),
+        agent: Some(agent.to_owned()),
         remote: None,
         help: None,
         client_session: String::new(),
     };
     match comments::create(state, request).await {
         Ok(written) => {
-            tracing::info!(repo = %repo, change_id = change, comment_id = %written.comment.id, outcome = ?outcome, "told the proposing agent");
+            tracing::info!(repo = %repo, change_id = change, comment_id = %written.comment.id, what, "told the proposing agent");
         }
         Err(error) => {
             tracing::warn!(repo = %repo, change_id = change, error = %ErrorChain(&error), "cannot tell the proposing agent");
         }
     }
+}
+
+/// [`safe`], for R3.11's templates.
+pub(crate) fn safe_id(text: &str) -> String {
+    safe(text)
 }
 
 #[cfg(test)]

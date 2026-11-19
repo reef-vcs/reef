@@ -583,7 +583,9 @@ impl Db {
         })
     }
 
-    /// `change`'s open assignment, else its most recently closed one.
+    /// `change`'s open assignment of a tree conflict, else its most recently
+    /// closed one. A `dependency` assignment (R3.11) is read through the
+    /// conflict it belongs to, never by its change alone.
     pub fn assignment_of_change(
         &self,
         repo: RepoId,
@@ -592,7 +594,8 @@ impl Db {
         self.with(|conn| {
             conn.query_row(
                 &format!(
-                    "SELECT {COLUMNS} FROM conflict_assignments WHERE repo_id = ?1 AND change_id = ?2
+                    "SELECT {COLUMNS} FROM conflict_assignments
+                     WHERE repo_id = ?1 AND change_id = ?2 AND kind = 'tree'
                      ORDER BY closed_at IS NOT NULL, closed_at DESC, opened_at DESC LIMIT 1"
                 ),
                 params![repo, change],
@@ -661,7 +664,7 @@ impl Db {
             let mut stmt = conn.prepare(&format!(
                 "SELECT {COLUMNS} FROM conflict_assignments
                  WHERE repo_id = ?1 AND change_id = ?2 AND closed_at IS NOT NULL
-                   AND reason = 'resolved'
+                   AND reason = 'resolved' AND kind = 'tree'
                  ORDER BY closed_at, id"
             ))?;
             stmt.query_map(params![repo, change], from_row)?.collect()

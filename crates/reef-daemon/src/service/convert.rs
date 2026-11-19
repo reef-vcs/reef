@@ -281,6 +281,7 @@ impl From<WorkspaceView<'_>> for v1::Workspace {
             help_request_id: String::new(),
             conflict_assignment_id: String::new(),
             conflict_block_reason: v1::ConflictAssignmentReason::Unspecified.into(),
+            missing_dependency: None,
         }
     }
 }

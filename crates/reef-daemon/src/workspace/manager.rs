@@ -740,6 +740,7 @@ impl Manager {
                 spec: Mutex::new(spec),
                 stores: Mutex::new(stores),
                 carry: CarrySlot::default(),
+                follow_pending: std::sync::atomic::AtomicBool::new(false),
             };
             self.insert_entry(id, Arc::new(entry));
             if !releasing {

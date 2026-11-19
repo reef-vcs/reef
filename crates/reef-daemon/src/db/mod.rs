@@ -100,7 +100,7 @@ pub use lifecycle::{
 /// `0021_landing_stacks` (R3.10), `0023_automatic_landing` (R3.45;
 /// `0022` is #262's), `0025_help_requests` (R3.32) and
 /// `0026_resolution_tiers` (R3.28, numbered after R3.32's, which merged
-/// first; `0024` is unused).
+/// first; `0024` is unused) and `0027_dependent_lifecycle` (R3.11).
 /// They are independent of each other, so a database may have a later one
 /// without an earlier one; see [`migrate`].
 const MIGRATIONS: &[(&str, &str)] = &[
@@ -184,6 +184,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0026_resolution_tiers",
         include_str!("migrations/0026_resolution_tiers.sql"),
+    ),
+    (
+        "0027_dependent_lifecycle",
+        include_str!("migrations/0027_dependent_lifecycle.sql"),
     ),
 ];
 
@@ -963,7 +967,8 @@ mod tests {
                 "0021_landing_stacks",
                 "0023_automatic_landing",
                 "0025_help_requests",
-                "0026_resolution_tiers"
+                "0026_resolution_tiers",
+                "0027_dependent_lifecycle"
             ]
         );
         // A newer daemon applied a migration this binary does not have, without
@@ -1016,7 +1021,8 @@ mod tests {
                 "0021_landing_stacks",
                 "0023_automatic_landing",
                 "0025_help_requests",
-                "0026_resolution_tiers"
+                "0026_resolution_tiers",
+                "0027_dependent_lifecycle"
             ]
         );
         let repo = "aaaa000000000001".parse().unwrap();

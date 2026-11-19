@@ -331,6 +331,7 @@ impl Manager {
             spec: Mutex::new(spec),
             stores: Mutex::new(stores),
             carry: CarrySlot::default(),
+            follow_pending: std::sync::atomic::AtomicBool::new(false),
         };
         self.insert_entry(record.id, Arc::new(entry));
         self.scheduler.track(record.id, TrackReason::Created).await;

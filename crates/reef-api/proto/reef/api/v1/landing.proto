@@ -81,8 +81,11 @@ service LandingService {
   // Errors: the revision reasons of ChangeService for `revision`;
   // EXPECTED_COMMIT_MISMATCH; FAILED_PRECONDITION with reason NOT_PROPOSED
   // (metadata `change_id`, `state`; the revision or a member of its stack),
-  // PROPOSAL_AMENDED (metadata `change_id`, `commit_id`,
-  // `visible_commit_id`), STACK_DESTINATION_MISMATCH (metadata `change_id`,
+  // DEPENDENCY_LEFT_REVIEW (metadata `change_id`, `state`, `transition_id`;
+  // a member below the revision declined or withdrawn at its current
+  // commit, R3.11), PROPOSAL_AMENDED (metadata `change_id`, `commit_id`,
+  // `visible_commit_id`; a dependent whose own diff is unchanged is carried
+  // first, R3.11), STACK_DESTINATION_MISMATCH (metadata `change_id`,
   // `destination`), STACK_TOO_LARGE (metadata `size`, `max`),
   // DESTINATION_NOT_LOCAL, DESTINATION_NOT_FOUND or DESTINATION_CONFLICTED
   // (metadata `destination`); UNAVAILABLE with reason QUEUE_FULL (metadata
@@ -211,6 +214,9 @@ enum LandingReason {
   // The change edits reef-policy.toml or reef-checks.toml above the bottom
   // of its stack (R3.10): it lands on its own, after the changes below it.
   LANDING_REASON_ALONE = 11;
+  // A change below it in its stack was declined or withdrawn (R3.11):
+  // move it off that change, or withdraw it.
+  LANDING_REASON_DEPENDENCY = 12;
 }
 
 // One change of a landing.

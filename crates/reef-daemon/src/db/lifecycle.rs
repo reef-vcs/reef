@@ -74,6 +74,10 @@ pub struct TransitionRow {
     pub created_at: Timestamp,
     /// The operation's end; `None` while pending.
     pub recorded_at: Option<Timestamp>,
+    /// For a carry (cause `dependency`, R3.11), the change below that moved.
+    pub dependency_change_id: Option<String>,
+    /// For a carry, what happened to it: `amended`, `landed`, `superseded`.
+    pub dependency_event: Option<String>,
 }
 
 /// A change's current lifecycle, as `lifecycle` holds it.
@@ -144,7 +148,8 @@ pub struct TransitionFilter {
 const TRANSITION_COLUMNS: &str = "repo_id, id, seq, status, change_id, commit_id, from_state,
      to_state, cause, round, reason, superseded_by, destination, undoes_operation_id,
      undoes_transition_id, operation_id, operation_collected, agent, actor, identity_id,
-     identity_name, session_id, remote_token, remote_token_name, created_at, recorded_at";
+     identity_name, session_id, remote_token, remote_token_name, created_at, recorded_at,
+     dependency_change_id, dependency_event";
 
 pub(super) const LIFECYCLE_COLUMNS: &str =
     "repo_id, change_id, state, round, commit_id, destination,
@@ -182,6 +187,8 @@ fn transition_from_row(row: &Row<'_>) -> rusqlite::Result<TransitionRow> {
         remote_token_name: text_at(row, 23)?,
         created_at: Timestamp(row.get(24)?),
         recorded_at: row.get::<_, Option<i64>>(25)?.map(Timestamp),
+        dependency_change_id: text_at(row, 26)?,
+        dependency_event: text_at(row, 27)?,
     })
 }
 
@@ -249,7 +256,8 @@ impl Db {
                 &format!(
                     "INSERT INTO lifecycle_transitions({TRANSITION_COLUMNS})
                      VALUES (?1, ?2, NULL, 'pending', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
-                             ?12, ?13, NULL, 0, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, NULL)"
+                             ?12, ?13, NULL, 0, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, NULL,
+                             ?22, ?23)"
                 ),
                 params![
                     row.repo_id,
@@ -273,6 +281,8 @@ impl Db {
                     row.remote_token,
                     row.remote_token_name,
                     row.created_at.0,
+                    row.dependency_change_id,
+                    row.dependency_event,
                 ],
             )?;
             Ok(())
@@ -793,6 +803,8 @@ mod tests {
             remote_token_name: None,
             created_at: Timestamp(1_000),
             recorded_at: None,
+            dependency_change_id: None,
+            dependency_event: None,
         }
     }
 

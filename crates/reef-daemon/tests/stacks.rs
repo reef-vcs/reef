@@ -826,12 +826,14 @@ async fn withdrawn_middle_returns_the_rest() {
         .unwrap();
     let bottom = finished(client, &repo.id, &stack[0].change_id).await;
     assert_eq!(bottom.outcome(), Outcome::Landed, "{bottom:#?}");
+    // The withdrawn change below it is named (R3.11).
     let head = finished(client, &repo.id, &stack[2].change_id).await;
     assert_eq!(
         (head.outcome(), head.reason()),
-        (Outcome::Dequeued, Reason::UnlandedParents),
+        (Outcome::Dequeued, Reason::Dependency),
         "{head:#?}"
     );
+    assert!(head.message.contains(&stack[1].change_id), "{head:#?}");
     daemon.stop().await;
 }
 

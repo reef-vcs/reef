@@ -207,6 +207,7 @@ names_schema! {
     git_host_kind_name_schema_or_null = git_host_kind_name, true;
     assignment_reason_name_schema_or_null = assignment_reason_name, true;
     transition_cause_name_schema_or_null = transition_cause_name, true;
+    dependency_event_name_schema_or_null = dependency_event_name, true;
     comment_kind_name_schema_or_null = comment_kind_name, true;
     disk_level_name_schema = disk_level_name, false;
     instruction_state_name_schema_or_null = instruction_state_name, true;
@@ -469,6 +470,10 @@ pub struct Workspace {
     /// `attempts` (its attempt limit is used up).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub conflict_block_reason: Option<String>,
+    /// With step `dependency`: the change below that was declined or
+    /// withdrawn, and the command that moves off it (R3.11).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub missing_dependency: Option<Box<MissingDependency>>,
 }
 
 /// Another open change that changes a path a workspace's change changes
@@ -799,6 +804,10 @@ impl From<&v1::Workspace> for Workspace {
             conflict_assignment_id: text(&ws.conflict_assignment_id),
             conflict_block_reason: assignment_reason_name(ws.conflict_block_reason)
                 .map(str::to_owned),
+            missing_dependency: ws
+                .missing_dependency
+                .as_deref()
+                .map(|missing| Box::new(MissingDependency::from(missing))),
         }
     }
 }
@@ -1734,7 +1743,7 @@ pub fn lifecycle_state_name(state: i32) -> Option<&'static str> {
 
 /// A change's next step (#262): `work`, `resolve`, `ask` (R3.28),
 /// `describe`, `propose`, `land`, `wait`, `revise`, `publish`, `done` or
-/// `await_help` (R3.32); `None` when unset.
+/// `await_help` (R3.32) or `dependency` (R3.11); `None` when unset.
 pub fn change_step_name(step: i32) -> Option<&'static str> {
     let name = match v1::ChangeStep::try_from(step) {
         Ok(v1::ChangeStep::Unspecified) => return None,
@@ -1749,6 +1758,7 @@ pub fn change_step_name(step: i32) -> Option<&'static str> {
         Ok(v1::ChangeStep::Done) => "done",
         Ok(v1::ChangeStep::AwaitHelp) => "await_help",
         Ok(v1::ChangeStep::Ask) => "ask",
+        Ok(v1::ChangeStep::Dependency) => "dependency",
         Err(_) => UNKNOWN,
     };
     Some(name)
@@ -1759,9 +1769,8 @@ pub fn lifecycle_state_name_or_unknown(state: i32) -> &'static str {
     lifecycle_state_name(state).unwrap_or(UNKNOWN)
 }
 
-/// A transition's cause (R3.09): `request`, `undo`, `observed` or
-/// `landing` (R3.13); `None`
-/// when unset.
+/// A transition's cause (R3.09): `request`, `undo`, `observed`,
+/// `landing` (R3.13) or `dependency` (R3.11); `None` when unset.
 pub fn transition_cause_name(cause: i32) -> Option<&'static str> {
     let name = match v1::TransitionCause::try_from(cause) {
         Ok(v1::TransitionCause::Unspecified) => return None,
@@ -1769,6 +1778,7 @@ pub fn transition_cause_name(cause: i32) -> Option<&'static str> {
         Ok(v1::TransitionCause::Undo) => "undo",
         Ok(v1::TransitionCause::Observed) => "observed",
         Ok(v1::TransitionCause::Landing) => "landing",
+        Ok(v1::TransitionCause::Dependency) => "dependency",
         Err(_) => UNKNOWN,
     };
     Some(name)
@@ -1916,6 +1926,7 @@ pub fn assignment_reason_name(reason: i32) -> Option<&'static str> {
         Ok(R::Ask) => "ask",
         Ok(R::Attempts) => "attempts",
         Ok(R::Allowed) => "allowed",
+        Ok(R::Withdrawn) => "withdrawn",
         Err(_) => UNKNOWN,
     };
     Some(name)
@@ -2344,7 +2355,7 @@ pub struct ChangeTransition {
     /// The state after.
     #[schemars(schema_with = "lifecycle_state_name_schema_or_null")]
     pub to: Option<String>,
-    /// `request`, `undo` or `observed`.
+    /// `request`, `undo`, `observed`, `landing` or `dependency`.
     #[schemars(schema_with = "transition_cause_name_schema_or_null")]
     pub cause: Option<String>,
     /// Its proposal round.
@@ -2375,6 +2386,121 @@ pub struct ChangeTransition {
     /// The remote token the call came through.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote: Option<RemoteCaller>,
+    /// With cause `dependency` (R3.11): the change below that moved, and
+    /// what happened to it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dependency: Option<Box<TransitionDependency>>,
+}
+
+/// The change below a carried proposal (R3.11).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct TransitionDependency {
+    /// The change, in hex.
+    pub change_id: String,
+    /// The same, in jj's reverse hex.
+    pub change_id_reverse_hex: String,
+    /// `amended`, `landed` or `superseded`.
+    #[schemars(schema_with = "dependency_event_name_schema_or_null")]
+    pub event: Option<String>,
+}
+
+/// A carry's event (R3.11): `amended`, `landed` or `superseded`; `None`
+/// when unset.
+pub fn dependency_event_name(event: i32) -> Option<&'static str> {
+    let name = match v1::DependencyEvent::try_from(event) {
+        Ok(v1::DependencyEvent::Unspecified) => return None,
+        Ok(v1::DependencyEvent::Amended) => "amended",
+        Ok(v1::DependencyEvent::Landed) => "landed",
+        Ok(v1::DependencyEvent::Superseded) => "superseded",
+        Err(_) => UNKNOWN,
+    };
+    Some(name)
+}
+
+/// A proposal's dependency that left review (R3.11), and the command that
+/// moves the proposal off it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct MissingDependency {
+    /// The change, in hex.
+    pub change_id: String,
+    /// The same, in jj's reverse hex.
+    pub change_id_reverse_hex: String,
+    /// `declined` or `withdrawn`.
+    #[schemars(schema_with = "lifecycle_state_name_schema_or_null")]
+    pub state: Option<String>,
+    /// The transition that took it out of review; its reason is untrusted
+    /// text.
+    pub transition: Option<ChangeTransition>,
+    /// Moves the changes above it off it: `reef rebase <change> --source
+    /// --onto <change below it, or the destination>`.
+    pub next: Vec<String>,
+}
+
+impl From<&v1::MissingDependency> for MissingDependency {
+    fn from(missing: &v1::MissingDependency) -> Self {
+        Self {
+            change_id: missing.change_id.clone(),
+            change_id_reverse_hex: reverse_hex(&missing.change_id),
+            state: name(lifecycle_state_name(missing.state)),
+            transition: missing.transition.as_ref().map(ChangeTransition::from),
+            next: missing_dependency_next(missing),
+        }
+    }
+}
+
+/// The `reef rebase` that moves a proposal off `missing`, in jj's reverse
+/// hex where it names a change.
+pub fn missing_dependency_next(missing: &v1::MissingDependency) -> Vec<String> {
+    if missing.move_change_id.is_empty() {
+        return Vec::new();
+    }
+    let onto = if missing.move_onto.len() == 32
+        && missing.move_onto.chars().all(|c| c.is_ascii_hexdigit())
+    {
+        reverse_hex(&missing.move_onto)
+    } else {
+        missing.move_onto.clone()
+    };
+    [
+        "reef",
+        "rebase",
+        &reverse_hex(&missing.move_change_id),
+        "--source",
+        "--onto",
+        &onto,
+    ]
+    .map(str::to_owned)
+    .to_vec()
+}
+
+/// A change a proposal depends on (R3.11).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct ProposalDependency {
+    /// The change, in hex.
+    pub change_id: String,
+    /// The same, in jj's reverse hex.
+    pub change_id_reverse_hex: String,
+    /// Its lifecycle now.
+    pub lifecycle: Option<ChangeLifecycle>,
+    /// The agent of its latest proposal.
+    pub proposed_by: Option<String>,
+}
+
+/// A dependent a supersede moved onto the superseding change (R3.11).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct MovedDependent {
+    /// The change, in hex.
+    pub change_id: String,
+    /// The same, in jj's reverse hex.
+    pub change_id_reverse_hex: String,
+    /// Its commit afterwards; `null` when it was left.
+    pub commit_id: Option<String>,
+    /// Its proposal was carried onto the new commit.
+    pub carried: bool,
+    /// The rebase left a conflict in it.
+    pub conflicted: bool,
+    /// Why it was left: `ancestor_of_successor`.
+    pub skipped: Option<String>,
 }
 
 impl From<&v1::ChangeTransition> for ChangeTransition {
@@ -2403,6 +2529,13 @@ impl From<&v1::ChangeTransition> for ChangeTransition {
                 token_id: remote.token_id.clone(),
                 token_name: remote.token_name.clone(),
             }),
+            dependency: transition.dependency.as_deref().map(|dependency| {
+                Box::new(TransitionDependency {
+                    change_id: dependency.change_id.clone(),
+                    change_id_reverse_hex: reverse_hex(&dependency.change_id),
+                    event: name(dependency_event_name(dependency.event)),
+                })
+            }),
         }
     }
 }
@@ -2425,6 +2558,10 @@ pub struct Transitioned {
     /// (R3.10): the change's own and those below it it proposed, withdrew
     /// or declined with it.
     pub transitions: Vec<ChangeTransition>,
+    /// A supersede's dependents, rebased onto the superseding change
+    /// (R3.11).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub moved: Vec<MovedDependent>,
 }
 
 impl From<&v1::TransitionChangeResponse> for Transitioned {
@@ -2439,6 +2576,18 @@ impl From<&v1::TransitionChangeResponse> for Transitioned {
                 .transitions
                 .iter()
                 .map(ChangeTransition::from)
+                .collect(),
+            moved: response
+                .moved
+                .iter()
+                .map(|moved| MovedDependent {
+                    change_id: moved.change_id.clone(),
+                    change_id_reverse_hex: reverse_hex(&moved.change_id),
+                    commit_id: text(&moved.commit_id),
+                    carried: moved.carried,
+                    conflicted: moved.conflicted,
+                    skipped: text(&moved.skipped),
+                })
                 .collect(),
         }
     }
@@ -2471,6 +2620,9 @@ pub struct Proposal {
     pub automatic: Option<AutomaticStatus>,
     /// The conflicts it resolved (R3.28).
     pub resolutions: Vec<ConflictResolution>,
+    /// The changes below it in its stack, bottom first (R3.11); a declined
+    /// or withdrawn one holds it.
+    pub dependencies: Vec<ProposalDependency>,
 }
 
 impl From<&v1::ProposalEntry> for Proposal {
@@ -2486,6 +2638,16 @@ impl From<&v1::ProposalEntry> for Proposal {
                 .resolutions
                 .iter()
                 .map(ConflictResolution::from)
+                .collect(),
+            dependencies: entry
+                .dependencies
+                .iter()
+                .map(|dependency| ProposalDependency {
+                    change_id: dependency.change_id.clone(),
+                    change_id_reverse_hex: reverse_hex(&dependency.change_id),
+                    lifecycle: dependency.lifecycle.as_ref().map(ChangeLifecycle::from),
+                    proposed_by: text(&dependency.proposed_by),
+                })
                 .collect(),
         }
     }

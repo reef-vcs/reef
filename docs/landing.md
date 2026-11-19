@@ -104,7 +104,8 @@ reef land [REV]                # REV's stack, the passing prefix first
 - **The gate judges the changes in order**, each as rebased onto the ones below it. The changes before the first one it refuses are queued, in one operation; that one is `blocked` with its reason, and the changes above it `blocked` with `unlanded_parents`, naming it. A change to `reef-policy.toml` or `reef-checks.toml` lands on its own: at the bottom it is queued and the rest wait for it; above the bottom it is `blocked` with `alone`, after the changes below it are queued.
 - **A stack lands in one land operation**, one commit per change. Its queued changes join a batch together, even past `batch_max` when they are the batch's first; a change on an `[landing] alone` path makes the stack a batch of its own. A change returned from a batch (refused when judged again, conflicting with the batch's earlier changes, or the culprit of a bisect) takes the queued changes above it with it, `unlanded_parents`. This is how a stack lands as a prefix when a later change fails.
 - **A sign-off on a change accepts the changes below it**: a reviewer reads a stack as one diff, so accepting a prefix is signing off its top change ([policy](policy.md#sign-offs-on-a-stack)).
-- **After a prefix lands**, the changes above it were rebased (or summarized) with it, so their proposals read `amended`: fix the change named, `reef propose` the head again, and land it.
+- **After a prefix lands**, the changes above it were rebased (or summarized) with it. A proposal above whose own diff still applies is carried to its new commit by the daemon (cause `dependency`, [proposals](proposals.md#dependents)); one that conflicts reads `amended` with a conflict to resolve, then `reef propose` the head again, and land it.
+- **A change below that was declined or withdrawn** holds the changes above it: `reef land` refuses with `DEPENDENCY_LEFT_REVIEW`, a queued change above it is dequeued with `dependency`, and the `next` moves them off it (`reef rebase <change> --source --onto <below>`).
 
 `reef land` prints a line per change below the head; it exits 0 only when the head landed, which means its whole stack did. MCP agents call `propose_change` and `land_change`, which waits up to two minutes and returns the landing, with `stack`, as a result even when it was refused.
 
@@ -186,6 +187,7 @@ automatic = true    # default false
 | `conflicted` | Rebase the change onto the destination yourself, resolve, propose again. |
 | `unlanded_parents` | A change below it in its stack did not land (the message names it): fix that one, `reef propose` the stack again, land again. |
 | `amended` | The change moved since it was proposed: `reef propose` again. |
+| `dependency` | A change below it in its stack was declined or withdrawn (the message names it and the `reef rebase` that moves this change off it): move it off, or withdraw it. |
 | `destination` | The bookmark is gone or conflicted: fix it, or propose for another with `reef propose --to`. |
 | `busy` | The bookmark moved three times while the landing tried: land again. |
 | `failed` | An internal error, in `message`. |

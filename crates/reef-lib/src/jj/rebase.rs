@@ -47,6 +47,11 @@ pub enum RebaseMode {
     Branch,
     /// The revision's commit and its descendants: `jj rebase -s`.
     Source,
+    /// The revision's mutable children and their descendants, but not
+    /// those the destination descends from: `jj rebase -s 'children(x)'`.
+    /// A supersede moves its change's dependents onto the superseding
+    /// change this way (R3.11).
+    Children,
 }
 
 /// A rebase request, as [`plan`] reads it.
@@ -380,6 +385,7 @@ pub async fn plan(
     // landed: the destination is above it (REBASE_ONTO_DESCENDANT).
     let own = scope.workspace;
     if let Some(own) = own
+        && request.mode != RebaseMode::Children
         && repo.view().get_wc_commit_id(WorkspaceName::new(own)) == Some(commit.id())
         && ((request.onto.is_none()
             && repo
@@ -395,17 +401,7 @@ pub async fn plan(
         }));
     }
 
-    let roots: Vec<CommitId> = match request.mode {
-        RebaseMode::Branch => {
-            let expression = ResolvedRevsetExpression::commits(vec![destination_id.clone()])
-                .range(&ResolvedRevsetExpression::commits(vec![
-                    commit.id().clone(),
-                ]))
-                .roots();
-            collect(repo, &expression).await?
-        }
-        RebaseMode::Source => vec![commit.id().clone()],
-    };
+    let roots = roots_of(repo, request.mode, &commit, &destination_id).await?;
     if roots.is_empty() {
         // The revision is in the destination's ancestry.
         return Ok(plan(Action::UpToDate));
@@ -448,6 +444,48 @@ pub async fn plan(
         moved: moved.iter().map(CommitIdHex::of).collect(),
         workspaces,
     }))
+}
+
+/// The roots a rebase in `mode` moves: those of `commit`'s ancestry the
+/// destination lacks, `commit` itself, or its mutable children the
+/// destination does not descend from.
+async fn roots_of(
+    repo: &ReadonlyRepo,
+    mode: RebaseMode,
+    commit: &Commit,
+    destination_id: &CommitId,
+) -> Result<Vec<CommitId>, RebaseError> {
+    Ok(match mode {
+        RebaseMode::Branch => {
+            let expression = ResolvedRevsetExpression::commits(vec![destination_id.clone()])
+                .range(&ResolvedRevsetExpression::commits(vec![
+                    commit.id().clone(),
+                ]))
+                .roots();
+            collect(repo, &expression).await?
+        }
+        RebaseMode::Source => vec![commit.id().clone()],
+        RebaseMode::Children => {
+            // A child the destination descends from would move onto its
+            // own descendant: it stays.
+            let mut roots = Vec::new();
+            for child in collect(
+                repo,
+                &ResolvedRevsetExpression::commits(vec![commit.id().clone()]).children(),
+            )
+            .await?
+            {
+                if !repo.index().is_ancestor(&child, destination_id).await?
+                    && revset::immutable_head(repo, &CommitIdHex::of(&child))
+                        .await?
+                        .is_none()
+                {
+                    roots.push(child);
+                }
+            }
+            roots
+        }
+    })
 }
 
 /// The commits of `roots::` that are proper ancestors of `commit`: those a
@@ -716,4 +754,38 @@ async fn describe_move(
         introduces_conflict,
         became_empty,
     })
+}
+
+/// The mutable children of `commit` (R3.11's dependents of a superseded
+/// change): those [`RebaseMode::Children`] moves onto `destination`, and
+/// those it leaves because `destination` descends from them, each as its
+/// change.
+pub async fn children_of(
+    repo: &ReadonlyRepo,
+    commit: &CommitIdHex,
+    destination: &CommitIdHex,
+) -> Result<(Vec<ChangeIdHex>, Vec<ChangeIdHex>), RebaseError> {
+    let (mut moves, mut stays) = (Vec::new(), Vec::new());
+    let children = collect(
+        repo,
+        &ResolvedRevsetExpression::commits(vec![commit.to_id()]).children(),
+    )
+    .await?;
+    for child in children {
+        let id = CommitIdHex::of(&child);
+        if revset::immutable_head(repo, &id).await?.is_some() {
+            continue;
+        }
+        let change = ChangeIdHex::of(repo.store().get_commit_async(&child).await?.change_id());
+        if repo
+            .index()
+            .is_ancestor(&child, &destination.to_id())
+            .await?
+        {
+            stays.push(change);
+        } else {
+            moves.push(change);
+        }
+    }
+    Ok((moves, stays))
 }

@@ -119,6 +119,13 @@ pub enum Write {
         /// The remote whose bookmark may stand for a local `trunk()`
         /// behind it; `None` for `origin`.
         remote: Option<String>,
+        /// Transitions to record in the same operation, which is then of
+        /// kind `transition` and described by `description`: a supersede
+        /// that moves its change's dependents onto the superseding change
+        /// (R3.11, [`RebaseMode::Children`]).
+        transitions: Vec<TransitionRecord>,
+        /// The description with `transitions`.
+        description: String,
     },
     /// Give each of `workspaces` whose working-copy commit has landed (is
     /// immutable) a new empty change on it, with `transitions` recorded in
@@ -178,6 +185,7 @@ impl Write {
                 OpKind::Transition
             }
             Write::StartOnLanded { .. } => OpKind::MoveWorkspace,
+            Write::Rebase { transitions, .. } if !transitions.is_empty() => OpKind::Transition,
             Write::Rebase { .. } => OpKind::Rebase,
         }
     }
@@ -678,7 +686,7 @@ fn check(write: &Write) -> Result<(), ManagerError> {
 }
 
 /// The locked workspaces' rows after step 3, by id: change and commit.
-type LockedRows = HashMap<WorkspaceId, (String, CommitIdHex)>;
+pub(super) type LockedRows = HashMap<WorkspaceId, (String, CommitIdHex)>;
 
 fn locked_rows(locked: &[&Arc<WorkspaceEntry>]) -> LockedRows {
     locked
@@ -697,7 +705,7 @@ fn locked_rows(locked: &[&Arc<WorkspaceEntry>]) -> LockedRows {
 /// its row's commit when that is in the change: step 3's snapshot of an
 /// ancestor rebases a descendant's commit without moving its row, and the
 /// descendant's snapshot expects the row's commit.
-fn carries(
+pub(super) fn carries(
     before: &[WorkingCopy],
     after: &[WorkingCopy],
     rows: &LockedRows,
@@ -905,6 +913,7 @@ async fn plan_rebase(
         mode,
         expected,
         remote,
+        ..
     } = write
     else {
         return Ok(Planned {
@@ -1129,6 +1138,8 @@ async fn commit(
             mode,
             expected,
             remote,
+            transitions,
+            description,
         } => {
             let expected = rewrite::parse_expected(&repo, expected)?;
             let jj_name = target.workspace.map(|id| id.jj_workspace_name());
@@ -1166,6 +1177,10 @@ async fn commit(
                     .unwrap_or(planned.change_id.as_str()),
                 planned.destination.name
             );
+            if !transitions.is_empty() {
+                meta.description.clone_from(description);
+                meta.transitions.clone_from(transitions);
+            }
             let rebased = head.repo.rebase(&planned, &meta).await?;
             changed_commit = Some(
                 rebased

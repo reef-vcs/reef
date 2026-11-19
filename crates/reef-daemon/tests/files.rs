@@ -1639,3 +1639,98 @@ async fn raw_channel(socket: &Path) -> tonic::transport::Channel {
         .await
         .unwrap()
 }
+
+/// Waits up to ten seconds for `ready`.
+async fn eventually(what: &str, mut ready: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !ready() {
+        assert!(Instant::now() < deadline, "timed out waiting: {what}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// X on the trunk and Y on X's commit, each with one snapshotted file.
+async fn stacked(client: &Client, repo: &SyntheticRepo) -> (v1::Workspace, v1::Workspace) {
+    let x = create(client, repo, "x@test", None).await;
+    write(&x, "x.txt", "x1\n");
+    snapshot(client, repo, &x).await;
+    let x_row = get(client, repo, &x).await;
+    let y = create(
+        client,
+        repo,
+        "y@test",
+        Some(create_workspace_request::Start::NewOn(x_row.commit_id)),
+    )
+    .await;
+    write(&y, "y.txt", "y\n");
+    snapshot(client, repo, &y).await;
+    (x, y)
+}
+
+// Issue #202: an idle descendant's directory follows its ancestor's
+// snapshot, with no snapshot of its own asked for.
+#[tokio::test(flavor = "multi_thread")]
+async fn idle_descendant_follows_an_ancestors_snapshot() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let (x, y) = stacked(client, &repo).await;
+    write(&x, "x.txt", "x1-edited\n");
+    write(&x, "x2.txt", "x2\n");
+    snapshot(client, &repo, &x).await;
+
+    eventually("Y's directory has X's new files", || {
+        read(&y, "x2.txt").as_deref() == Some("x2\n")
+            && read(&y, "x.txt").as_deref() == Some("x1-edited\n")
+    })
+    .await;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let y_row = loop {
+        let row = get(client, &repo, &y).await;
+        if change_commits(client, &repo, &y.change_id).await == [row.commit_id.clone()] {
+            break row;
+        }
+        assert!(Instant::now() < deadline, "Y's row never followed: {row:?}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert_eq!(
+        change_commits(client, &repo, &y.change_id).await,
+        std::slice::from_ref(&y_row.commit_id)
+    );
+    assert!(!y_row.divergent, "{y_row:?}");
+    assert_eq!(read(&y, "y.txt").as_deref(), Some("y\n"));
+    daemon.stop().await;
+}
+
+// Issue #91: a descendant with unsnapshotted edits carries them onto the
+// commit its ancestor's snapshot rebased, in the same change.
+#[tokio::test(flavor = "multi_thread")]
+async fn busy_descendant_carries_through_an_ancestors_snapshot() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let (x, y) = stacked(client, &repo).await;
+    write(&y, "y-late.txt", "late\n");
+    write(&x, "x2.txt", "x2\n");
+    snapshot(client, &repo, &x).await;
+
+    eventually("Y's directory has X's new file", || {
+        read(&y, "x2.txt").is_some()
+    })
+    .await;
+    snapshot(client, &repo, &y).await;
+    let y_row = get(client, &repo, &y).await;
+    assert_eq!(y_row.change_id, y.change_id);
+    assert_eq!(
+        change_commits(client, &repo, &y.change_id).await,
+        std::slice::from_ref(&y_row.commit_id)
+    );
+    assert!(!y_row.divergent, "{y_row:?}");
+    for path in ["x.txt", "x2.txt", "y.txt", "y-late.txt"] {
+        assert!(read(&y, path).is_some(), "{path} on disk");
+        assert!(
+            file(client, &repo, &y_row.commit_id, path).await.is_some(),
+            "{path} in Y's commit"
+        );
+    }
+    assert_eq!(divergent_changes(client, &repo).await, Vec::<String>::new());
+    daemon.stop().await;
+}

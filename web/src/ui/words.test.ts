@@ -1,6 +1,6 @@
 // R3.09: a transition's sentence names what it did to the change.
 import { describe, expect, it } from "vitest";
-import { LifecycleState } from "../gen/reef/api/v1/lifecycle_pb";
+import { LifecycleState, TransitionCause } from "../gen/reef/api/v1/lifecycle_pb";
 import { OperationKind, SnapshotKind } from "../gen/reef/api/v1/operations_pb";
 import { operationSentence } from "./words";
 
@@ -48,6 +48,20 @@ describe("operationSentence for transitions", () => {
         transitions: of(LifecycleState.PROPOSED, LifecycleState.QUEUED),
       }),
     ).toBe("queued 3 changes");
+  });
+
+  // R3.11: the daemon's carries over a change below.
+  it("names a carry", () => {
+    const carried = [
+      {
+        from: LifecycleState.PROPOSED,
+        to: LifecycleState.PROPOSED,
+        cause: TransitionCause.DEPENDENCY,
+      },
+    ] as unknown as NonNullable<Parameters<typeof operationSentence>[0]["transitions"]>;
+    expect(operationSentence({ ...base, transitions: carried })).toBe(
+      "carried a proposal over a change below",
+    );
   });
 
   it("names a landing", () => {

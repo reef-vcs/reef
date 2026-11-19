@@ -45,6 +45,7 @@ pub fn reason_message(text: Option<&str>) -> v1::LandingReason {
         Some(Reason::Unavailable) => v1::LandingReason::Unavailable,
         Some(Reason::Empty) => v1::LandingReason::Empty,
         Some(Reason::Alone) => v1::LandingReason::Alone,
+        Some(Reason::Dependency) => v1::LandingReason::Dependency,
         None => v1::LandingReason::Unspecified,
     }
 }

@@ -411,6 +411,9 @@ impl Judging<'_> {
         let (named, reason) = match error {
             LandingError::Amended { change, .. } => (Some(change.clone()), "amended"),
             LandingError::NotProposed { change, .. } => (Some(change.clone()), "not_proposed"),
+            LandingError::DependencyLeftReview { change, .. } => {
+                (Some(change.clone()), Reason::Dependency.as_str())
+            }
             LandingError::StackDestinationMismatch { change, .. } => {
                 (Some(change.clone()), "destination")
             }

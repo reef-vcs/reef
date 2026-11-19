@@ -343,29 +343,71 @@ fn tree_text(commit: &Commit) -> String {
 pub async fn working_copies(repo: &ReadonlyRepo) -> Result<Vec<WorkingCopy>, RewriteError> {
     let mut copies = Vec::new();
     for (name, id) in repo.view().wc_commit_ids() {
-        let commit = repo.store().get_commit_async(id).await?;
-        let divergent = repo
-            .resolve_change_id(commit.change_id())
-            .await
-            .map_err(|error| RewriteError::Revision(RevisionError::Other(error.into())))?
-            .is_some_and(|targets| targets.is_divergent());
-        let parent = match commit.parent_ids() {
-            [only] => {
-                let parent = repo.store().get_commit_async(only).await?;
-                Some((ChangeIdHex::of(parent.change_id()), tree_text(&parent)))
-            }
-            _ => None,
-        };
-        copies.push(WorkingCopy {
-            workspace: name.as_str().to_owned(),
-            commit_id: CommitIdHex::of(commit.id()),
-            change_id: ChangeIdHex::of(commit.change_id()),
-            tree: tree_text(&commit),
-            divergent,
-            parent,
-        });
+        copies.push(working_copy(repo, name.as_str(), id).await?);
     }
     Ok(copies)
+}
+
+/// The working copy `name` on commit `id` in `repo`.
+async fn working_copy(
+    repo: &ReadonlyRepo,
+    name: &str,
+    id: &CommitId,
+) -> Result<WorkingCopy, RewriteError> {
+    let commit = repo.store().get_commit_async(id).await?;
+    let divergent = repo
+        .resolve_change_id(commit.change_id())
+        .await
+        .map_err(|error| RewriteError::Revision(RevisionError::Other(error.into())))?
+        .is_some_and(|targets| targets.is_divergent());
+    let parent = match commit.parent_ids() {
+        [only] => {
+            let parent = repo.store().get_commit_async(only).await?;
+            Some((ChangeIdHex::of(parent.change_id()), tree_text(&parent)))
+        }
+        _ => None,
+    };
+    Ok(WorkingCopy {
+        workspace: name.to_owned(),
+        commit_id: CommitIdHex::of(commit.id()),
+        change_id: ChangeIdHex::of(commit.change_id()),
+        tree: tree_text(&commit),
+        divergent,
+        parent,
+    })
+}
+
+/// The working copies other than `skip` whose commit an operation moved
+/// from `before` to `after` (a snapshot's rebase of descendants, #91 and
+/// #202), each as `(before, after)`, descendants first. Reads only the
+/// commits that moved.
+pub async fn moved_working_copies(
+    before: &ReadonlyRepo,
+    after: &ReadonlyRepo,
+    skip: &str,
+) -> Result<Vec<(WorkingCopy, WorkingCopy)>, RewriteError> {
+    let was = before.view().wc_commit_ids();
+    let mut names = Vec::new();
+    for (name, id) in after.view().wc_commit_ids() {
+        if name.as_str() != skip && was.get(name).is_some_and(|old| old != id) {
+            names.push(name.as_str().to_owned());
+        }
+    }
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut moved = Vec::with_capacity(names.len());
+    for name in descendants_first(after, &names).await? {
+        let key = WorkspaceName::new(&name);
+        let (Some(old), Some(new)) = (was.get(key), after.view().get_wc_commit_id(key)) else {
+            continue;
+        };
+        moved.push((
+            working_copy(before, &name, old).await?,
+            working_copy(after, &name, new).await?,
+        ));
+    }
+    Ok(moved)
 }
 
 impl Repo {

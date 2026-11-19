@@ -114,6 +114,9 @@ pub enum TransitionCause {
     Observed,
     /// The landing service queued, returned or landed it (R3.13).
     Landing,
+    /// The daemon carried a proposal across a rewrite of a change below it
+    /// (R3.11).
+    Dependency,
 }
 
 impl TransitionCause {
@@ -124,6 +127,7 @@ impl TransitionCause {
             TransitionCause::Undo => "undo",
             TransitionCause::Observed => "observed",
             TransitionCause::Landing => "landing",
+            TransitionCause::Dependency => "dependency",
         }
     }
 }
@@ -137,6 +141,7 @@ impl FromStr for TransitionCause {
             TransitionCause::Undo,
             TransitionCause::Observed,
             TransitionCause::Landing,
+            TransitionCause::Dependency,
         ]
         .into_iter()
         .find(|cause| cause.as_str() == text)
@@ -174,6 +179,50 @@ pub struct TransitionRecord {
     /// For an undo, the operation it reverts.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub undoes: String,
+    /// For a carry (cause `dependency`, R3.11), the change below that moved,
+    /// in hex.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub dependency: String,
+    /// For a carry, what happened to it ([`DependencyEvent::as_str`]).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub dependency_event: String,
+}
+
+/// What happened to the change below a carried proposal (R3.11).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum DependencyEvent {
+    /// Rewritten while not landed: amended, described, rebased.
+    Amended,
+    /// A landing rewrote it (R3.13, R3.16).
+    Landed,
+    /// It was superseded, and the proposal moved onto its successor.
+    Superseded,
+}
+
+impl DependencyEvent {
+    /// The name records and columns use.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DependencyEvent::Amended => "amended",
+            DependencyEvent::Landed => "landed",
+            DependencyEvent::Superseded => "superseded",
+        }
+    }
+}
+
+impl FromStr for DependencyEvent {
+    type Err = UnknownState;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        [
+            DependencyEvent::Amended,
+            DependencyEvent::Landed,
+            DependencyEvent::Superseded,
+        ]
+        .into_iter()
+        .find(|event| event.as_str() == text)
+        .ok_or_else(|| UnknownState(text.to_owned()))
+    }
 }
 
 /// An operation's [`ATTR_LIFECYCLE`] value.
@@ -411,6 +460,8 @@ mod tests {
             superseded_by: String::new(),
             destination: "main".to_owned(),
             undoes: String::new(),
+            dependency: String::new(),
+            dependency_event: String::new(),
         };
         let text = LifecycleRecord::encode(std::slice::from_ref(&record));
         assert!(!text.contains("reason"), "{text}");
@@ -427,4 +478,249 @@ mod tests {
         }
         assert_eq!(transitions_of(&BTreeMap::new()), Vec::new());
     }
+}
+
+/// Whether a proposal recorded at one commit follows its change to another
+/// (R3.11): see [`carry_check`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CarryCheck {
+    /// The visible commit is the recorded one rebased onto new commits of
+    /// the same parent changes: `moved` names those whose commit changed,
+    /// in parent order.
+    Carried {
+        /// The parent changes that moved, in hex.
+        moved: Vec<ChangeIdHex>,
+        /// A parent was a superseded change, and the commit is on its
+        /// successor.
+        renamed: bool,
+    },
+    /// It is not, and why.
+    Not(NotCarried),
+}
+
+/// Why [`carry_check`] does not carry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NotCarried {
+    /// The visible commit moved onto new commits of the same parent
+    /// changes (`moved`), and has a conflict: a rewrite below it left it
+    /// conflicted.
+    Conflicted {
+        /// The parent changes that moved, in parent order.
+        moved: Vec<ChangeIdHex>,
+    },
+    /// Its parents are other changes than the recorded commit's.
+    Parents,
+    /// Its own diff or description is not the recorded commit's.
+    OwnEdit,
+}
+
+/// Whether the proposal recorded at `recorded` is carried to `visible`, its
+/// change's commit now (R3.11, ADR 0084): `visible`'s parents are commits
+/// of the recorded commit's parent changes (each renamed through
+/// `renamed`, `(old, new)`, for a superseded parent), at least one of them
+/// a new commit, it has no conflict, and rebasing `recorded` onto them gives
+/// exactly `visible`'s tree and description. Merges the trees in a
+/// transaction it drops: writes trees to the store, but no commit and no
+/// operation.
+pub async fn carry_check(
+    repo: &std::sync::Arc<ReadonlyRepo>,
+    recorded: &CommitIdHex,
+    visible: &CommitIdHex,
+    renamed: &[(ChangeIdHex, ChangeIdHex)],
+) -> Result<CarryCheck, BackendError> {
+    let store = repo.store();
+    let old = store.get_commit_async(&recorded.to_id()).await?;
+    let new = store.get_commit_async(&visible.to_id()).await?;
+    if old.parent_ids().len() != new.parent_ids().len() {
+        return Ok(CarryCheck::Not(NotCarried::Parents));
+    }
+    let mut moved = Vec::new();
+    let mut was_renamed = false;
+    for (was, now) in old.parent_ids().iter().zip(new.parent_ids()) {
+        let was_change = ChangeIdHex::of(store.get_commit_async(was).await?.change_id());
+        let was_change = match renamed.iter().find(|(from, _)| *from == was_change) {
+            Some((_, to)) => {
+                was_renamed = true;
+                to.clone()
+            }
+            None => was_change,
+        };
+        let now_change = ChangeIdHex::of(store.get_commit_async(now).await?.change_id());
+        if was_change != now_change {
+            return Ok(CarryCheck::Not(NotCarried::Parents));
+        }
+        if was != now {
+            moved.push(now_change);
+        }
+    }
+    if moved.is_empty() {
+        return Ok(CarryCheck::Not(NotCarried::OwnEdit));
+    }
+    if new.has_conflict() {
+        return Ok(CarryCheck::Not(NotCarried::Conflicted { moved }));
+    }
+    if old.description() != new.description() {
+        return Ok(CarryCheck::Not(NotCarried::OwnEdit));
+    }
+    let mut tx = repo.start_transaction();
+    let rebased =
+        jj_lib::rewrite::CommitRewriter::new(tx.repo_mut(), old, new.parent_ids().to_vec())
+            .rebase()
+            .await?;
+    if rebased.tree_ids() != new.tree_ids() {
+        return Ok(CarryCheck::Not(NotCarried::OwnEdit));
+    }
+    Ok(CarryCheck::Carried {
+        moved,
+        renamed: was_renamed,
+    })
+}
+
+/// A proposal [`carries`] found carried to its change's visible commit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Carried {
+    /// The change.
+    pub change: ChangeIdHex,
+    /// Its visible commit, which the proposal follows to.
+    pub visible: CommitIdHex,
+    /// The parent changes whose commit moved, in parent order.
+    pub moved: Vec<ChangeIdHex>,
+    /// It moved onto a superseded parent's successor.
+    pub renamed: bool,
+}
+
+/// What [`carries`] found.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Carries {
+    /// The proposals carried.
+    pub carried: Vec<Carried>,
+    /// The proposals a rewrite below them left conflicted, each with the
+    /// commit it is now and the parent changes that moved.
+    pub conflicted: Vec<Carried>,
+    /// It stopped at its limit.
+    pub more: bool,
+}
+
+/// Of `proposals` (each change with its recorded commit), those whose
+/// change has one visible commit, another than the recorded one, to which
+/// [`carry_check`] carries the proposal (`renamed`: superseded parent
+/// changes and their successors), and those a rewrite below them left
+/// conflicted. Looks at no more than `max` proposals that moved.
+pub async fn carries(
+    repo: &std::sync::Arc<ReadonlyRepo>,
+    proposals: &[(ChangeIdHex, CommitIdHex)],
+    renamed: &[(ChangeIdHex, ChangeIdHex)],
+    max: usize,
+) -> Result<Carries, BackendError> {
+    let mut found = Carries::default();
+    let mut checked = 0;
+    for (change, recorded) in proposals {
+        let Ok(Some(targets)) = repo.resolve_change_id(&change.to_id()).await else {
+            continue;
+        };
+        let visible: Vec<_> = targets
+            .visible_with_offsets()
+            .map(|(_, id)| id.clone())
+            .collect();
+        let [visible] = visible.as_slice() else {
+            continue;
+        };
+        let visible = CommitIdHex::of(visible);
+        if visible == *recorded {
+            continue;
+        }
+        if checked == max {
+            found.more = true;
+            return Ok(found);
+        }
+        checked += 1;
+        match carry_check(repo, recorded, &visible, renamed).await? {
+            CarryCheck::Carried { moved, renamed } => found.carried.push(Carried {
+                change: change.clone(),
+                visible,
+                moved,
+                renamed,
+            }),
+            CarryCheck::Not(NotCarried::Conflicted { moved }) => found.conflicted.push(Carried {
+                change: change.clone(),
+                visible,
+                moved,
+                renamed: false,
+            }),
+            CarryCheck::Not(_) => {}
+        }
+    }
+    Ok(found)
+}
+
+/// What [`above_any`] found.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Above {
+    /// The heads with a still-left change below them.
+    pub heads: Vec<ChangeIdHex>,
+    /// The changes of `left` still out of review: at the commit they left
+    /// review at, or at that commit rebased with their own diff unchanged
+    /// (a rewrite below them), each with its visible commit.
+    pub left: Vec<(ChangeIdHex, CommitIdHex)>,
+}
+
+/// Of `heads` (changes), those whose visible commit has a proper ancestor
+/// in `left` (changes with the commit they were declined or withdrawn at)
+/// that is still out of review: its visible commit is that commit, or
+/// [`carry_check`] carries it there, since a rebase by a rewrite below it
+/// is not a revision by its owner (R3.11). The stack reads that follow
+/// need only these heads.
+pub async fn above_any(
+    repo: &std::sync::Arc<ReadonlyRepo>,
+    heads: &[ChangeIdHex],
+    left: &[(ChangeIdHex, CommitIdHex)],
+) -> Result<Above, BackendError> {
+    let visible = async |change: &ChangeIdHex| -> Option<jj_lib::backend::CommitId> {
+        let targets = repo.resolve_change_id(&change.to_id()).await.ok()??;
+        let ids: Vec<_> = targets
+            .visible_with_offsets()
+            .map(|(_, id)| id.clone())
+            .collect();
+        match ids.as_slice() {
+            [one] => Some(one.clone()),
+            _ => None,
+        }
+    };
+    let mut found = Above::default();
+    for (change, commit) in left {
+        let Some(now) = visible(change).await else {
+            continue;
+        };
+        let now_hex = CommitIdHex::of(&now);
+        let still = now == commit.to_id()
+            || matches!(
+                carry_check(repo, commit, &now_hex, &[]).await?,
+                CarryCheck::Carried { .. }
+            );
+        if still {
+            found.left.push((change.clone(), now_hex));
+        }
+    }
+    if found.left.is_empty() {
+        return Ok(found);
+    }
+    for head in heads {
+        let Some(id) = visible(head).await else {
+            continue;
+        };
+        for (_, below) in &found.left {
+            let below = below.to_id();
+            if below != id
+                && repo
+                    .index()
+                    .is_ancestor(&below, &id)
+                    .await
+                    .map_err(|error| BackendError::Other(error.into()))?
+            {
+                found.heads.push(head.clone());
+                break;
+            }
+        }
+    }
+    Ok(found)
 }

@@ -1463,6 +1463,8 @@ async fn reconcile_after_a_lost_notice() {
         remote_token_name: None,
         created_at: reef_daemon::model::Timestamp::now(),
         recorded_at: None,
+        dependency_change_id: None,
+        dependency_event: None,
     };
     daemon
         .handle
@@ -1493,6 +1495,8 @@ async fn reconcile_after_a_lost_notice() {
                 superseded_by: String::new(),
                 destination: "main".to_owned(),
                 undoes: String::new(),
+                dependency: String::new(),
+                dependency_event: String::new(),
             }];
             jj.record_transitions(&meta).await.unwrap();
         });

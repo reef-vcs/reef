@@ -28,7 +28,11 @@ service ConflictService {
   // pages read the same operation as the first. A page looks at no more
   // than 10,000 commits of the revset and stops before its response passes
   // 3 MiB, so a page may hold fewer than `page_size`, or none, with a
-  // `next_page_token`.
+  // `next_page_token`. With the default revset, read at head, the first
+  // page also holds, before the tree conflicts, one MISSING_DEPENDENCY
+  // conflict per open proposal with a change below it declined or
+  // withdrawn at its current commit (R3.11), at most 200, unless `kinds`
+  // leaves them out; `GetConflict` with `kind` reads one by revision.
   //
   // Errors: the revset reasons of ChangeService; INVALID_ARGUMENT with
   // reason INVALID_PAGE_TOKEN; a failed snapshot's own error, with reason
@@ -45,7 +49,7 @@ service ConflictService {
   // Errors: the revision reasons of ChangeService, and INVALID_ARGUMENT
   // with reason REVISION_REQUIRED (an empty `revision` without
   // `workspace`); NOT_FOUND with reason NOT_CONFLICTED (metadata
-  // `commit_id`) when the revision's tree has no conflict;
+  // `commit_id`) when the revision has no conflict of `kind`;
   // INVALID_ARGUMENT with reason MAX_FILE_BYTES_TOO_LARGE (metadata `max`)
   // over 16 MiB, INVALID_PATH (metadata `path`) for a path that is not
   // repository-relative, and INVALID_PAGE_TOKEN; a failed snapshot's own
@@ -136,6 +140,10 @@ enum ConflictKind {
   CONFLICT_KIND_UNSPECIFIED = 0;
   // jj's stored conflict in a commit's tree.
   CONFLICT_KIND_TREE = 1;
+  // An open proposal whose stack holds a change declined or withdrawn at
+  // its current commit (R3.11, ADR 0084): derived from the stack and the
+  // lifecycle on every read.
+  CONFLICT_KIND_MISSING_DEPENDENCY = 2;
 }
 
 // A term's place in jj's merge.
@@ -351,6 +359,8 @@ message Conflict {
   // The change's open resolver assignment of this kind (R3.27), as it is
   // now, even for a read at an earlier operation; unset when it has none.
   ConflictAssignment assignment = 11;
+  // MISSING_DEPENDENCY: the change below it that left review (R3.11).
+  MissingDependency dependency = 12;
 }
 
 // A resolver assignment (R3.27): one change that introduces a conflict, and
@@ -443,6 +453,8 @@ message ListConflictsRequest {
   string page_token = 7;
   // Leave out commits whose every conflicted path is inherited.
   bool introduced_only = 8;
+  // The kinds to list; empty for every kind (R3.11).
+  repeated ConflictKind kinds = 9;
 }
 
 // ListConflicts' response.
@@ -481,6 +493,8 @@ message GetConflictRequest {
   // Also return the conflict as R3.07's policy input (R3.28), every
   // conflicted path and each verified side, in `policy_input`.
   bool policy_input = 11;
+  // The kind to read; UNSPECIFIED reads TREE (R3.11).
+  ConflictKind kind = 12;
 }
 
 // GetConflict's response.

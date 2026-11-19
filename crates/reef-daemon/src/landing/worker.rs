@@ -313,6 +313,25 @@ pub(super) async fn dequeue(
     reason: Reason,
     message: &str,
 ) -> Result<(), LandingError> {
+    // A change below it left review (R3.11): say so, rather than that a
+    // parent is not on the destination.
+    let mut said = None;
+    if reason == Reason::UnlandedParents {
+        let only = [target.change.as_str().to_owned()];
+        if let Some((missing, _)) = crate::lifecycle::dependents::held(state, repo, Some(&only))
+            .await
+            .remove(target.change.as_str())
+        {
+            said = Some(format!(
+                "change {} below it was {}: move it off that change (reef rebase {} --source --onto {}), or withdraw it",
+                missing.change, missing.state, missing.above, missing.onto
+            ));
+        }
+    }
+    let (reason, message) = match &said {
+        Some(said) => (Reason::Dependency, said.as_str()),
+        None => (reason, message),
+    };
     let lifecycle_lock = state.lifecycle.lock(repo);
     let _held = lifecycle_lock.lock().await;
     dequeue_locked(state, repo, landing, target, who, reason, message).await

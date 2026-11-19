@@ -144,6 +144,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         .boxed(".reef.api.v1.Workspace.disk")
         // #262: likewise a lifecycle, which carries its last transition whole.
         .boxed(".reef.api.v1.Workspace.lifecycle")
+        // R3.11: likewise a missing dependency, which carries a transition.
+        .boxed(".reef.api.v1.Workspace.missing_dependency")
+        // R3.11: a transition's dependency, held in every change's lifecycle.
+        .boxed(".reef.api.v1.ChangeTransition.dependency")
         .boxed(".reef.api.v1.GetDaemonStatusResponse.disk")
         .boxed(".reef.api.v1.GetWorkspaceResponse.disk_status")
         .boxed(".reef.api.v1.ListWorkspacesResponse.disk_status")
