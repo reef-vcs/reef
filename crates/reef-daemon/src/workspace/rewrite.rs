@@ -23,13 +23,13 @@
 //! 4. Write, on the repository thread: resolve and check again, then one
 //!    operation with the request's [`OpMeta`].
 //! 5. Follow: every Reef workspace the write moved to another commit of its
-//!    change with another tree is handed a [`Carry`] for its next snapshot
-//!    (issue #80, ADR 0039). Then each locked workspace whose working-copy
-//!    commit moved takes the new commit, descendants first: a row update
-//!    when its tree is the same, else a snapshot, which finds the working
-//!    copy stale and checks the new tree out, carrying any edits made since
-//!    step 3 onto it in the same change. Then the rows' divergent marks
-//!    are reconciled with the new head.
+//!    change is handed a [`Carry`] for its next snapshot (issue #80, ADR
+//!    0039, ADR 0084). Then each locked workspace whose working-copy commit
+//!    moved takes the new commit, descendants first: a row update when its
+//!    row was on the moved commit and the tree is the same, else a
+//!    snapshot, which finds the working copy stale and checks the new tree
+//!    out, carrying any edits made since step 3 onto it in the same change.
+//!    Then the rows' divergent marks are reconciled with the new head.
 //!
 //! Without the locks, a describe committed between a snapshot's scan and
 //! its commit would make the change divergent (ADR 0018).
@@ -546,8 +546,17 @@ impl Manager {
                 continue;
             };
             followed_ids.insert(id);
-            let followed = if before.tree == after.tree {
+            // The files are the row's commit's: only a row on the commit the
+            // write moved, which kept its tree, needs no check-out. Taking
+            // the new commit spends the carry step 4 handed it.
+            let current = entry.record().commit_id == before.commit_id.as_str();
+            let followed = if current && before.tree == after.tree {
                 self.follow_view(entry, &after.commit_id, &after.change_id)
+                    .map(|()| {
+                        entry
+                            .carry
+                            .take_move(None, &before.commit_id, &after.commit_id);
+                    })
             } else {
                 let kind = SnapshotKind::Explicit;
                 self.snapshot_locked(
@@ -704,9 +713,10 @@ fn locked_rows(locked: &[&Arc<WorkspaceEntry>]) -> LockedRows {
 }
 
 /// The carry for every Reef workspace that moved to another commit of the
-/// same change with another tree (ADR 0039). A move to another change, or
-/// one that kept the tree, carries nothing. A locked workspace carries from
-/// its row's commit when that is in the change: step 3's snapshot of an
+/// same change (ADR 0039), whatever its tree: a snapshot that scanned the
+/// old commit finds its commit moved by the carry (ADR 0084). A move to
+/// another change carries nothing. A locked workspace carries from its
+/// row's commit when that is in the change: step 3's snapshot of an
 /// ancestor rebases a descendant's commit without moving its row, and the
 /// descendant's snapshot expects the row's commit.
 pub(super) fn carries(
@@ -725,7 +735,7 @@ pub(super) fn carries(
                 .parent
                 .as_ref()
                 .is_some_and(|(change, tree)| *change == was.change_id && *tree == now.tree);
-            (same_change || new_child) && was.tree != now.tree
+            same_change || new_child
         })
         .filter_map(|(was, now)| {
             let id: WorkspaceId = now.workspace.strip_prefix("reef-")?.parse().ok()?;
@@ -1300,11 +1310,11 @@ mod tests {
         assert_eq!(found.len(), 1, "{found:?}");
         assert_eq!(found[0].1.from.as_str(), "c1");
         assert_eq!(found[0].1.to.as_str(), "e1");
-        // The same tree (an observed landing): nothing to carry.
+        // The same tree (a landing that kept it): carries too.
         let mut same = moved.clone();
         same.tree = "t1".to_owned();
         same.parent = Some(("aa".parse::<ChangeIdHex>().unwrap(), "t1".to_owned()));
-        assert_eq!(carries(&before, &[same], &LockedRows::new()), Vec::new());
+        assert_eq!(carries(&before, &[same], &LockedRows::new()).len(), 1);
         // A new change on another change's commit (an abandon): none.
         let mut other = moved;
         other.parent = Some(("bb".parse::<ChangeIdHex>().unwrap(), "t2".to_owned()));
@@ -1312,7 +1322,7 @@ mod tests {
     }
 
     #[test]
-    fn carries_only_moves_within_a_change_with_a_new_tree() {
+    fn carries_only_moves_within_a_change() {
         let a = "reef-00000000000000aa";
         let b = "reef-00000000000000bb";
         let c = "reef-00000000000000cc";
@@ -1329,7 +1339,7 @@ mod tests {
             copy(a, "a2", "aa", "t2"),
             // Another change (a plain abandon): none.
             copy(b, "b2", "ff", "t2"),
-            // Same tree (a describe): none.
+            // Same change, same tree (a describe): carries.
             copy(c, "c2", "cc", "t1"),
             // Did not move: none.
             copy(d, "d1", "dd", "t1"),
@@ -1338,12 +1348,14 @@ mod tests {
         ];
         let carries_of = |rows: &LockedRows| carries(&before, &after, rows);
         let found = carries_of(&LockedRows::new());
-        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found.len(), 2, "{found:?}");
         let (id, carry) = &found[0];
         assert_eq!(id.jj_workspace_name(), a);
         assert_eq!(carry.from.as_str(), "a1");
         assert_eq!(carry.to.as_str(), "a2");
         assert_eq!(carry.base, None);
+        assert_eq!(found[1].0.jj_workspace_name(), c);
+        assert_eq!(found[1].1.to.as_str(), "c2");
 
         // A locked workspace whose row step 3 left behind a rebase carries
         // from its row; one whose row is in another change, from before.

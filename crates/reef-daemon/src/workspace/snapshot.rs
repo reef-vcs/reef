@@ -2,18 +2,18 @@
 //! scheduled, runs [`Manager::run_snapshot`] with the workspace's scan lock
 //! held.
 //!
-//! 1. (async) Take a scan permit; ask the repository thread for its head,
-//!    reloaded first if an operation was written outside the daemon. Take
-//!    the journal of paths reported since the last scan, which a watcher
-//!    snapshot or a synced read of a notify workspace narrows its scan to
-//!    (R1.30, R2.23, see [`crate::snapshot`]).
-//! 2. (blocking) Lock the jj handle, take the workspace's carry (ADR 0039),
-//!    point the handle at that head, and `begin_snapshot`: lock the working
-//!    copy, check freshness, scan. A carry that does not end on the head's
-//!    view of the workspace was joined after the head was read; the head is
-//!    read again with the carry, in one job. If the working copy is ahead of
-//!    the head (the `jj` CLI ran on the registered root), reload the
-//!    repository thread at head, again with the carry, and try once more.
+//! 1. (async) Ask the repository thread for its head, reloaded first if an
+//!    operation was written outside the daemon, and take the workspace's
+//!    carry (ADR 0039) in the same job, so it ends on that head's view of
+//!    the workspace. Take a scan permit, and the journal of paths reported
+//!    since the last scan, which a watcher snapshot or a synced read of a
+//!    notify workspace narrows its scan to (R1.30, R2.23, see
+//!    [`crate::snapshot`]).
+//! 2. (blocking) Lock the jj handle, point it at that head, and
+//!    `begin_snapshot`: lock the working copy, check freshness, scan. If the
+//!    working copy is ahead of the head (the `jj` CLI ran on the registered
+//!    root), reload the repository thread at head, taking the carry again
+//!    in that job, and try once more.
 //! 3. (repository thread) If the scan changed anything, `commit_snapshot`;
 //!    its result becomes the thread's head.
 //! 4. (blocking) Update the row and index the operation as a local snapshot
@@ -143,9 +143,9 @@ struct Ran {
     /// It was carried onto a write's commit; `conflict`: with a conflict.
     carried: bool,
     conflict: bool,
-    /// Other workspaces whose commit its rebase of descendants moved to
-    /// another tree, descendants first: each follows with a snapshot of
-    /// its own (#91, #202).
+    /// Other workspaces whose commit its rebase of descendants moved,
+    /// descendants first: each follows with a snapshot of its own (#91,
+    /// #202).
     moved: Vec<WorkspaceId>,
 }
 
@@ -509,8 +509,18 @@ impl Manager {
             .workspace(id.as_hex())
             .agent(agent.unwrap_or_else(|| record.owner.clone()));
         // The head first: a permit is a scan slot, not held while the
-        // repository thread is busy.
-        let head = self.workspace_head(entry, true).await?;
+        // repository thread is busy. The carry is taken in the same job,
+        // the kind of job that hands carries out, so it ends on the head's
+        // view of the workspace; one handed out later is a move the commit
+        // finds (`moved_to`). Under the scan lock, exactly this snapshot
+        // uses it, and it does what a queued follow would (#202).
+        let slot = Arc::clone(entry);
+        let (head, carry) = self
+            .workspace_head_with(entry, true, move || {
+                slot.follow_pending.store(false, Ordering::Release);
+                slot.carry.take()
+            })
+            .await?;
         let permit = self.scheduler.acquire().await;
         self.scheduler.scan_hold_point().await;
         let scan_failure = self.scheduler.scan_failure();
@@ -532,17 +542,6 @@ impl Manager {
             let provenance = self.provenance.get().cloned();
             let manager = self.scheduler.manager();
             tokio::task::spawn_blocking(move || {
-                refuse_symlinked_root(&entry.paths.root)?;
-                // An overlay whose mount is gone would scan as empty.
-                entry.backend.check_materialized(&entry.paths)?;
-                let jj = Arc::clone(&entry.jj);
-                let mut guard = jj.lock().unwrap_or_else(PoisonError::into_inner);
-                let repo = guard.as_mut().ok_or(ManagerError::NotLoaded(id))?;
-                // Under the jj lock and the scan lock: exactly this
-                // snapshot uses it, and it does what a queued follow
-                // would (#202).
-                let carry = entry.carry.take();
-                entry.follow_pending.store(false, Ordering::Release);
                 let mut pipeline = Pipeline {
                     entry: &entry,
                     db: &db,
@@ -559,15 +558,7 @@ impl Manager {
                     provenance: provenance.as_deref(),
                     manager,
                 };
-                let ran = match scan_failure {
-                    Some(source) => Err(BackendError::Io {
-                        op: "scan",
-                        path: entry.paths.root.clone(),
-                        source,
-                    }
-                    .into()),
-                    None => pipeline.run(repo, head, permit),
-                };
+                let ran = pipeline.run(head, permit, scan_failure);
                 // Unused: nothing was committed, and the working copy is
                 // not on the carry's commit. A re-merge's carry (see
                 // `record`) is set only after a commit.
@@ -754,10 +745,10 @@ impl Manager {
 impl Manager {
     /// After a snapshot's commit, in the same repository-thread job: the
     /// Reef workspaces other than `skip`, on other changes, whose
-    /// working-copy commit the commit's rebase of descendants moved within their change to another
-    /// tree, each handed a carry from its row's commit (ADR 0039, #91),
-    /// descendants first. A workspace a write has paused is that write's to
-    /// follow. Failures are logged; the workspace then adopts, or diverges,
+    /// working-copy commit the commit's rebase of descendants moved within
+    /// their change, with its tree or not, each handed a carry (ADR 0039,
+    /// #91), descendants first. A workspace a write has paused is that
+    /// write's to follow. Failures are logged; the workspace then adopts, or diverges,
     /// at its next snapshot, as before.
     pub(super) async fn carry_moved(
         &self,
@@ -866,9 +857,9 @@ struct Pipeline<'a> {
     meta: &'a OpMeta,
     /// What to narrow the scan to; `None` scans everything.
     prefixes: Option<&'a [PathBuf]>,
-    /// What a write that moved the workspace handed this snapshot: it ends
-    /// on the view's commit at the head the scan loads, or was taken with
-    /// that head ([`Pipeline::head_with_carry`]).
+    /// What a write that moved the workspace handed this snapshot, taken
+    /// with the head the scan loads: it ends on that head's view of the
+    /// workspace.
     carry: Option<Carry>,
     /// Set once the snapshot's operation is committed.
     committed: Cell<bool>,
@@ -906,27 +897,33 @@ impl Pipeline<'_> {
     }
 
     /// Steps 2 to 4. The scan permit is released once the scan is done.
+    /// `scan_failure` is `Scheduler::fail_scans` (a test hook).
     fn run(
         &mut self,
-        repo: &mut Repo,
         head: Arc<ReadonlyRepo>,
         permit: ScanPermit,
+        scan_failure: Option<std::io::Error>,
     ) -> Result<Ran, ManagerError> {
+        let root = &self.entry.paths.root;
+        refuse_symlinked_root(root)?;
+        // An overlay whose mount is gone would scan as empty.
+        self.entry.backend.check_materialized(&self.entry.paths)?;
+        let entry = Arc::clone(self.entry);
+        let mut guard = entry.jj.lock().unwrap_or_else(PoisonError::into_inner);
+        let repo = guard.as_mut().ok_or(ManagerError::NotLoaded(self.id))?;
+        if let Some(source) = scan_failure {
+            let path = root.clone();
+            return Err(BackendError::Io {
+                op: "scan",
+                path,
+                source,
+            }
+            .into());
+        }
         let sources = IgnoreSources {
             reefignore: Some(self.reefignore),
             excludes: &self.spec.excludes,
             mounts: &self.spec.mounts,
-        };
-        let name = self.id.jj_workspace_name();
-        let past_head = self.carry.as_ref().is_some_and(|carry| {
-            reef_lib::jj::repo::view_wc_commit(&head, &name).as_ref() != Some(&carry.to)
-        });
-        // An ancestor's commit after `head` was read joined its carry onto
-        // the one this took (R3.11 review, R3-1).
-        let head = if past_head {
-            self.head_with_carry(false)?
-        } else {
-            head
         };
         repo.set_head(head);
         let behind = match self.begin(repo, &sources, &permit) {
@@ -950,7 +947,7 @@ impl Pipeline<'_> {
             "working copy is ahead of the daemon's head ({:?}); reloading",
             behind.0
         );
-        let head = self.head_with_carry(true)?;
+        let head = self.reload_with_carry()?;
         repo.set_head(head);
         let pending = self.begin(repo, &sources, &permit)?;
         drop(permit);
@@ -961,26 +958,19 @@ impl Pipeline<'_> {
         ran
     }
 
-    /// The repository thread's head, reloaded first if `reload`, with this
-    /// snapshot's carry taken again in the same job: the job that adopts a
-    /// head hands out the carries its commit makes ([`Manager::carry_moved`],
-    /// ADR 0039), so a carry taken with the head ends on the head's view of
-    /// the workspace. The carry goes back to the slot first, where one set
-    /// since joins it, and stays there if the job fails.
-    fn head_with_carry(&mut self, reload: bool) -> Result<Arc<ReadonlyRepo>, ManagerError> {
+    /// The repository thread's head, reloaded, with this snapshot's carry
+    /// taken again in the same job, as at the start (see
+    /// `Manager::run_pipeline`). The carry goes back to the slot first,
+    /// where one set since joins it, and stays there if the job fails.
+    fn reload_with_carry(&mut self) -> Result<Arc<ReadonlyRepo>, ManagerError> {
         if let Some(carry) = self.carry.take() {
             self.entry.carry.restore(carry);
         }
         let entry = Arc::clone(self.entry);
         let (head, carry) = pollster::block_on(self.entry.repo.call_async(move |head| {
             async move {
-                let readonly = if reload {
-                    head.reload().await?;
-                    head.readonly()
-                } else {
-                    head.refresh().await?
-                };
-                Ok::<_, ManagerError>((readonly, entry.carry.take()))
+                head.reload().await?;
+                Ok::<_, ManagerError>((head.readonly(), entry.carry.take()))
             }
             .boxed_local()
         }))??;

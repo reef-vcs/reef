@@ -1971,6 +1971,113 @@ async fn a_follow_that_loaded_the_head_between_two_ancestor_commits_carries_both
     daemon.stop().await;
 }
 
+// Fifth R3.11 review, R5-1: an ancestor's snapshot that rebases a busy
+// descendant's commit to one with the same tree (X adds Y's own file with
+// Y's bytes) still moves it, and Y's snapshot, planned on the old commit,
+// lands on the new one.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rebase_that_keeps_the_tree_between_scan_and_commit_carries() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let (x, y) = stacked(client, &repo).await;
+    write(&y, "y-late.txt", "late\n");
+    held_at_commit(&daemon, &repo, &y, async {
+        write(&x, "y.txt", "y\n");
+        snapshot(client, &repo, &x).await;
+    })
+    .await
+    .unwrap();
+    y_current(client, &repo, &y, &["x.txt", "y.txt", "y-late.txt"]).await;
+    daemon.stop().await;
+}
+
+// Fifth R3.11 review, R5-1: a describe of X moves Y to a commit with the
+// same tree, and Y's row follows; a later snapshot of X still carries Y's
+// edits onto its new commit.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_describe_below_then_an_ancestor_snapshot_carries() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let (x, y) = stacked(client, &repo).await;
+    client
+        .describe_change(v1::DescribeChangeRequest {
+            workspace: x.id.clone(),
+            revision: "@".to_owned(),
+            description: "x\n".to_owned(),
+            ..v1::DescribeChangeRequest::default()
+        })
+        .await
+        .unwrap();
+    write(&y, "y-late.txt", "late\n");
+    write(&x, "x2.txt", "x2\n");
+    snapshot(client, &repo, &x).await;
+
+    eventually("Y's directory has X's new file", || {
+        read(&y, "x2.txt").is_some()
+    })
+    .await;
+    snapshot(client, &repo, &y).await;
+    y_current(
+        client,
+        &repo,
+        &y,
+        &["x.txt", "x2.txt", "y.txt", "y-late.txt"],
+    )
+    .await;
+    daemon.stop().await;
+}
+
+// Fifth R3.11 review, R5-1: a describe pauses Y, X's snapshot then rebases
+// Y's commit without a carry (a paused workspace is the write's to follow),
+// and the describe keeps that tree. Y's files are still its row's, so the
+// describe's follow checks X's file out and carries Y's edit.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_write_follows_a_descendant_an_ancestor_moved_while_it_was_paused() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let scheduler = daemon.handle.state().manager.scheduler();
+    let (x, y) = stacked(client, &repo).await;
+    let x_hold = scheduler.hold_commits(x.id.parse().unwrap()).await;
+    write(&x, "x2.txt", "x2\n");
+    let x_task = {
+        let (client, repo, id) = (client.clone(), repo.id.clone(), x.id.clone());
+        tokio::spawn(async move { client.snapshot_workspace(&repo, &id, "").await.map(drop) })
+    };
+    until("X waits at its commit", || scheduler.held_commits() == 1).await;
+    // By change id: a describe of `@` would sync X first, behind its hold.
+    let describe = {
+        let (client, repo, change) = (client.clone(), repo.id.clone(), x.change_id.clone());
+        tokio::spawn(async move {
+            client
+                .describe_change(v1::DescribeChangeRequest {
+                    repo,
+                    revision: change,
+                    description: "x\n".to_owned(),
+                    ..v1::DescribeChangeRequest::default()
+                })
+                .await
+                .map(drop)
+        })
+    };
+    let y_id = y.id.parse().unwrap();
+    until("the describe pauses Y", || scheduler.is_paused(y_id)).await;
+    write(&y, "y-late.txt", "late\n");
+    drop(x_hold);
+    x_task.await.unwrap().unwrap();
+    describe.await.unwrap().unwrap();
+
+    assert_eq!(read(&y, "x2.txt").as_deref(), Some("x2\n"));
+    snapshot(client, &repo, &y).await;
+    y_current(
+        client,
+        &repo,
+        &y,
+        &["x.txt", "x2.txt", "y.txt", "y-late.txt"],
+    )
+    .await;
+    daemon.stop().await;
+}
+
 /// A plain channel to the daemon, for requests the client would not send.
 async fn raw_channel(socket: &Path) -> tonic::transport::Channel {
     let path = socket.to_owned();

@@ -817,6 +817,18 @@ impl Manager {
         entry: &Arc<WorkspaceEntry>,
         refresh: bool,
     ) -> Result<Arc<ReadonlyRepo>, ManagerError> {
+        Ok(self.workspace_head_with(entry, refresh, || ()).await?.0)
+    }
+
+    /// [`Manager::workspace_head`], with `with` run at the end of the job
+    /// that reads the head, once that succeeded: what `with` reads is as
+    /// of that head.
+    pub(super) async fn workspace_head_with<T: Send + 'static>(
+        &self,
+        entry: &Arc<WorkspaceEntry>,
+        refresh: bool,
+        with: impl FnOnce() -> T + Send + 'static,
+    ) -> Result<(Arc<ReadonlyRepo>, T), ManagerError> {
         let id = entry.paths.id;
         let loaded = entry
             .jj
@@ -831,7 +843,7 @@ impl Manager {
             .unwrap_or_else(|_| self.settings.clone());
         let root = entry.paths.root.clone();
         let state_dir = entry.paths.state_dir.clone();
-        let (head, renewed) = entry
+        let (head, renewed, with) = entry
             .repo
             .call_async(move |head| {
                 async move {
@@ -842,12 +854,12 @@ impl Manager {
                     };
                     let generation = head.generation();
                     if !loaded || generation == opened_at {
-                        return Ok((readonly, None));
+                        return Ok((readonly, None, with()));
                     }
                     let ws = head
                         .repo
                         .open_workspace_with(&root, &state_dir, &settings)?;
-                    Ok::<_, ManagerError>((readonly, Some((ws, generation))))
+                    Ok::<_, ManagerError>((readonly, Some((ws, generation)), with()))
                 }
                 .boxed_local()
             })
@@ -864,7 +876,7 @@ impl Manager {
             })
             .await?;
         }
-        Ok(head)
+        Ok((head, with))
     }
 
     /// Reclaims a workspace whose directory is gone, for `reason`: forgets

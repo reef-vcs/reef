@@ -859,7 +859,7 @@ impl Scheduler {
     }
 
     /// Whether automatic snapshots of `ws` are paused.
-    pub(crate) fn is_paused(&self, ws: WorkspaceId) -> bool {
+    pub fn is_paused(&self, ws: WorkspaceId) -> bool {
         self.inner
             .lock_entries()
             .get(&ws)
