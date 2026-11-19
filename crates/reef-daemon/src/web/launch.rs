@@ -36,7 +36,7 @@ pub(crate) fn write(dir: &Path, session_url: &str) -> io::Result<PathBuf> {
 }
 
 /// `text` escaped for an HTML attribute. The URL is the daemon's own
-/// (`http://127.0.0.1:<port>/#session=<base64url>`), so nothing needs it;
+/// (`http://localhost:<port>/#session=<base64url>`), so nothing needs it;
 /// this keeps the page sound if that ever changes.
 fn escape(text: &str) -> String {
     text.replace('&', "&amp;")
@@ -82,7 +82,7 @@ mod tests {
     fn launch_files_are_private_and_scriptless() {
         let temp = tempfile::tempdir().unwrap();
         let dir = temp.path().join("ui");
-        let url = "http://127.0.0.1:5/#session=abc";
+        let url = "http://localhost:5/#session=abc";
         let path = write(&dir, url).unwrap();
         let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&dir), 0o700);

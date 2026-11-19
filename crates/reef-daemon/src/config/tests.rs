@@ -601,7 +601,7 @@ fn executor_keys() {
     }
 }
 
-// R2.18 12: the web UI listens on a loopback IP with a port, nowhere else.
+// R2.18 12: the web UI listens on loopback with a port, nowhere else.
 #[test]
 fn listen_must_be_loopback() {
     for listen in [
@@ -619,10 +619,24 @@ fn listen_must_be_loopback() {
         assert!(reason.contains("[remote]"), "{listen}: {reason}");
         assert!(reason.contains(listen), "{listen}: {reason}");
     }
-    for listen in ["127.0.0.2:0", "[::1]:0", "127.0.0.1:7878"] {
+    // R3.43 11: another loopback address is one `localhost` never reaches.
+    let err = load_file("[ui]\nlisten = \"127.0.0.2:0\"\n").unwrap_err();
+    let ConfigError::Invalid { key, reason, .. } = &err else {
+        panic!("{err:?}");
+    };
+    assert_eq!(key, "ui.listen");
+    assert!(
+        reason.contains("127.0.0.2:0") && reason.contains("`localhost`"),
+        "{reason}"
+    );
+    for (listen, port) in [
+        ("[::1]:0", 0),
+        ("127.0.0.1:7878", 7878),
+        ("[::1]:7878", 7878),
+    ] {
         let config = load_file(&format!("[ui]\nlisten = \"{listen}\"\n")).unwrap();
         assert_eq!(config.file.ui.listen, listen);
-        assert!(config.file.ui.listen_addr().is_some(), "{listen}");
+        assert_eq!(config.file.ui.listen_port(), Ok(port), "{listen}");
     }
     assert_eq!(load_file("").unwrap().file.ui, UiSection::default());
 }

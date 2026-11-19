@@ -1,12 +1,17 @@
-//! The web UI's loopback listener (R2.18, tests 1 to 14): sessions, the
-//! gate's rules and headers, assets, gRPC-web streams, launch files, and
-//! the listener's limits. Test daemons serve the placeholder assets through
+//! The web UI's loopback listener (R2.18, tests 1 to 14; R3.43 test 11, its
+//! `localhost` origin on both loopback families): sessions, the gate's rules
+//! and headers, assets, gRPC-web streams, launch files, and the listener's
+//! limits. Test daemons serve the placeholder assets through
 //! the full gate (`web::Limits::assets_built`).
 
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
     reason = "test helpers outside #[test] fns; a panic is the failure report"
+)]
+#![allow(
+    clippy::print_stderr,
+    reason = "a skip note on a host without IPv6 loopback"
 )]
 
 use std::os::unix::fs::PermissionsExt as _;
@@ -65,13 +70,44 @@ fn token_of(session: &CreateWebSessionResponse) -> String {
         .to_owned()
 }
 
-/// `127.0.0.1:<port>` of a session's URL.
+/// `localhost:<port>` of a session's URL.
 fn authority_of(session: &CreateWebSessionResponse) -> String {
     session
         .url
         .trim_start_matches("http://")
         .trim_end_matches('/')
         .to_owned()
+}
+
+/// The port of a session's URL.
+fn port_of(session: &CreateWebSessionResponse) -> u16 {
+    authority_of(session)
+        .strip_prefix("localhost:")
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+/// Whether this host has an IPv6 loopback; without one, the listener binds
+/// `127.0.0.1` only.
+fn has_ipv6_loopback() -> bool {
+    match std::net::TcpListener::bind("[::1]:0") {
+        Ok(_) => true,
+        Err(error) => {
+            eprintln!("no IPv6 loopback ({error}): its half is skipped");
+            false
+        }
+    }
+}
+
+/// The addresses the listener binds at `port`: `127.0.0.1`, and `[::1]`
+/// where the host has it.
+fn families(port: u16) -> Vec<String> {
+    let mut all = vec![format!("127.0.0.1:{port}")];
+    if has_ipv6_loopback() {
+        all.push(format!("[::1]:{port}"));
+    }
+    all
 }
 
 fn reason(status: &Status) -> String {
@@ -250,15 +286,8 @@ async fn session_binds_lazily() {
     assert!(!daemon.handle.state().web.is_bound());
     let first = session(&daemon.client, true).await;
     assert!(daemon.handle.state().web.is_bound());
-    let port: u16 = first
-        .url
-        .strip_prefix("http://127.0.0.1:")
-        .unwrap()
-        .strip_suffix('/')
-        .unwrap()
-        .parse()
-        .unwrap();
-    assert_ne!(port, 0);
+    assert!(first.url.starts_with("http://localhost:"), "{}", first.url);
+    assert_ne!(port_of(&first), 0);
     let token = token_of(&first);
     assert_eq!(first.session_url, format!("{}#session={token}", first.url));
     assert_eq!(token.len(), 43);
@@ -350,12 +379,17 @@ async fn host_must_match() {
     let daemon = TestDaemon::start().await;
     let web = session(&daemon.client, false).await;
     let at = authority_of(&web);
-    let port: u16 = at.rsplit(':').next().unwrap().parse().unwrap();
-    let other = format!("127.0.0.1:{}", port.wrapping_add(1));
+    let port = port_of(&web);
+    // R3.43 11: `localhost` is the one origin, whichever family carries it.
+    for family in families(port) {
+        let response = send(&family, Method::GET, "/", &[("host", &at)], Vec::new()).await;
+        assert_eq!(response.status(), StatusCode::OK, "{family}");
+    }
     for host in [
-        format!("localhost:{port}"),
+        format!("127.0.0.1:{port}"),
+        format!("[::1]:{port}"),
+        format!("localhost:{}", port.wrapping_add(1)),
         format!("attacker.example:{port}"),
-        other,
     ] {
         for path in ["/", "/reef.api.v1.DaemonService/GetDaemonStatus"] {
             let response = send(&at, Method::GET, path, &[("host", &host)], Vec::new()).await;
@@ -474,9 +508,15 @@ async fn browser_origins_are_refused() {
     let at = authority_of(&web);
     let bearer = format!("Bearer {}", token_of(&web));
     let own = format!("http://{at}");
+    assert!(own.starts_with("http://localhost:"), "{own}");
+    let port = port_of(&web);
+    let v4 = format!("http://127.0.0.1:{port}");
+    let v6 = format!("http://[::1]:{port}");
     for (name, value) in [
         ("origin", "http://attacker.example"),
         ("origin", "null"),
+        ("origin", v4.as_str()),
+        ("origin", v6.as_str()),
         ("sec-fetch-site", "cross-site"),
         ("sec-fetch-site", "same-site"),
     ] {
@@ -871,24 +911,62 @@ async fn bind_failure_is_reported() {
     daemon.client.daemon_status(true).await.unwrap();
     drop(held);
     let web = session(&daemon.client, false).await;
-    assert_eq!(web.url, format!("http://{address}/"));
+    let port = address.rsplit(':').next().unwrap();
+    assert_eq!(web.url, format!("http://localhost:{port}/"));
 }
 
+// R3.43 11: a fixed port someone holds on `::1` fails the start: serving
+// `127.0.0.1` alone would leave `localhost` to the holder.
 #[tokio::test(flavor = "multi_thread")]
-async fn ipv6_loopback_serves_with_its_host() {
-    if std::net::TcpListener::bind("[::1]:0").is_err() {
-        eprintln!("skipped: no IPv6 loopback");
+async fn a_fixed_port_held_on_ipv6_fails() {
+    if !has_ipv6_loopback() {
         return;
     }
-    let daemon = TestDaemon::start_with(|config: &mut Config| {
-        config.file.ui.listen = "[::1]:0".to_owned();
+    let held = std::net::TcpListener::bind("[::1]:0").unwrap();
+    let address = held.local_addr().unwrap().to_string();
+    let port = held.local_addr().unwrap().port();
+    let daemon = TestDaemon::start_with(move |config: &mut Config| {
+        config.file.ui.listen = format!("127.0.0.1:{port}");
     })
     .await;
+    let error = daemon.client.create_web_session(false).await.unwrap_err();
+    let status = status_of(&error);
+    assert_eq!(reason(status), "WEB_UI_UNAVAILABLE");
+    assert_eq!(metadata(status, "address"), address);
+    assert!(!daemon.handle.state().web.is_bound());
+    // Nothing is left bound on IPv4 either: the next try succeeds.
+    drop(held);
     let web = session(&daemon.client, false).await;
-    assert!(web.url.starts_with("http://[::1]:"), "{}", web.url);
-    let at = authority_of(&web);
-    assert_eq!(get(&at, "/").await.status(), StatusCode::OK);
-    status_over_web(&web, Some(&token_of(&web))).await.unwrap();
+    assert_eq!(web.url, format!("http://localhost:{port}/"));
+}
+
+// R3.43 11: both loopback families on one port, whichever `[ui] listen`
+// names.
+#[tokio::test(flavor = "multi_thread")]
+async fn both_families_serve_one_port() {
+    for listen in ["127.0.0.1:0", "[::1]:0"] {
+        let daemon = TestDaemon::start_with(|config: &mut Config| {
+            config.file.ui.listen = listen.to_owned();
+        })
+        .await;
+        let web = session(&daemon.client, false).await;
+        assert!(web.url.starts_with("http://localhost:"), "{}", web.url);
+        let at = authority_of(&web);
+        let bearer = format!("Bearer {}", token_of(&web));
+        for family in families(port_of(&web)) {
+            let response = send(&family, Method::GET, "/", &[("host", &at)], Vec::new()).await;
+            assert_eq!(response.status(), StatusCode::OK, "{listen} {family}");
+            let response =
+                raw_status_call(&family, &[("host", &at), ("authorization", &bearer)]).await;
+            assert!(
+                trailers(response.body())
+                    .lines()
+                    .any(|line| line.trim_end() == "grpc-status:0"),
+                "{listen} {family}"
+            );
+        }
+        status_over_web(&web, Some(&token_of(&web))).await.unwrap();
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -901,11 +979,15 @@ async fn connection_cap() {
     .await;
     let web = session(&daemon.client, false).await;
     let at = authority_of(&web);
+    // One cap over both families: alternate between them where both exist.
+    let addresses = families(port_of(&web));
     let request = format!("GET / HTTP/1.1\r\nhost: {at}\r\n\r\n");
-    let open = |request: String| {
-        let at = at.clone();
+    let mut opened = 0;
+    let mut open = |request: String| {
+        let to = addresses[opened % addresses.len()].clone();
+        opened += 1;
         async move {
-            let mut stream = tokio::net::TcpStream::connect(&at).await.unwrap();
+            let mut stream = tokio::net::TcpStream::connect(&to).await.unwrap();
             stream.write_all(request.as_bytes()).await.unwrap();
             let mut buffer = vec![0; 16];
             let read = tokio::time::timeout(SECOND, stream.read(&mut buffer)).await;

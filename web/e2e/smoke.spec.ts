@@ -95,6 +95,7 @@ test("smoke", async ({ reef, context, page }) => {
 
   const first = await test.step("the daemon serves this checkout's app", async () => {
     const session = await reef.session();
+    expect(new URL(session.url).hostname, "served as localhost").toBe("localhost");
     const script = /assets\/index-[^"]+\.js/;
     const served = script.exec(await (await fetch(session.url)).text())?.[0];
     const built = script.exec(
@@ -392,7 +393,8 @@ test("smoke", async ({ reef, context, page }) => {
         { tab: 0, open: false },
         { tab: 0, open: false },
       ]);
-    await reef.writeConfig(`127.0.0.1:${port}`);
+    // Either family's address means both: the origin stays `localhost`.
+    await reef.writeConfig(`[::1]:${port}`);
     await reef.start();
     const next = await reef.session();
     expect(next.url, "the same origin as the tabs").toBe(url);

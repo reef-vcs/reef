@@ -43,7 +43,7 @@ message CreateWebSessionRequest {
 
 // A web UI session.
 message CreateWebSessionResponse {
-  // The web UI's address, such as `http://127.0.0.1:52817/`. No token.
+  // The web UI's address, such as `http://localhost:52817/`. No token.
   string url = 1;
   // `url` with the session's token in its fragment (`#session=<token>`).
   // A credential: whoever holds it can read every registered repository

@@ -1,8 +1,9 @@
 //! What the web listener accepts (R2.18, ADR 0047): [`WebGateLayer`] sits
 //! outside `tonic_web::GrpcWebLayer` and checks every request, in order:
 //!
-//! 1. `Host` (or HTTP/2's `:authority`) is exactly the bound authority, or
-//!    `421`: DNS rebinding.
+//! 1. `Host` (or HTTP/2's `:authority`) is exactly `localhost:<port>`, or
+//!    `421`: DNS rebinding, and one origin (a `127.0.0.1` or `[::1]` host
+//!    too is `421`).
 //! 2. No `Upgrade` (`400`) and no `OPTIONS` (`405`): no WebSocket, and
 //!    every cross-origin preflight fails. No response carries CORS headers.
 //! 3. `GET` and `HEAD` on any path but an API path serve the assets.
@@ -62,7 +63,7 @@ pub(crate) const GRPC_WEB: [&str; 2] = ["application/grpc-web", "application/grp
 /// What the gate checks against.
 #[derive(Debug)]
 pub(crate) struct Gate {
-    /// The bound authority, `127.0.0.1:<port>` or `[::1]:<port>`.
+    /// The bound authority, `localhost:<port>`.
     pub(crate) authority: String,
     /// `http://<authority>`.
     pub(crate) origin: String,

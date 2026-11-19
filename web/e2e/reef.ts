@@ -46,7 +46,7 @@ export interface Workspace {
 }
 
 export interface Session {
-  /** `http://127.0.0.1:<port>/`. */
+  /** `http://localhost:<port>/`. */
   url: string;
   /** `url` with `#session=<token>`. */
   sessionUrl: string;

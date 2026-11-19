@@ -118,7 +118,7 @@ fn open(path: &Path) -> bool {
     }
 }
 
-/// The port of `url` (`http://127.0.0.1:<port>/`).
+/// The port of `url` (`http://localhost:<port>/`).
 fn port_of(url: &str) -> &str {
     url.trim_end_matches('/')
         .rsplit(':')
@@ -178,7 +178,7 @@ mod tests {
 
     #[test]
     fn ports() {
-        assert_eq!(port_of("http://127.0.0.1:52817/"), "52817");
+        assert_eq!(port_of("http://localhost:52817/"), "52817");
         assert_eq!(port_of("http://[::1]:7878/"), "7878");
     }
 }
