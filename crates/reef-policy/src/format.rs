@@ -109,6 +109,8 @@ struct RawFile {
     #[serde(default)]
     groups: BTreeMap<String, Spanned<List>>,
     #[serde(default)]
+    passkeys: BTreeMap<String, Spanned<List>>,
+    #[serde(default)]
     attestors: BTreeMap<String, Spanned<RawAttestor>>,
     #[serde(default)]
     require: Vec<Spanned<RawRequire>>,
@@ -275,15 +277,26 @@ pub struct Policy {
     pub(crate) sha256: String,
     pub(crate) owners: Signoff,
     pub(crate) groups: BTreeMap<String, Vec<String>>,
+    /// `[passkeys]`: each pinned identity, by name or id, and its passkeys'
+    /// fingerprints.
+    pub(crate) passkeys: BTreeMap<String, BTreeSet<String>>,
     pub(crate) attestors: BTreeMap<String, Attestor>,
     pub(crate) entries: Vec<Entry>,
     pub(crate) conflicts: Conflicts,
     pub(crate) landing: LandingSettings,
     pub(crate) history: HistorySettings,
     pub(crate) reads_destination: bool,
+    pub(crate) warnings: Vec<Diagnostic>,
 }
 
 impl Policy {
+    /// What loading found that does not stop the policy from loading, such
+    /// as a `presence = "user_verified"` no pinned passkey can meet. Every
+    /// evaluation reports them among its diagnostics.
+    pub fn warnings(&self) -> &[Diagnostic] {
+        &self.warnings
+    }
+
     /// Whether any of its expressions reads the `landing` or `batch`
     /// input, which follow the destination's head: a decision under it can
     /// change when the destination moves (R3.45, ADR 0081).
@@ -549,15 +562,19 @@ pub(crate) struct Expression {
     pub(crate) scope: Scope,
 }
 
-/// The least presence a key may have.
+/// A key's presence, or the least a requirement accepts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum Presence {
+pub enum Presence {
+    /// Nothing verified a person: every key has at least this.
     None,
+    /// A person verified on a passkey the policy pins (R3.43).
     UserVerified,
 }
 
 impl Presence {
-    pub(crate) fn as_str(self) -> &'static str {
+    /// Its name in the policy file and the input: `none` or
+    /// `user_verified`.
+    pub fn as_str(self) -> &'static str {
         match self {
             Presence::None => "none",
             Presence::UserVerified => "user_verified",
@@ -604,6 +621,18 @@ impl Members {
         self.anyone
             || (!id.is_empty() && self.ids.contains(id))
             || (!name.is_empty() && self.names.contains(name))
+    }
+
+    /// Whether the identity `entry` names (an id or a name) could be a
+    /// member: listed in the same form, or listed in the other, which only
+    /// the daemon can map.
+    fn could_include(&self, entry: &str) -> bool {
+        self.anyone
+            || if is_identity_id(entry) {
+                self.ids.contains(entry) || !self.names.is_empty()
+            } else {
+                self.names.contains(entry) || !self.ids.is_empty()
+            }
     }
 }
 
@@ -826,21 +855,27 @@ impl<'a> Source<'a> {
 struct Loader<'a> {
     source: Source<'a>,
     diagnostics: Vec<Diagnostic>,
+    warnings: Vec<Diagnostic>,
     entries: usize,
     /// Whether an expression reads `landing` or `batch` (R3.45).
     reads_destination: bool,
 }
 
 impl Loader<'_> {
-    fn at(&mut self, rule: &str, field: &str, offset: usize, message: impl Into<String>) {
+    fn diagnostic(&self, rule: &str, field: &str, offset: usize, message: String) -> Diagnostic {
         let (line, column) = self.source.position(offset);
-        self.diagnostics.push(Diagnostic {
+        Diagnostic {
             rule: rule.to_owned(),
             field: field.to_owned(),
             line,
             column,
-            message: message.into(),
-        });
+            message,
+        }
+    }
+
+    fn at(&mut self, rule: &str, field: &str, offset: usize, message: impl Into<String>) {
+        let diagnostic = self.diagnostic(rule, field, offset, message.into());
+        self.diagnostics.push(diagnostic);
     }
 
     fn list<'b>(&mut self, rule: &str, field: &str, list: &'b [Text]) -> Vec<&'b str> {
@@ -991,10 +1026,39 @@ impl Loader<'_> {
         }
     }
 
-    fn presence(&mut self, rule: &str, presence: Option<&Text>) -> Presence {
+    /// A requirement's least presence, with a warning when it asks for
+    /// `user_verified` and `[passkeys]` pins no identity among `members`.
+    fn presence(
+        &mut self,
+        rule: &str,
+        presence: Option<&Text>,
+        members: &Members,
+        passkeys: &BTreeMap<String, BTreeSet<String>>,
+    ) -> Presence {
         match presence.map(|p| (p.get_ref().as_str(), p.span().start)) {
             None | Some(("none", _)) => Presence::None,
-            Some(("user_verified", _)) => Presence::UserVerified,
+            Some(("user_verified", at)) => {
+                if !passkeys.keys().any(|who| members.could_include(who)) {
+                    let who: Vec<&str> = members
+                        .names
+                        .iter()
+                        .chain(&members.ids)
+                        .map(String::as_str)
+                        .collect();
+                    let who = match who.len() {
+                        n if n > 5 => format!("{} and {} more", who[..5].join(", "), n - 5),
+                        _ => who.join(", "),
+                    };
+                    let warning = self.diagnostic(
+                        rule,
+                        "presence",
+                        at,
+                        format!("no passkey pinned for {who}: no key of theirs will meet presence user_verified; pin one in [passkeys]"),
+                    );
+                    self.warnings.push(warning);
+                }
+                Presence::UserVerified
+            }
             Some((other, at)) => {
                 self.at(
                     rule,
@@ -1163,6 +1227,15 @@ fn is_identity_id(text: &str) -> bool {
     })
 }
 
+/// 64 lowercase hex digits: a SHA-256, as Reef writes key ids and
+/// fingerprints.
+fn is_hex64(text: &str) -> bool {
+    text.len() == 64
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 /// An evidence kind, as R3.01's vocabulary allows: `[a-z][a-z0-9_.-]{0,63}`.
 fn is_kind(kind: &str) -> bool {
     let mut bytes = kind.bytes();
@@ -1257,11 +1330,14 @@ impl Policy {
         let mut loader = Loader {
             source,
             diagnostics: Vec::new(),
+            warnings: Vec::new(),
             entries: 0,
             reads_destination: false,
         };
-        let policy = loader.load(&raw, text);
+        let mut policy = loader.load(&raw, text);
         if loader.diagnostics.is_empty() {
+            loader.warnings.sort_by_key(|a| (a.line, a.column));
+            policy.warnings = loader.warnings;
             Ok(policy)
         } else {
             loader.diagnostics.sort_by_key(|a| (a.line, a.column));
@@ -1320,20 +1396,22 @@ impl Loader<'_> {
             }
             groups.insert(name.clone(), list);
         }
+        let passkeys = self.passkeys(&raw.passkeys);
 
         // Owners.
         let owners = if let Some(owners) = &raw.owners {
             let at = owners.span().start;
             let owners = owners.get_ref();
+            let members = self.members("owners", &owners.groups, &owners.identities, &groups, at);
             Signoff {
                 name: "builtin:owners".to_owned(),
                 filter: PathFilter {
                     paths: Patterns::new(POLICY_FILES).unwrap_or_else(|_| Patterns::empty()),
                     except: Patterns::empty(),
                 },
-                members: self.members("owners", &owners.groups, &owners.identities, &groups, at),
                 count: self.count("owners", owners.count.as_ref()),
-                presence: self.presence("owners", owners.presence.as_ref()),
+                presence: self.presence("owners", owners.presence.as_ref(), &members, &passkeys),
+                members,
                 kinds: vec!["signoff".to_owned()],
                 when: None,
                 message: String::new(),
@@ -1412,11 +1490,7 @@ impl Loader<'_> {
             let mut authorities = Vec::new();
             for authority in &set.authorities {
                 let text = authority.get_ref();
-                if text.len() == 64
-                    && text
-                        .bytes()
-                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-                {
+                if is_hex64(text) {
                     authorities.push(text.clone());
                 } else {
                     self.at(
@@ -1434,7 +1508,7 @@ impl Loader<'_> {
                 &set.issuer_kinds,
                 &["reef-daemon", "sigstore"],
             );
-            let presence = self.presence(&rule, set.presence.as_ref());
+            let presence = self.presence(&rule, set.presence.as_ref(), &members, &passkeys);
             let allow_self = match set
                 .self_
                 .as_ref()
@@ -1626,7 +1700,7 @@ impl Loader<'_> {
             let filter = self.filter(&name, &signoff.paths, &signoff.except);
             let members = self.members(&name, &signoff.groups, &signoff.identities, &groups, at);
             let count = self.count(&name, signoff.count.as_ref());
-            let presence = self.presence(&name, signoff.presence.as_ref());
+            let presence = self.presence(&name, signoff.presence.as_ref(), &members, &passkeys);
             let kinds = match &signoff.kinds {
                 Some(kinds) => self.kinds(&name, "kinds", kinds.get_ref(), kinds.span().start),
                 None => vec!["signoff".to_owned()],
@@ -1717,13 +1791,73 @@ impl Loader<'_> {
             sha256: crate::sha256_hex(text.as_bytes()),
             owners,
             groups,
+            passkeys,
             attestors,
             entries: entries.into_iter().map(|(_, entry)| entry).collect(),
             conflicts,
             landing,
             history,
             reads_destination: self.reads_destination,
+            warnings: Vec::new(),
         }
+    }
+
+    /// `[passkeys]` (R3.43): each identity, by name or id, and the
+    /// fingerprints of the passkeys whose verification counts for it.
+    fn passkeys(
+        &mut self,
+        raw: &BTreeMap<String, Spanned<List>>,
+    ) -> BTreeMap<String, BTreeSet<String>> {
+        if raw.len() > MAX_LIST {
+            self.at(
+                "passkeys",
+                "",
+                0,
+                format!(
+                    "{} identities; [passkeys] pins at most {MAX_LIST}",
+                    raw.len()
+                ),
+            );
+        }
+        let mut passkeys = BTreeMap::new();
+        for (identity, fingerprints) in raw {
+            let at = fingerprints.span().start;
+            if !is_identity_id(identity) && !is_identity_name(identity) {
+                self.at(
+                    "passkeys",
+                    identity,
+                    at,
+                    format!("{identity:?} is neither an identity name nor an identity id (idn_ and 16 hex digits)"),
+                );
+            }
+            self.list("passkeys", identity, fingerprints.get_ref());
+            if fingerprints.get_ref().is_empty() {
+                self.at(
+                    "passkeys",
+                    identity,
+                    at,
+                    "is empty; pin at least one passkey, or leave the identity out",
+                );
+            }
+            let mut pinned = BTreeSet::new();
+            for fingerprint in fingerprints.get_ref() {
+                if is_hex64(fingerprint.get_ref()) {
+                    pinned.insert(fingerprint.get_ref().clone());
+                } else {
+                    self.at(
+                        "passkeys",
+                        identity,
+                        fingerprint.span().start,
+                        format!(
+                            "{:?} is not a passkey fingerprint (64 lowercase hex digits: the SHA-256 of its public key)",
+                            fingerprint.get_ref()
+                        ),
+                    );
+                }
+            }
+            passkeys.insert(identity.clone(), pinned);
+        }
+        passkeys
     }
 
     fn history(&mut self, raw: Option<&Spanned<RawHistory>>) -> HistorySettings {
@@ -1912,6 +2046,10 @@ presence = "none"
 [groups]
 maintainers = ["alice", "idn_8f3a0c2d91e4b675"]
 
+[passkeys]
+alice = ["3c9e0d5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f"]
+idn_8f3a0c2d91e4b675 = ["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"]
+
 [attestors.ci]
 identities = ["ci-main"]
 groups = []
@@ -2006,6 +2144,116 @@ message = "every commit of the change has a signed, bound provenance record"
         assert_eq!(limits.max_file_size, Some(5 << 20));
         assert!(policy.owners.members.contains("idn_8f3a0c2d91e4b675", ""));
         assert!(policy.owners.members.contains("", "alice"));
+        assert_eq!(
+            policy.passkeys.keys().collect::<Vec<_>>(),
+            ["alice", "idn_8f3a0c2d91e4b675"]
+        );
+        assert_eq!(policy.warnings(), []);
+    }
+
+    const FINGERPRINT: &str = "3c9e0d5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f";
+
+    #[test]
+    fn passkeys_are_checked_with_positions() {
+        let short = one(
+            &with("[passkeys]\nalice = [\"3c9e\"]\n"),
+            "\"3c9e\" is not a passkey fingerprint",
+        );
+        assert_eq!(
+            (short.rule.as_str(), short.field.as_str()),
+            ("passkeys", "alice")
+        );
+        assert_eq!((short.line, short.column), (5, 10));
+        let upper = FINGERPRINT.to_uppercase();
+        let upper = one(
+            &with(&format!(
+                "[passkeys]\nalice = [\"{FINGERPRINT}\", \"{upper}\"]\n"
+            )),
+            "is not a passkey fingerprint",
+        );
+        assert_eq!((upper.line, upper.column), (5, 78));
+        let not_a_list = one(
+            &with(&format!("[passkeys]\nalice = \"{FINGERPRINT}\"\n")),
+            "expected a sequence",
+        );
+        assert_eq!((not_a_list.line, not_a_list.column), (5, 9));
+        one(&with("[passkeys]\nalice = [1]\n"), "expected a string");
+        let who = one(
+            &with(&format!("[passkeys]\n\"Bad Name\" = [\"{FINGERPRINT}\"]\n")),
+            "neither an identity name nor an identity id",
+        );
+        assert_eq!(who.line, 5);
+        one(
+            &with("[passkeys]\nalice = []\n"),
+            "is empty; pin at least one passkey",
+        );
+        let policy = Policy::load(
+            with(&format!(
+                "[passkeys]\nalice = [\"{FINGERPRINT}\", \"{FINGERPRINT}\"]\nidn_0000000000000001 = [\"{}\"]\n",
+                "0".repeat(64)
+            ))
+            .as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(policy.passkeys["alice"].len(), 1);
+        assert_eq!(policy.passkeys.len(), 2);
+    }
+
+    fn warnings(text: &str) -> Vec<String> {
+        Policy::load(text.as_bytes())
+            .unwrap_or_else(|errors| panic!("{text}\n{errors:#?}"))
+            .warnings()
+            .iter()
+            .map(ToString::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn user_verified_without_a_pin_that_could_meet_it_is_a_warning() {
+        let head = "version = 1\n[groups]\nleads = [\"bob\", \"idn_0000000000000002\"]\n";
+        let owners =
+            format!("{head}[owners]\nidentities = [\"alice\"]\npresence = \"user_verified\"\n");
+        assert_eq!(
+            warnings(&owners),
+            [
+                "6:12: owners.presence: no passkey pinned for alice: no key of theirs will meet presence user_verified; pin one in [passkeys]"
+            ]
+        );
+        let set = format!(
+            "{head}[owners]\nidentities = [\"alice\"]\n[attestors.ci]\ngroups = [\"leads\"]\npresence = \"user_verified\"\n"
+        );
+        assert_eq!(
+            warnings(&set),
+            [
+                "8:12: attestors.ci.presence: no passkey pinned for bob, idn_0000000000000002: no key of theirs will meet presence user_verified; pin one in [passkeys]"
+            ]
+        );
+        let area = format!(
+            "{head}[owners]\nidentities = [\"alice\"]\n[[signoff]]\nname = \"area\"\nidentities = [\"alice\"]\npresence = \"user_verified\"\n"
+        );
+        assert_eq!(warnings(&area).len(), 1);
+        // A pin for another identity does not help; one for a member does,
+        // and so does one in the other form, which only the daemon can map.
+        let pin = |who: &str| format!("[passkeys]\n{who} = [\"{FINGERPRINT}\"]\n");
+        assert_eq!(warnings(&format!("{area}{}", pin("carol"))).len(), 1);
+        assert_eq!(
+            warnings(&format!("{area}{}", pin("alice"))),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            warnings(&format!("{area}{}", pin("idn_0000000000000009"))),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            warnings(&format!("{set}{}", pin("idn_0000000000000002"))),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            warnings(&format!("{set}{}", pin("bob"))),
+            Vec::<String>::new()
+        );
+        // Pins nothing asks for are not a problem: CEL can read them.
+        assert_eq!(warnings(&with(&pin("carol"))), Vec::<String>::new());
     }
 
     #[test]

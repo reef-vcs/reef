@@ -1,0 +1,60 @@
+{
+  "change": {
+    "id": "a1b2",
+    "commit": "c1",
+    "tree": "t1",
+    "parents": [
+      "p1"
+    ],
+    "paths": [
+      "release/notes.md"
+    ],
+    "files": [
+      {
+        "path": "release/notes.md",
+        "status": "modified",
+        "lines_added": 3,
+        "lines_removed": 0,
+        "size": 120
+      }
+    ],
+    "lines_added": 3,
+    "lines_removed": 0
+  },
+  "evidence": [
+    {
+      "id": "ev-0",
+      "kind": "signoff",
+      "result": "pass",
+      "added_at": 1000,
+      "key": {
+        "id": "k1",
+        "status": "bound",
+        "identity": "alice",
+        "identity_id": "idn_000000000000a11c",
+        "identity_kind": "person",
+        "actor": "human",
+        "session": "ses_000000000000a11c",
+        "presence": "user_verified",
+        "passkey": "3c9e0d5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f"
+      }
+    },
+    {
+      "id": "ev-1",
+      "kind": "signoff",
+      "result": "pass",
+      "added_at": 1001,
+      "key": {
+        "id": "k2",
+        "status": "bound",
+        "identity": "bob",
+        "identity_id": "idn_0000000000000b0b",
+        "identity_kind": "person",
+        "actor": "human",
+        "session": "ses_0000000000000b0b",
+        "presence": "user_verified",
+        "passkey": "b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0"
+      }
+    }
+  ]
+}

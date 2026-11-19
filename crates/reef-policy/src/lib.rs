@@ -2,9 +2,10 @@
 //! root of a tree, and its evaluation over one change.
 //!
 //! - [`format`](mod@format): the file, format version 1: strict TOML tables (owners,
-//!   groups, attestor sets, required evidence, limits, forbidden paths,
-//!   sign-off areas, conflict tiers) whose conditions are CEL, plus free CEL
-//!   rules, loaded into a [`Policy`] with a [`Diagnostic`] per problem.
+//!   groups, pinned passkeys, attestor sets, required evidence, limits,
+//!   forbidden paths, sign-off areas, conflict tiers) whose conditions are
+//!   CEL, plus free CEL rules, loaded into a [`Policy`] with a
+//!   [`Diagnostic`] per problem.
 //! - [`input`]: what a policy sees about one change: its paths and files,
 //!   the evidence on its tree with each signer's identity, and its
 //!   provenance.
@@ -43,7 +44,7 @@ pub use eval::{
 };
 pub use format::{
     Checks, DEFAULT_ATTEMPTS, DEFAULT_TIER, Diagnostic, HistorySettings, LandingSettings, Message,
-    POLICY_FILES, Policy, Tier, TrailerSet, VERSION, valid_remote_name,
+    POLICY_FILES, Policy, Presence, Tier, TrailerSet, VERSION, valid_remote_name,
 };
 pub use input::{Batch, Case, ConflictInput, Input};
 
@@ -132,6 +133,12 @@ version = 1
 # `reef evidence add --kind signoff --result pass --actor human`.
 [owners]
 identities = ["{owner}"]
+
+# To make an owner's sign-off need a touch of a passkey, add
+# `presence = "user_verified"` to [owners] and pin the passkey here; the
+# Passkeys page of `reef ui` and `reef identity passkey list` print the line:
+# [passkeys]
+# {owner} = ["<the passkey's fingerprint: 64 hex digits>"]
 
 # Whose evidence counts: this machine's executor, signing for {owner}, and never
 # the change's own session or agent.

@@ -1,0 +1,121 @@
+{
+  "cost": 0,
+  "decision": "block",
+  "diagnostics": [],
+  "input": {
+    "conflicted": false,
+    "evidence": 3,
+    "evidence_ignored": 0,
+    "lines_added": 3,
+    "lines_removed": 0,
+    "paths": 1,
+    "provenance": 0,
+    "resolutions": 0
+  },
+  "rules": [
+    {
+      "evidence_ids": [],
+      "failed": [],
+      "kind": "builtin",
+      "message": "",
+      "missing": [],
+      "name": "builtin:input",
+      "paths": [],
+      "paths_total": 0,
+      "signoff": null,
+      "status": "satisfied"
+    },
+    {
+      "evidence_ids": [],
+      "failed": [],
+      "kind": "builtin",
+      "message": "",
+      "missing": [],
+      "name": "builtin:conflicts",
+      "paths": [],
+      "paths_total": 0,
+      "signoff": null,
+      "status": "satisfied"
+    },
+    {
+      "evidence_ids": [],
+      "failed": [],
+      "kind": "builtin",
+      "message": "",
+      "missing": [],
+      "name": "builtin:description",
+      "paths": [],
+      "paths_total": 0,
+      "signoff": null,
+      "status": "not_applicable"
+    },
+    {
+      "evidence_ids": [],
+      "failed": [],
+      "kind": "builtin",
+      "message": "",
+      "missing": [],
+      "name": "builtin:policy-file",
+      "paths": [],
+      "paths_total": 0,
+      "signoff": null,
+      "status": "not_applicable"
+    },
+    {
+      "evidence_ids": [],
+      "failed": [],
+      "kind": "builtin",
+      "message": "",
+      "missing": [],
+      "name": "builtin:owners",
+      "paths": [],
+      "paths_total": 0,
+      "signoff": null,
+      "status": "not_applicable"
+    },
+    {
+      "evidence_ids": [],
+      "failed": [],
+      "kind": "builtin",
+      "message": "",
+      "missing": [],
+      "name": "builtin:resolution",
+      "paths": [],
+      "paths_total": 0,
+      "signoff": null,
+      "status": "not_applicable"
+    },
+    {
+      "evidence_ids": [
+        "ev-0"
+      ],
+      "failed": [],
+      "kind": "signoff",
+      "message": "needs 2 sign-offs from release (1 so far)",
+      "missing": [],
+      "name": "release",
+      "paths": [
+        "release/notes.md"
+      ],
+      "paths_total": 1,
+      "signoff": {
+        "count": 2,
+        "groups": [
+          "release"
+        ],
+        "have": 1,
+        "identities": [],
+        "kinds": [
+          "signoff"
+        ],
+        "presence": "user_verified",
+        "signed_by": [
+          "alice"
+        ]
+      },
+      "status": "unsatisfied"
+    }
+  ],
+  "sha256": "fcf3bc58e3d24a5bb35486a3cc5435e5d5ba84238eb1e8a73f61ec3795af6dbc",
+  "version": 1
+}

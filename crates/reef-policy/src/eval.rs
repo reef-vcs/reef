@@ -19,7 +19,7 @@ use crate::format::{
     Attestor, Diagnostic, Entry, Expression, Members, Policy, Presence, Require, Signoff,
 };
 use crate::glob::{PathFilter, Patterns};
-use crate::input::{Evidence, Input};
+use crate::input::{Evidence, Input, Key};
 
 /// What a policy decides about a change.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -105,7 +105,8 @@ pub struct Rejected {
     /// Why it did not count: `error` (no verdict), `key_unbound`,
     /// `key_expired`, `key_revoked` or `key_invalid` (its key's status at
     /// witness time), `self` (from the change's own session or agent),
-    /// `presence` (its key's presence is below the set's), `condition` (a
+    /// `presence` (its key's presence, `user_verified` only with a pinned
+    /// passkey, is below the set's), `condition` (a
     /// set's `when` was false), or `untrusted` (no attestor set of the rule
     /// accepts its signer). The daemon adds `signature_invalid`.
     pub why: String,
@@ -386,26 +387,30 @@ impl Evaluator {
 
 /// Whether `e`'s signer is in `set` by its declared keys (everything but
 /// `when`).
-fn declared_match(set: &Attestor, e: &Evidence) -> bool {
+fn declared_match(policy: &Policy, set: &Attestor, e: &Evidence) -> bool {
     e.key.status == "bound"
         && set.members.contains(&e.key.identity_id, &e.key.identity)
         && (set.identity_kinds.is_empty() || set.identity_kinds.contains(&e.key.identity_kind))
         && set.actors.contains(&e.key.actor)
         && (set.authorities.is_empty() || set.authorities.contains(&e.key.authority))
         && (set.issuer_kinds.is_empty() || set.issuer_kinds.contains(&e.key.issuer_kind))
-        && Presence::of_key(&e.key.presence).is_some_and(|presence| presence >= set.presence)
+        && policy
+            .presence(&e.key)
+            .is_some_and(|presence| presence >= set.presence)
         && (set.allow_self || !e.from_self)
 }
 
 /// Whether `e` is a sign-off `spec` counts.
-fn is_signoff(spec: &Signoff, e: &Evidence) -> bool {
+fn is_signoff(policy: &Policy, spec: &Signoff, e: &Evidence) -> bool {
     spec.kinds.contains(&e.kind)
         && e.result == "pass"
         && e.key.status == "bound"
         && e.key.actor == "human"
         && e.key.identity_kind == "person"
         && spec.members.contains(&e.key.identity_id, &e.key.identity)
-        && Presence::of_key(&e.key.presence).is_some_and(|presence| presence >= spec.presence)
+        && policy
+            .presence(&e.key)
+            .is_some_and(|presence| presence >= spec.presence)
 }
 
 /// Fills each object's `self`, from the change's provenance sessions and
@@ -442,6 +447,27 @@ fn mark_self(input: &mut Input) {
 }
 
 impl Policy {
+    /// The presence `key` counts as under this policy (R3.43, ADR 0085):
+    /// `user_verified` only when its certificate says so and its passkey is
+    /// pinned in `[passkeys]` for its identity, by id or by name; otherwise
+    /// `none`. `None` for a presence this Reef does not know, which meets no
+    /// requirement.
+    pub fn presence(&self, key: &Key) -> Option<Presence> {
+        let pinned = |identity: &str| {
+            !identity.is_empty()
+                && self
+                    .passkeys
+                    .get(identity)
+                    .is_some_and(|fingerprints| fingerprints.contains(&key.passkey))
+        };
+        match Presence::of_key(&key.presence)? {
+            Presence::UserVerified if pinned(&key.identity_id) || pinned(&key.identity) => {
+                Some(Presence::UserVerified)
+            }
+            _ => Some(Presence::None),
+        }
+    }
+
     /// The SHA-256 of the bytes this policy was loaded from.
     pub fn sha256(&self) -> &str {
         &self.sha256
@@ -530,7 +556,7 @@ impl Policy {
         rules.push(self.description(&evaluator.input));
         rules.push(policy_file(&evaluator.input));
         rules.push(self.signoff(&mut evaluator, &self.owners, RuleKind::Builtin));
-        rules.push(resolution(&mut evaluator));
+        rules.push(resolution(self, &mut evaluator));
         for entry in &self.entries {
             let result = match entry {
                 Entry::Require(require) => self.require(&mut evaluator, require),
@@ -604,7 +630,12 @@ impl Policy {
             decision,
             sha256: self.sha256.clone(),
             version: crate::VERSION,
-            diagnostics: evaluator.diagnostics,
+            diagnostics: self
+                .warnings
+                .iter()
+                .cloned()
+                .chain(evaluator.diagnostics)
+                .collect(),
             rules,
             input: InputSummary::of(&evaluator.input),
             cost: evaluator.total,
@@ -679,7 +710,7 @@ impl Policy {
             .map(|e| {
                 self.attestors
                     .iter()
-                    .filter(|(_, set)| declared_match(set, e))
+                    .filter(|(_, set)| declared_match(self, set, e))
                     .map(|(name, _)| name)
                     .collect()
             })
@@ -747,7 +778,7 @@ impl Policy {
             }))
             .collect();
         let counts = |e: &Evidence| {
-            !e.attestors.is_empty() || signoffs.iter().any(|spec| is_signoff(spec, e))
+            !e.attestors.is_empty() || signoffs.iter().any(|spec| is_signoff(self, spec, e))
         };
         let trusted = evaluator
             .input
@@ -832,7 +863,7 @@ impl Policy {
                 .iter()
                 .filter_map(|name| self.attestors.get(name))
         };
-        if sets().any(|set| declared_match(set, e)) {
+        if sets().any(|set| declared_match(self, set, e)) {
             return "condition";
         }
         let trusted_but = |set: &Attestor, presence: bool, self_ok: bool| {
@@ -842,7 +873,8 @@ impl Policy {
                 && set.actors.contains(&e.key.actor)
                 && (set.authorities.is_empty() || set.authorities.contains(&e.key.authority))
                 && (presence
-                    || Presence::of_key(&e.key.presence)
+                    || self
+                        .presence(&e.key)
                         .is_some_and(|presence| presence >= set.presence))
                 && (self_ok || set.allow_self || !e.from_self)
         };
@@ -969,7 +1001,6 @@ impl Policy {
         result
     }
 
-    #[allow(clippy::unused_self)]
     fn signoff(&self, evaluator: &mut Evaluator, spec: &Signoff, kind: RuleKind) -> RuleResult {
         let covered: Vec<String> = spec
             .filter
@@ -993,16 +1024,22 @@ impl Policy {
             Ok(false) => return RuleResult::new(&spec.name, kind, Status::NotApplicable),
             Ok(true) => {}
         }
-        signed(evaluator, spec, kind, &covered)
+        signed(self, evaluator, spec, kind, &covered)
     }
 }
 
 /// `spec`'s sign-offs on the tree, counted, as the result of a rule that
 /// applies to `covered`.
-fn signed(evaluator: &Evaluator, spec: &Signoff, kind: RuleKind, covered: &[String]) -> RuleResult {
+fn signed(
+    policy: &Policy,
+    evaluator: &Evaluator,
+    spec: &Signoff,
+    kind: RuleKind,
+    covered: &[String],
+) -> RuleResult {
     let mut signers: BTreeMap<String, (String, String)> = BTreeMap::new();
     for e in &evaluator.input.evidence {
-        if is_signoff(spec, e) {
+        if is_signoff(policy, spec, e) {
             let key = if e.key.identity_id.is_empty() {
                 e.key.identity.clone()
             } else {
@@ -1087,7 +1124,7 @@ fn approvers() -> Signoff {
 /// `builtin:resolution` (R3.28): a change that resolved a conflict whose
 /// resolution needs approval (an `approve` or `ask` tier, or resolved past
 /// a block) lands only with a person's sign-off on its tree.
-fn resolution(evaluator: &mut Evaluator) -> RuleResult {
+fn resolution(policy: &Policy, evaluator: &mut Evaluator) -> RuleResult {
     const NAME: &str = "builtin:resolution";
     let needing: Vec<&crate::input::Resolution> = evaluator
         .input
@@ -1103,7 +1140,7 @@ fn resolution(evaluator: &mut Evaluator) -> RuleResult {
         [_] => format!("conflict {} (tier {})", first.assignment, first.tier),
         many => format!("{} conflicts ({} and others)", many.len(), first.assignment),
     };
-    let mut result = signed(evaluator, &approvers(), RuleKind::Builtin, &[]);
+    let mut result = signed(policy, evaluator, &approvers(), RuleKind::Builtin, &[]);
     if result.status == Status::Unsatisfied {
         let have = result.signoff.as_ref().map_or(0, |need| need.have);
         result.message =
