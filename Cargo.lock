@@ -3720,6 +3720,7 @@ dependencies = [
  "jiff",
  "jsonschema",
  "reef-error",
+ "reef-evidence",
  "reef-testing",
  "ring",
  "schemars",

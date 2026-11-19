@@ -21,8 +21,8 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use reef_evidence::session::{
     Actor, Authority, Binding, Certified, Custody, IdentityKind, IdentityRef, IdentityStatus,
-    Issuer, IssuerKind, Presence, Revocation, Revocations, SESSION_KEY_PREDICATE_TYPE, certify,
-    check_certificate, status_at,
+    Issuer, IssuerKind, PresenceProof, Revocation, Revocations, SESSION_KEY_PREDICATE_TYPE,
+    certify, check_certificate, status_at,
 };
 use reef_evidence::{Invalid, KeyId, PAYLOAD_TYPE, SigningKey, pae};
 use serde_json::{Value, json};
@@ -75,7 +75,7 @@ fn binding() -> Binding {
         actor: Actor::Agent,
         agent: Some("builder-3".into()),
         session: "ses_41c9e07ab2d35f18".into(),
-        presence: Presence::None,
+        presence: PresenceProof::None,
         custody: Custody::Client,
         not_before_ms: NOT_BEFORE,
         not_after_ms: NOT_AFTER,
@@ -251,7 +251,7 @@ fn refusals() -> Vec<(&'static str, Vec<u8>, Expect)> {
         ),
         (
             "unknown-presence",
-            signed_with(predicate("presence", json!("user_verified"))),
+            signed_with(predicate("presence", json!("user_present"))),
             Check("predicate", Some("presence")),
         ),
         (

@@ -1,0 +1,20 @@
+{
+  "browser": "chromium 156.0.8078.4",
+  "origin": "http://localhost:56846",
+  "rpId": "localhost",
+  "inputs": {
+    "authority": "9064b45b3e0fb33b851a2e994e8bbf6f60ef5c1579301e88719cc13ae3153aec",
+    "key": "94dba32b51f94ea96f79f6a287a99bbf594f35be794c0bb649605e9d185c501b",
+    "identity": "idn_8f3a0c2d91e4b675",
+    "session": "ses_41c9e07ab2d35f18",
+    "statement": "3e3b19ff75a3e552928eca34c435f98d9b7adaef13c8966fb35e2d7ea3bd4386",
+    "change": "8d1f0e7c6b5a49382716f5e4d3c2b1a0"
+  },
+  "challenge": "J66z7jnTDOkfxUaQk_tnsyT347w24BtNU-CBduBw4yk",
+  "credentialId": "6wcVM4QV52wS45BNvM+YnSfH12TI/eT9DkYpmw4J+Uk=",
+  "publicKey": "MCowBQYDK2VwAyEAQ8mIY27zymVjswrQH+JoxLxoRitgXfuwvfyRQWFlvqg=",
+  "algorithm": -8,
+  "authenticatorData": "SZYN5YgOjGh0NBcPZHZgW4/krrmihjLHmVzzuoMdl2MFAAAAAg==",
+  "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiSjY2ejdqblRET2tmeFVhUWtfdG5zeVQzNDd3MjRCdE5VLUNCZHVCdzR5ayIsIm9yaWdpbiI6Imh0dHA6Ly9sb2NhbGhvc3Q6NTY4NDYiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+  "signature": "3pFQkN9tiHLvcHPDb9XMZmFG6oCr2QF9e70qK56xHHEhWV692YB5g7AY0xJGtMsmcFwNHJAl3VIxX6+lBC49Dg=="
+}

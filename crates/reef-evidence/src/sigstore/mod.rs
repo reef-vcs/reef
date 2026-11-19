@@ -39,8 +39,8 @@ use sigstore_verify::{VerificationPolicy, Verifier};
 
 use crate::keys::{KeyId, PublicKey};
 use crate::session::{
-    Actor, Binding, Custody, IdentityRef, Issuer, IssuerKind, Presence, agent_problem,
-    is_session_id, known, names, string, subject_digest,
+    Actor, Binding, Custody, IdentityRef, Issuer, IssuerKind, Presence, PresenceProof,
+    agent_problem, is_session_id, known, names, string, subject_digest,
 };
 use crate::verify::statement_value;
 use crate::{Invalid, PAYLOAD_TYPE, STATEMENT_TYPE};
@@ -378,7 +378,7 @@ impl SigstoreCertified {
             actor: self.actor,
             agent: self.agent.clone(),
             session: self.session.clone(),
-            presence: self.presence,
+            presence: PresenceProof::None,
             custody: self.custody,
             not_before_ms: self.not_before_ms,
             not_after_ms: self.not_after_ms,
