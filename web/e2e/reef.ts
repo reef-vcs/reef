@@ -58,6 +58,8 @@ export class Reef {
   readonly state: string;
   readonly fixture: string;
   repo = "";
+  /** The default identity's name, once `setup` was given a policy. */
+  identity = "";
   readonly workspaces: Workspace[] = [];
   private readonly env: NodeJS.ProcessEnv;
   private daemon: ChildProcess | null = null;
@@ -111,8 +113,12 @@ export class Reef {
     return new Reef(root);
   }
 
-  /** A configuration, a running daemon, the fixture and two workspaces. */
-  async setup() {
+  /**
+   * A configuration, a running daemon, the fixture and two workspaces. With
+   * `policy`, the fixture's first commit holds `reef-policy.toml`, its text
+   * given the default identity's name.
+   */
+  async setup(options: { policy?: (identity: string) => string } = {}) {
     await mkdir(this.state, { mode: 0o700 });
     await mkdir(join(this.root, "home"));
     await this.writeConfig("127.0.0.1:0");
@@ -122,6 +128,11 @@ export class Reef {
     await this.git("init", "-q", "-b", "main");
     await writeFile(join(this.fixture, "README.md"), "The smoke test's fixture.\n");
     await this.git("add", "README.md");
+    if (options.policy) {
+      this.identity = await this.defaultIdentity();
+      await writeFile(join(this.fixture, "reef-policy.toml"), options.policy(this.identity));
+      await this.git("add", "reef-policy.toml");
+    }
     await this.git("commit", "-q", "-m", "fixture");
     const registered = (await this.reef(["repo", "register", this.fixture])) as {
       id?: string;
@@ -131,17 +142,39 @@ export class Reef {
     expect(this.repo, "repo register printed an id").not.toBe("");
     // Two workspaces, so that a describe of the older one would move it to
     // the top in jj's order: only the smartlog's ranks keep it in place.
-    for (let i = 0; i < 2; i++) {
-      const ws = (await this.reef([
-        "ws",
-        "create",
-        "--repo",
-        this.repo,
-        "--purpose",
-        "e2e smoke",
-      ])) as { id: string; change_id_reverse_hex: string; path: string };
-      this.workspaces.push({ id: ws.id, change: ws.change_id_reverse_hex, path: ws.path });
-    }
+    for (let i = 0; i < 2; i++) await this.workspace("e2e smoke");
+  }
+
+  /** A new workspace on the repository's trunk, released at the end. */
+  async workspace(purpose: string): Promise<Workspace> {
+    const ws = (await this.reef(["ws", "create", "--repo", this.repo, "--purpose", purpose])) as {
+      id: string;
+      change_id_reverse_hex: string;
+      path: string;
+    };
+    const workspace = { id: ws.id, change: ws.change_id_reverse_hex, path: ws.path };
+    this.workspaces.push(workspace);
+    return workspace;
+  }
+
+  /** Writes `files` into `ws`, snapshots it, and returns its change's commit id. */
+  async edit(ws: Workspace, files: Record<string, string>): Promise<string> {
+    for (const [name, text] of Object.entries(files)) await writeFile(join(ws.path, name), text);
+    const snapshot = (await this.reef(["ws", "snapshot", ws.id])) as { commit_id: string };
+    const commit = snapshot.commit_id;
+    expect(commit, "ws snapshot printed the commit").toMatch(/^[0-9a-f]{40}$/);
+    return commit;
+  }
+
+  /** The daemon's default identity's name. */
+  private async defaultIdentity(): Promise<string> {
+    const listed = (await this.reef(["identity", "list"])) as
+      | { name: string; is_default: boolean }[]
+      | { identities: { name: string; is_default: boolean }[] };
+    const identities = Array.isArray(listed) ? listed : listed.identities;
+    const name = identities.find((identity) => identity.is_default)?.name ?? "";
+    expect(name, "the daemon has a default identity").not.toBe("");
+    return name;
   }
 
   /**
@@ -327,13 +360,21 @@ export class Reef {
   }
 }
 
-export const test = base.extend<{ reef: Reef }>({
-  reef: async ({}, use, testInfo) => {
+export const test = base.extend<{
+  reef: Reef;
+  /**
+   * The fixture's first `reef-policy.toml`, from the default identity's name;
+   * none by default. In an object: Playwright takes a function for a fixture.
+   */
+  policy: { text: (identity: string) => string } | undefined;
+}>({
+  policy: [undefined, { option: true }],
+  reef: async ({ policy }, use, testInfo) => {
     const reef = await Reef.create();
     // A setup failure is not yet the test's status when this teardown runs.
     const failed = { setup: false };
     try {
-      await reef.setup().catch((error: unknown) => {
+      await reef.setup(policy ? { policy: policy.text } : {}).catch((error: unknown) => {
         failed.setup = true;
         throw error;
       });

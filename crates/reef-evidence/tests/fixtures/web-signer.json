@@ -1,0 +1,35 @@
+{
+  "approvalChallenge": "OnwPFPyDMlVix9Iq6gkzluIgJJtJyAhzLvyyiZFawfQ",
+  "inputs": {
+    "authority": "9064b45b3e0fb33b851a2e994e8bbf6f60ef5c1579301e88719cc13ae3153aec",
+    "change": "8d1f0e7c6b5a49382716f5e4d3c2b1a0",
+    "finishedMs": 1795115266106,
+    "identity": "alice",
+    "identityId": "idn_8f3a0c2d91e4b675",
+    "kind": "signoff",
+    "passkey": "pk_0123456789abcdef",
+    "result": "pass",
+    "seed": "Xl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl4=",
+    "session": "ses_41c9e07ab2d35f18",
+    "startedMs": 1795115266105,
+    "tree": "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+  },
+  "keyId": "3d1869980ca0df18af43e8c49d464fe1f752418dca5d1f36cbef9371a12319d5",
+  "proof": "B30oqQQJtxgF530eT1eZ1nyeLRByglD1Zo+tgexZKvBAQ49BnRhvotaHr6JEdxWtmsukdSMSQqq/5UdKHadVCA==",
+  "publicKey": "MCowBQYDK2VwAyEAgUZkDwJJOvT7xU/jM4jnXcLJN64LdyfMKyr7G3UZmj4=",
+  "removalChallenge": "azQimEY46fpQJFgc_Yf9feED73Dbb3pXh_HNiiIZqks",
+  "statements": [
+    {
+      "envelope": "{\"payload\":\"eyJfdHlwZSI6Imh0dHBzOi8vaW4tdG90by5pby9TdGF0ZW1lbnQvdjEiLCJzdWJqZWN0IjpbeyJuYW1lIjoidHJlZSIsImRpZ2VzdCI6eyJnaXRUcmVlIjoiNGI4MjVkYzY0MmNiNmViOWEwNjBlNTRiZjhkNjkyODhmYmVlNDkwNCJ9fV0sInByZWRpY2F0ZVR5cGUiOiJ1cm46cmVlZi12Y3M6ZXZpZGVuY2U6djEiLCJwcmVkaWNhdGUiOnsia2luZCI6InNpZ25vZmYiLCJyZXN1bHQiOiJwYXNzIiwic3RhcnRlZE9uIjoiMjAyNi0xMS0xOVQxOTowNzo0Ni4xMDVaIiwiZmluaXNoZWRPbiI6IjIwMjYtMTEtMTlUMTk6MDc6NDYuMTA2WiJ9fQ==\",\"payloadType\":\"application/vnd.in-toto+json\",\"signatures\":[{\"keyid\":\"3d1869980ca0df18af43e8c49d464fe1f752418dca5d1f36cbef9371a12319d5\",\"sig\":\"J36+GaXzOz0L2YwNCXqBoHWhCVgDdSYn3pukwmA21OyNc2b48ORBqrsFSVKV6BmR7kVGvvlOiRTQPRUwa2JLCA==\"}]}",
+      "payload": "{\"_type\":\"https://in-toto.io/Statement/v1\",\"subject\":[{\"name\":\"tree\",\"digest\":{\"gitTree\":\"4b825dc642cb6eb9a060e54bf8d69288fbee4904\"}}],\"predicateType\":\"urn:reef-vcs:evidence:v1\",\"predicate\":{\"kind\":\"signoff\",\"result\":\"pass\",\"startedOn\":\"2026-11-19T19:07:46.105Z\",\"finishedOn\":\"2026-11-19T19:07:46.106Z\"}}",
+      "sha256": "5b08a16452cc5fb5c713a33ba96be07c0ce0235d6bc76e8abe5d7e00bfe0dfa9",
+      "target": null
+    },
+    {
+      "envelope": "{\"payload\":\"eyJfdHlwZSI6Imh0dHBzOi8vaW4tdG90by5pby9TdGF0ZW1lbnQvdjEiLCJzdWJqZWN0IjpbeyJuYW1lIjoidHJlZSIsImRpZ2VzdCI6eyJnaXRUcmVlIjoiNGI4MjVkYzY0MmNiNmViOWEwNjBlNTRiZjhkNjkyODhmYmVlNDkwNCJ9fV0sInByZWRpY2F0ZVR5cGUiOiJ1cm46cmVlZi12Y3M6ZXZpZGVuY2U6djEiLCJwcmVkaWNhdGUiOnsia2luZCI6InNpZ25vZmYiLCJyZXN1bHQiOiJwYXNzIiwidGFyZ2V0Ijoid2ViL3NyYy9zaWduIFwiw7xcIiBcXCDinJMiLCJzdGFydGVkT24iOiIyMDI2LTExLTE5VDE5OjA3OjQ2LjEwNVoiLCJmaW5pc2hlZE9uIjoiMjAyNi0xMS0xOVQxOTowNzo0Ni4xMDZaIn19\",\"payloadType\":\"application/vnd.in-toto+json\",\"signatures\":[{\"keyid\":\"3d1869980ca0df18af43e8c49d464fe1f752418dca5d1f36cbef9371a12319d5\",\"sig\":\"gAeE/RYqi/+r5IsH1P9JWGQZnQMeRa3jKhMBXqZz2K7LbiCDtR7874Jiu/gJwmjVmSW6sQ4gc9KxufkAGQF0DA==\"}]}",
+      "payload": "{\"_type\":\"https://in-toto.io/Statement/v1\",\"subject\":[{\"name\":\"tree\",\"digest\":{\"gitTree\":\"4b825dc642cb6eb9a060e54bf8d69288fbee4904\"}}],\"predicateType\":\"urn:reef-vcs:evidence:v1\",\"predicate\":{\"kind\":\"signoff\",\"result\":\"pass\",\"target\":\"web/src/sign \\\"ü\\\" \\\\ ✓\",\"startedOn\":\"2026-11-19T19:07:46.105Z\",\"finishedOn\":\"2026-11-19T19:07:46.106Z\"}}",
+      "sha256": "fb059573025d094f3d2a141b8e4e8ae2a704ce69847402150f5877b5456173f2",
+      "target": "web/src/sign \"ü\" \\ ✓"
+    }
+  ]
+}

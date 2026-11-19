@@ -1610,3 +1610,50 @@ button.copy .icon {
 .themes table + h3 {
   margin-top: var(--space-3);
 }
+
+/* ------------------------------------------- passkeys and sign-offs (R3.43) */
+
+.passkeys,
+.approval {
+  max-width: 56rem;
+}
+
+.passkey-person {
+  margin: 0 0 var(--space-4);
+}
+
+.passkey-person h2 {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: 0;
+}
+
+.fingerprint {
+  overflow-wrap: anywhere;
+}
+
+.snippet {
+  margin: 0 0 var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  background: var(--canvas);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.passkey-add {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2);
+}

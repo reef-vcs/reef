@@ -30,6 +30,7 @@ import { Time } from "../ui/TimeLabel";
 import { operationSentence } from "../ui/words";
 import { activityHref } from "./activity-route";
 import { fleetHref } from "./fleet-route";
+import { SignOff } from "./SignOff";
 import { MIN_SPACING_MS, type SmartlogRow } from "./smartlog-model";
 
 export const HISTORY_DISABLED = "HISTORY_DISABLED";
@@ -532,6 +533,15 @@ export function ChangeDetail({
         commit={commit}
         at={frozen ? at : undefined}
       />
+      {!frozen && (
+        <SignOff
+          key={change.commitId}
+          connection={connection}
+          repo={repo}
+          change={change}
+          onSessionInvalid={onSessionInvalid}
+        />
+      )}
       {!frozen && <History history={history} error={historyError} />}
       {!frozen && presence.length > 0 && (
         <section>

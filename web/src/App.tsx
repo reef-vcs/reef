@@ -22,12 +22,16 @@ import { Overview } from "./views/Overview";
 
 const RepoFrame = lazyRoute(() => import("./views/RepoFrame").then((m) => m.RepoFrame));
 const States = lazyRoute(() => import("./views/States").then((m) => m.States));
+const Passkeys = lazyRoute(() => import("./views/Passkeys").then((m) => m.Passkeys));
+const Approve = lazyRoute(() => import("./views/Approve").then((m) => m.Approve));
 
 const REPO_PAGES: [string, RepoPage][] = [
   ["/repos/:repo/smartlog", "smartlog"],
   ["/repos/:repo/workspaces", "workspaces"],
   ["/repos/:repo/activity", "activity"],
 ];
+
+const PAGE_TITLES: Record<string, string> = { "/states": "States", "/passkeys": "Passkeys" };
 
 /** The repository page `path` names, if any. */
 function repoRoute(path: string): { repo: string; page: RepoPage } | null {
@@ -78,6 +82,7 @@ function Shell({
   const search = useSearch();
   const { status, error } = useDaemonStatus(connection, onSessionInvalid);
   const repo = repoRoute(path);
+  const approval = match("/approve/:id", path)?.id;
   // The app bar's slots, for the repository frame's portals (ui/header-slots).
   const [crumb, setCrumb] = useState<HTMLElement | null>(null);
   const [tabs, setTabs] = useState<HTMLElement | null>(null);
@@ -87,9 +92,9 @@ function Shell({
   const inRepo = repo !== null;
   useEffect(() => {
     if (inRepo) return;
-    document.title =
-      path === "/" ? "Reef" : path === "/states" ? "States — Reef" : "Not found — Reef";
-  }, [inRepo, path]);
+    const page = PAGE_TITLES[path] ?? (approval ? "Approve a sign-off" : "Not found");
+    document.title = path === "/" ? "Reef" : `${page} — Reef`;
+  }, [inRepo, path, approval]);
   return (
     <HeaderSlots.Provider value={slots}>
       <div className={repo ? "page repo-page" : "page"}>
@@ -122,6 +127,15 @@ function Shell({
             />
           ) : path === "/states" ? (
             <States />
+          ) : path === "/passkeys" ? (
+            <Passkeys connection={connection} onSessionInvalid={onSessionInvalid} />
+          ) : approval ? (
+            <Approve
+              key={approval}
+              connection={connection}
+              id={approval}
+              onSessionInvalid={onSessionInvalid}
+            />
           ) : (
             <NotFound />
           )}
