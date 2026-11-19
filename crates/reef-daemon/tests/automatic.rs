@@ -962,3 +962,112 @@ async fn an_amended_top_lets_the_bottom_land() {
     let top_status = status_until(client, &repo.id, &top, AutomaticState::Needs).await;
     assert_eq!(top_status.reason, "amended", "{top_status:#?}");
 }
+
+/// A help request (R3.32) on `change`, asked by `session`.
+async fn ask_for_help(client: &Client, repo: &str, change: &v1::Change, session: &str) -> String {
+    client
+        .create_comment(v1::CreateCommentRequest {
+            repo: repo.to_owned(),
+            revision: change.commit_id.clone(),
+            kind: v1::CommentKind::HelpRequest.into(),
+            text: "Is this the right approach?".to_owned(),
+            help: Some(v1::HelpInput {
+                tried: "wrote it and its tests".to_owned(),
+                ..v1::HelpInput::default()
+            }),
+            client_session: session.to_owned(),
+            ..v1::CreateCommentRequest::default()
+        })
+        .await
+        .unwrap()
+        .comment
+        .unwrap()
+        .id
+}
+
+// R3.32 test 8: an open help request holds automatic landing, naming it;
+// an answer releases it and it lands; an explicit `reef land` is never held.
+#[tokio::test(flavor = "multi_thread")]
+async fn help_request_holds_automatic_landing() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let main = setup(&daemon, &repo, &policy("automatic = true")).await;
+    let executor = Executor::start(client, &repo.id, trusted_key(client).await);
+    let change = commit_on(client, &repo.id, &main.commit_id, &[("x.txt", "x\n")]).await;
+    let asked = ask_for_help(client, &repo.id, &change, "agent").await;
+    propose(client, &repo.id, &change).await;
+    let held = status_until(client, &repo.id, &change, AutomaticState::Needs).await;
+    assert_eq!(held.reason, "help", "{held:#?}");
+    assert!(held.message.contains(&asked), "{held:#?}");
+    assert_eq!(held.next, ["reef", "comment", "show", asked.as_str()]);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(landings(client, &repo.id, &change.change_id).await, 0);
+    assert!(jobs(client, &repo.id).await.is_empty(), "nothing asked for");
+
+    // A person answers: the hold lifts, and it lands with nobody asking.
+    client
+        .create_comment(v1::CreateCommentRequest {
+            repo: repo.id.clone(),
+            revision: change.commit_id.clone(),
+            reply_to: asked.clone(),
+            kind: v1::CommentKind::Instruction.into(),
+            text: "Yes, go ahead.".to_owned(),
+            ..v1::CreateCommentRequest::default()
+        })
+        .await
+        .unwrap();
+    let landing = finished(client, &repo.id, &change.change_id).await;
+    assert_eq!(landing.outcome(), Outcome::Landed, "{landing:#?}");
+
+    // Withdrawing the help request lifts the hold too.
+    let withdrawn = commit_on(client, &repo.id, "main", &[("w.txt", "w\n")]).await;
+    let asked = ask_for_help(client, &repo.id, &withdrawn, "agent").await;
+    propose(client, &repo.id, &withdrawn).await;
+    status_until(client, &repo.id, &withdrawn, AutomaticState::Needs).await;
+    client
+        .withdraw_help_request(v1::WithdrawHelpRequestRequest {
+            repo: repo.id.clone(),
+            id: asked,
+            ..v1::WithdrawHelpRequestRequest::default()
+        })
+        .await
+        .unwrap();
+    let landing = finished(client, &repo.id, &withdrawn.change_id).await;
+    assert_eq!(landing.outcome(), Outcome::Landed, "{landing:#?}");
+    executor.stop().await;
+
+    // An explicit landing is not held.
+    let main = client
+        .get_change(v1::GetChangeRequest {
+            repo: repo.id.clone(),
+            revision: "main".to_owned(),
+            skip_snapshot: true,
+            ..v1::GetChangeRequest::default()
+        })
+        .await
+        .unwrap()
+        .change
+        .unwrap();
+    let other = commit_on(client, &repo.id, &main.commit_id, &[("y.txt", "y\n")]).await;
+    ask_for_help(client, &repo.id, &other, "agent").await;
+    evidence(
+        client,
+        &repo.id,
+        &other,
+        Verdict::Pass,
+        &trusted_key(client).await,
+    )
+    .await;
+    propose(client, &repo.id, &other).await;
+    status_until(client, &repo.id, &other, AutomaticState::Needs).await;
+    let response = client
+        .land_change(LandChangeRequest {
+            repo: repo.id.clone(),
+            revision: other.commit_id.clone(),
+            wait_ms: 60_000,
+            ..LandChangeRequest::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(response.landing.unwrap().outcome(), Outcome::Landed);
+}

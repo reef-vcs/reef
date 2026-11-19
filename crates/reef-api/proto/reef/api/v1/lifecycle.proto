@@ -64,9 +64,16 @@ enum ChangeStep {
   CHANGE_STEP_PUBLISH = 8;
   // Landed, superseded or otherwise immutable: nothing is left to do.
   CHANGE_STEP_DONE = 9;
+  // The workspace's session asked a help request on the change (R3.32) that
+  // is open, or whose answer no session has taken: wait for the answer
+  // (`reef comment next --wait`).
+  CHANGE_STEP_AWAIT_HELP = 10;
   // The change's conflict waits for a person (R3.28): its tier is `ask`
   // and no person gave the go-ahead, or its attempts are used up. Ask a
-  // person; do not resolve it.
+  // person (`reef ask --reason conflict`); do not resolve it. A help
+  // request the session asked and is waiting on outranks it (AWAIT_HELP);
+  // once the session took its answer, `Workspace.help_request_id` names it
+  // and asking again is no use: wait for a person to allow or take it.
   CHANGE_STEP_ASK = 11;
 }
 

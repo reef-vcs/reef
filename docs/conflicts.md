@@ -172,7 +172,15 @@ A conflict that may not start another attempt is `blocked`, with its reason:
 - `ask`: its tier is `ask` and no person gave the go-ahead. It is blocked from the start, with the owner it would have gone to kept, so that agent's `reef status` lists it and its `reef here` says `ask`.
 - `attempts`: its last attempt ended (the resolver released it, or its session ended past its grace) and the limit is reached. It goes here instead of the queue.
 
-A blocked conflict is out of the queue, an agent's claim or assignment of it is refused (`ASSIGNMENT_BLOCKED`), and `reef here` tells the agent on its change to ask a person and not to edit the conflicted files. Reef does not stop an agent writing its own workspace: a conflict resolved while blocked closes like any other, and its resolution lands only with a person's sign-off.
+A blocked conflict is out of the queue, an agent's claim or assignment of it is refused (`ASSIGNMENT_BLOCKED`), and `reef here` tells the agent on its change to ask a person and not to edit the conflicted files. Its `next` is a help request about the conflict ([comments](comments.md#help-requests), R3.32), naming the assignment from `Workspace.conflict_assignment_id`:
+
+```sh
+reef ask --reason conflict --conflict asg_0123456789abcdef --while-blocked --tried "Nothing: the conflict's policy tier is ask, so I may not attempt it." -m "Both sides rename parse_all"
+```
+
+`next` fills `--tried` in for the reason the conflict waits (`Workspace.conflict_block_reason`, `ask` or `attempts`) and ends on `-m`, for the agent's own words. `--while-blocked` refuses the question (`CONFLICT_NOT_BLOCKED`, next `reef here`) if a person let the agent go on after `reef here` ran.
+
+While the help request is open, or its answer untaken, the step is `await_help`. An answer does not unblock the conflict: only a person's go-ahead or takeover, below, does. Once the agent takes the answer, a conflict still blocked is `ask` again, with that help request in `Workspace.help_request_id` (until the conflict next becomes blocked or changes), and `next` waits for the assignment to change (`reef op watch --kind conflict-assignment --change <change> --count 1 --for 120`) rather than asking again. A go-ahead or takeover, a policy change that unblocks it, or the assignment closing, while the help request is still open, withdraws it (`conflict_unblocked`), so the agent goes on without waiting for an answer. Reef does not stop an agent writing its own workspace: a conflict resolved while blocked closes like any other, and its resolution lands only with a person's sign-off.
 
 A person moves it on:
 

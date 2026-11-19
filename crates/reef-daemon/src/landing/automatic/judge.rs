@@ -28,6 +28,9 @@ use crate::lifecycle::Actor;
 use crate::model::{RepoId, Timestamp};
 use reef_lib::jj::land::LandTarget;
 
+/// The automatic status's reason while a help request holds it (R3.32).
+pub(crate) const HELP_REASON: &str = "help";
+
 /// The open jobs the service may still ask for in a repository.
 pub(super) struct Budget {
     open: usize,
@@ -113,6 +116,9 @@ impl Judging<'_> {
             .last()
             .map(|member| member.commit.as_str().to_owned())
             .unwrap_or_default();
+        if let Some(held) = self.held_for_help(members) {
+            return held;
+        }
         let request = match self.request(head) {
             Ok(request) => request,
             Err(error) => {
@@ -327,6 +333,59 @@ impl Judging<'_> {
         out.into_iter()
             .map(|(change, status)| (change, self.keyed(status, sensitive)))
             .collect()
+    }
+
+    /// A stack with a member whose change has an open help request (R3.32)
+    /// is held whole: its author asked a person, so nothing more is queued
+    /// before the answer. `None` when no member has one, when a member is
+    /// already queued (its landing goes on, and its status says queued; a
+    /// person withdraws the proposal to stop it), or when the rows cannot be
+    /// read (logged; the gate judges as before).
+    fn held_for_help(&self, members: &[StackMember]) -> Option<Vec<(String, Status)>> {
+        let queued = members.iter().any(|member| {
+            self.state
+                .db
+                .lifecycle_row(self.repo, member.change.as_str())
+                .ok()
+                .flatten()
+                .is_some_and(|row| row.state == "queued")
+        });
+        if queued {
+            return None;
+        }
+        let asked = members.iter().find_map(|member| {
+            match self
+                .state
+                .db
+                .open_help_request(self.repo, member.change.as_str())
+            {
+                Ok(found) => found.map(|row| (member.change.as_str().to_owned(), row.id)),
+                Err(error) => {
+                    tracing::warn!(repo = %self.repo, error = %ErrorChain(&error), "cannot read help requests; judging without them");
+                    None
+                }
+            }
+        })?;
+        let (change, id) = asked;
+        Some(
+            members
+                .iter()
+                .map(|member| {
+                    let mut status = Status::new(State::Needs, member.commit.as_str());
+                    status.reason = Some(HELP_REASON.to_owned());
+                    status.message = if member.change.as_str() == change {
+                        format!("its author asked for help ({id}); it waits for the answer")
+                    } else {
+                        format!(
+                            "change {} in its stack asked for help ({id}); it waits for the answer",
+                            short(&change)
+                        )
+                    };
+                    status.next = vec!["reef".into(), "comment".into(), "show".into(), id.clone()];
+                    (member.change.as_str().to_owned(), self.keyed(status, false))
+                })
+                .collect(),
+        )
     }
 
     fn keyed(&self, mut status: Status, sensitive: bool) -> Status {

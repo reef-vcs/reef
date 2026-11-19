@@ -2,7 +2,8 @@
 //! the instruction's states, confirmation and its ceilings, the estimate,
 //! routing and claims, the moves transitions and expiry make, start-up
 //! resolution of pending rows, undo's refusal, and the remote listener's
-//! rules.
+//! rules; and help requests (R3.32): asking, answers routed to the asker,
+//! reopening, withdrawal, the step, and the remote rules.
 
 #![allow(
     clippy::unwrap_used,
@@ -17,10 +18,11 @@ use std::time::{Duration, Instant};
 use reef_api::v1::{
     self, ClaimInstructionRequest, CommentAnchor, CommentKind, CreateCommentRequest,
     CreateIdentityRequest, CreateWorkspaceRequest, EditFilesRequest, FileEdit, GetCommentRequest,
-    IdentityKind, InstructionCause, InstructionCeilings, InstructionState as S, LifecycleState,
-    LineSide, ListCommentsRequest, ListOperationsRequest, OperationFilter, OperationKind,
-    ProvenanceDeclaration, RemoteScope, TargetSource, TransitionChangeRequest,
-    UndoOperationRequest, UpdateInstructionRequest, Workspace, edit_files_request, file_edit,
+    HelpInput, HelpReason, HelpState, IdentityKind, InstructionCause, InstructionCeilings,
+    InstructionState as S, LifecycleState, LineSide, ListCommentsRequest, ListOperationsRequest,
+    OperationFilter, OperationKind, ProvenanceDeclaration, RemoteScope, TargetSource,
+    TransitionChangeRequest, UndoOperationRequest, UpdateInstructionRequest,
+    WithdrawHelpRequestRequest, Workspace, edit_files_request, file_edit,
 };
 use reef_daemon::client::remote::{RemoteTarget, RemoteUrl, Token};
 use reef_daemon::client::{Client, ClientError};
@@ -1131,6 +1133,7 @@ async fn crash_between_row_and_operation() {
         operation_collected: false,
         recorded_at: None,
         instruction: None,
+        help: None,
         updated_at: reef_daemon::model::Timestamp::now(),
     };
     let event = |id: &str, comment: &str| reef_daemon::db::CommentEventRow {
@@ -1175,6 +1178,8 @@ async fn crash_between_row_and_operation() {
                 from: String::new(),
                 to: String::new(),
                 cause: "request".to_owned(),
+                help_from: String::new(),
+                help_to: String::new(),
             }];
             jj.record_comment_events(&meta).await.unwrap();
         });
@@ -1500,4 +1505,817 @@ async fn reconcile_after_a_lost_notice() {
         done.instruction.as_ref().unwrap().cause(),
         InstructionCause::Reproposed
     );
+}
+
+// R3.32: help requests.
+
+/// A help request on `revision` asked for `client_session`.
+fn help(revision: &str, client_session: &str) -> CreateCommentRequest {
+    CreateCommentRequest {
+        revision: revision.to_owned(),
+        kind: CommentKind::HelpRequest.into(),
+        text: "Which config format does this repository use?".to_owned(),
+        help: Some(HelpInput {
+            reason: HelpReason::Decision.into(),
+            tried: "read docs/config.md".to_owned(),
+            question: "TOML or YAML?".to_owned(),
+            conflict: String::new(),
+            while_blocked: false,
+        }),
+        client_session: client_session.to_owned(),
+        ..CreateCommentRequest::default()
+    }
+}
+
+fn help_state(comment: &v1::Comment) -> (HelpState, InstructionCause) {
+    let help = comment.help.as_ref().unwrap();
+    (help.state(), help.cause())
+}
+
+fn answer(revision: &str, asked: &str, text: &str) -> CreateCommentRequest {
+    CreateCommentRequest {
+        reply_to: asked.to_owned(),
+        ..instruction(revision, text)
+    }
+}
+
+// R3.32 test 2: an agent asks; what it sends is checked and recorded, in an
+// operation with no text, and a help request is never claimed.
+#[tokio::test(flavor = "multi_thread")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one help request through every check"
+)]
+async fn ask() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let (_, change) = setup(client, &repo.id).await;
+    let workspace = session_workspace(client, &repo.id, "agent-a").await;
+
+    // From a workspace, the session's declared client session is the asker.
+    let asked = create(
+        client,
+        &repo.id,
+        CreateCommentRequest {
+            workspace: workspace.id.clone(),
+            ..help("@", "")
+        },
+    )
+    .await
+    .unwrap();
+    let comment = asked.comment.unwrap();
+    assert_eq!(comment.kind(), CommentKind::HelpRequest);
+    assert!(comment.instruction.is_none());
+    let columns = comment.help.clone().unwrap();
+    assert_eq!(columns.state(), HelpState::Open);
+    assert_eq!(columns.reason(), HelpReason::Decision);
+    assert_eq!(columns.tried, "read docs/config.md");
+    assert_eq!(columns.question, "TOML or YAML?");
+    assert_eq!(columns.client_session, "agent-a");
+    assert_eq!(columns.conflict_id, "");
+    let operation = asked.operation.unwrap();
+    assert_eq!(operation.kind(), OperationKind::Comment);
+    let event = &operation.comments[0];
+    assert_eq!(event.event, "ask");
+    assert_eq!(event.kind(), CommentKind::HelpRequest);
+    assert_eq!(event.help_to(), HelpState::Open);
+    let attribute = format!("{:?}", operation.comments);
+    assert!(!attribute.contains("TOML"), "{attribute}");
+
+    // The same session asks again on the change: refused, naming the open one.
+    let error = create(
+        client,
+        &repo.id,
+        CreateCommentRequest {
+            workspace: workspace.id.clone(),
+            ..help("@", "")
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        reason(&error),
+        (Code::FailedPrecondition, "HELP_ALREADY_OPEN".into())
+    );
+    // Another session may ask on its own change, with an explicit session
+    // and no workspace; an unspecified reason is `other`.
+    let other = create(
+        client,
+        &repo.id,
+        CreateCommentRequest {
+            help: Some(HelpInput {
+                tried: "nothing yet".into(),
+                ..HelpInput::default()
+            }),
+            ..help(&change.commit_id, "agent-b")
+        },
+    )
+    .await
+    .unwrap()
+    .comment
+    .unwrap();
+    assert_eq!(other.help.as_ref().unwrap().reason(), HelpReason::Other);
+    assert_eq!(other.author.as_ref().unwrap().session_id, "");
+
+    // What it sends is required, and checked as text.
+    for (request, why) in [
+        (
+            CreateCommentRequest {
+                help: None,
+                ..help(&change.commit_id, "agent-c")
+            },
+            "HELP_REQUIRED",
+        ),
+        (
+            CreateCommentRequest {
+                help: Some(HelpInput {
+                    tried: " ".into(),
+                    ..HelpInput::default()
+                }),
+                ..help(&change.commit_id, "agent-c")
+            },
+            "HELP_REQUIRED",
+        ),
+        (
+            CreateCommentRequest {
+                help: Some(HelpInput {
+                    tried: "x".into(),
+                    question: "q\u{1b}[2J".into(),
+                    ..HelpInput::default()
+                }),
+                ..help(&change.commit_id, "agent-c")
+            },
+            "INVALID_TEXT",
+        ),
+        (
+            CreateCommentRequest {
+                help: Some(HelpInput {
+                    tried: "x".into(),
+                    reason: HelpReason::Decision.into(),
+                    conflict: "asg_0123456789abcdef".into(),
+                    ..HelpInput::default()
+                }),
+                ..help(&change.commit_id, "agent-c")
+            },
+            "INVALID_CONFLICT",
+        ),
+        (
+            CreateCommentRequest {
+                help: Some(HelpInput {
+                    tried: "x".into(),
+                    reason: HelpReason::Conflict.into(),
+                    ..HelpInput::default()
+                }),
+                ..help(&change.commit_id, "agent-c")
+            },
+            "NOT_CONFLICTED",
+        ),
+        (
+            CreateCommentRequest {
+                confirm: true,
+                ceilings: Some(InstructionCeilings {
+                    max_check_wall_ms: 1,
+                    ..InstructionCeilings::default()
+                }),
+                ..help(&change.commit_id, "agent-c")
+            },
+            "CEILINGS_REQUIRED",
+        ),
+    ] {
+        let error = create(client, &repo.id, request).await.unwrap_err();
+        assert_eq!(reason(&error).1, why);
+    }
+
+    // An anchor; then the per-change limit.
+    let anchored = create(
+        client,
+        &repo.id,
+        CreateCommentRequest {
+            anchor: Some(CommentAnchor {
+                path: "a.txt".into(),
+                side: LineSide::New.into(),
+                start_line: 2,
+                end_line: 3,
+            }),
+            ..help(&change.commit_id, "anchored")
+        },
+    )
+    .await
+    .unwrap()
+    .comment
+    .unwrap();
+    assert_eq!(anchored.anchor.as_ref().unwrap().start_line, 2);
+    for n in 3..=16 {
+        create(client, &repo.id, help(&change.commit_id, &format!("s{n}")))
+            .await
+            .unwrap();
+    }
+    let error = create(client, &repo.id, help(&change.commit_id, "s17"))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        reason(&error),
+        (Code::Unavailable, "TOO_MANY_HELP_REQUESTS".into())
+    );
+
+    // Never claimed: not by its session, not by a take.
+    for request in [
+        ClaimInstructionRequest {
+            client_session: "agent-a".into(),
+            ..ClaimInstructionRequest::default()
+        },
+        ClaimInstructionRequest {
+            change: change.commit_id.clone(),
+            take: true,
+            ..ClaimInstructionRequest::default()
+        },
+    ] {
+        assert!(claim(client, &repo.id, request).await.is_none());
+    }
+
+    // Listed by kind and help state; the asking session's filter finds it.
+    let listed = client
+        .list_comments(
+            ListCommentsRequest {
+                repo: repo.id.clone(),
+                help_states: vec![HelpState::Open.into()],
+                ..ListCommentsRequest::default()
+            },
+            0,
+        )
+        .await
+        .unwrap()
+        .items;
+    assert_eq!(listed.len(), 17);
+    let mine = client
+        .list_comments(
+            ListCommentsRequest {
+                repo: repo.id.clone(),
+                client_session: "agent-b".into(),
+                ..ListCommentsRequest::default()
+            },
+            0,
+        )
+        .await
+        .unwrap()
+        .items;
+    assert_eq!(
+        mine.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+        [other.id.as_str()]
+    );
+
+    // A help request is not undoable.
+    let error = client
+        .undo_operation(UndoOperationRequest {
+            repo: repo.id.clone(),
+            operation_id: operation.id.clone(),
+            ..UndoOperationRequest::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(reason(&error).1, "OPERATION_NOT_UNDOABLE");
+}
+
+// R3.32 tests 4 and 5: an answer goes to the session that asked, written
+// pending in the operation that answers the help request; the asker cannot
+// answer itself; a later answer is routed the same way; a note answers
+// nothing.
+#[tokio::test(flavor = "multi_thread")]
+#[expect(clippy::too_many_lines, reason = "an answer through every rule")]
+async fn answer_reaches_the_asker() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let (base, _) = setup(client, &repo.id).await;
+    main_at(&repo, &base.commit_id).await;
+    // Session A proposes the change; session B, a helper, asks about it.
+    let proposer = session_workspace(client, &repo.id, "proposer").await;
+    propose(client, &repo.id, &proposer.id, "@").await;
+    let change = client
+        .get_change(v1::GetChangeRequest {
+            repo: repo.id.clone(),
+            workspace: proposer.id.clone(),
+            revision: "@".into(),
+            skip_snapshot: true,
+            ..v1::GetChangeRequest::default()
+        })
+        .await
+        .unwrap()
+        .change
+        .unwrap();
+    let asked = create(client, &repo.id, help(&change.commit_id, "helper"))
+        .await
+        .unwrap()
+        .comment
+        .unwrap();
+
+    // The asker answering itself is refused.
+    let error = create(
+        client,
+        &repo.id,
+        CreateCommentRequest {
+            client_session: "helper".into(),
+            ..answer(&change.commit_id, &asked.id, "never mind")
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        reason(&error),
+        (Code::FailedPrecondition, "SELF_ANSWER".into())
+    );
+
+    // A person answers: pending, routed to the helper, estimate stored.
+    let written = create(
+        client,
+        &repo.id,
+        answer(&change.commit_id, &asked.id, "Use TOML."),
+    )
+    .await
+    .unwrap();
+    let reply = written.comment.unwrap();
+    let instruction = reply.instruction.clone().unwrap();
+    assert_eq!(instruction.state(), S::Pending);
+    assert!(instruction.estimate.is_some());
+    let target = instruction.target.clone().unwrap();
+    assert_eq!(target.source(), TargetSource::HelpRequest);
+    assert_eq!(target.client_session, "helper");
+    let events: Vec<(&str, HelpState)> = written
+        .operation
+        .as_ref()
+        .unwrap()
+        .comments
+        .iter()
+        .map(|event| (event.event.as_str(), event.help_to()))
+        .collect();
+    assert_eq!(
+        events,
+        [
+            ("instruct", HelpState::Unspecified),
+            ("answer", HelpState::Answered)
+        ]
+    );
+    let answered = get(client, &repo.id, &asked.id).await;
+    assert_eq!(help_state(&answered).0, HelpState::Answered);
+    assert_eq!(answered.help.as_ref().unwrap().answer_id, reply.id);
+
+    // The proposer does not get it; the helper does.
+    let proposer_claim = ClaimInstructionRequest {
+        client_session: "proposer".into(),
+        ..ClaimInstructionRequest::default()
+    };
+    assert!(claim(client, &repo.id, proposer_claim).await.is_none());
+    let taken = claim(
+        client,
+        &repo.id,
+        ClaimInstructionRequest {
+            client_session: "helper".into(),
+            ..ClaimInstructionRequest::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(taken.id, reply.id);
+    assert!(!taken.instruction.as_ref().unwrap().taken);
+
+    // A second answer to the answered request goes the same way, and
+    // records no second `answer`.
+    let second = create(
+        client,
+        &repo.id,
+        answer(&change.commit_id, &asked.id, "And YAML for CI."),
+    )
+    .await
+    .unwrap();
+    assert_eq!(second.operation.as_ref().unwrap().comments.len(), 1);
+    let second = second.comment.unwrap();
+    assert_eq!(
+        second
+            .instruction
+            .as_ref()
+            .unwrap()
+            .target
+            .as_ref()
+            .unwrap()
+            .source(),
+        TargetSource::HelpRequest
+    );
+    assert_eq!(state(&second), S::Pending);
+    // Withdrawing an answered request is refused.
+    let error = client
+        .withdraw_help_request(WithdrawHelpRequestRequest {
+            repo: repo.id.clone(),
+            id: asked.id.clone(),
+            ..WithdrawHelpRequestRequest::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(reason(&error).1, "HELP_NOT_OPEN");
+
+    // A note replying to a help request answers nothing.
+    let open = create(client, &repo.id, help(&change.commit_id, "helper-2"))
+        .await
+        .unwrap()
+        .comment
+        .unwrap();
+    create(
+        client,
+        &repo.id,
+        CreateCommentRequest {
+            reply_to: open.id.clone(),
+            ..note(&change.commit_id, "looking")
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        help_state(&get(client, &repo.id, &open.id).await).0,
+        HelpState::Open
+    );
+    // Withdrawn by its asker; a reply after that is an ordinary
+    // instruction, awaiting confirmation and routed to the proposal.
+    let withdrawn = client
+        .withdraw_help_request(WithdrawHelpRequestRequest {
+            repo: repo.id.clone(),
+            id: open.id.clone(),
+            summary: "found it".into(),
+            ..WithdrawHelpRequestRequest::default()
+        })
+        .await
+        .unwrap()
+        .comment
+        .unwrap();
+    assert_eq!(
+        help_state(&withdrawn),
+        (HelpState::Withdrawn, InstructionCause::Request)
+    );
+    assert_eq!(withdrawn.help.as_ref().unwrap().summary, "found it");
+    let late = create(
+        client,
+        &repo.id,
+        answer(&change.commit_id, &open.id, "too late"),
+    )
+    .await
+    .unwrap()
+    .comment
+    .unwrap();
+    assert_eq!(state(&late), S::AwaitingConfirmation);
+    assert_eq!(
+        late.instruction
+            .as_ref()
+            .unwrap()
+            .target
+            .as_ref()
+            .unwrap()
+            .source(),
+        TargetSource::Proposal
+    );
+    // Withdrawing again does nothing.
+    let again = client
+        .withdraw_help_request(WithdrawHelpRequestRequest {
+            repo: repo.id.clone(),
+            id: open.id.clone(),
+            ..WithdrawHelpRequestRequest::default()
+        })
+        .await
+        .unwrap();
+    assert!(again.operation.is_none());
+    let error = client
+        .withdraw_help_request(WithdrawHelpRequestRequest {
+            repo: repo.id.clone(),
+            id: late.id.clone(),
+            ..WithdrawHelpRequestRequest::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(reason(&error).1, "NOT_A_HELP_REQUEST");
+}
+
+// R3.32 test 6: cancelling the only answer before it was taken reopens the
+// help request; after it was taken it does not; a landing withdraws an open
+// one; seven days untouched withdraws one.
+#[tokio::test(flavor = "multi_thread")]
+async fn reopen_final_and_expiry() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let (base, change) = setup(client, &repo.id).await;
+    let asked = create(client, &repo.id, help(&change.commit_id, "asker"))
+        .await
+        .unwrap()
+        .comment
+        .unwrap();
+    let reply = create(client, &repo.id, answer(&change.commit_id, &asked.id, "a"))
+        .await
+        .unwrap()
+        .comment
+        .unwrap();
+    let cancelled = move_to(client, &repo.id, &reply.id, S::Cancelled, "wrong one")
+        .await
+        .unwrap();
+    let events: Vec<&str> = cancelled
+        .operation
+        .as_ref()
+        .unwrap()
+        .comments
+        .iter()
+        .map(|event| event.event.as_str())
+        .collect();
+    assert_eq!(events, ["cancel", "reopen"]);
+    let reopened = get(client, &repo.id, &asked.id).await;
+    assert_eq!(
+        help_state(&reopened),
+        (HelpState::Open, InstructionCause::AnswerCancelled)
+    );
+    assert_eq!(reopened.help.as_ref().unwrap().answer_id, "");
+
+    // Answered again and taken: cancelling the taken answer reopens nothing.
+    let reply = create(client, &repo.id, answer(&change.commit_id, &asked.id, "b"))
+        .await
+        .unwrap()
+        .comment
+        .unwrap();
+    claim(
+        client,
+        &repo.id,
+        ClaimInstructionRequest {
+            client_session: "asker".into(),
+            ..ClaimInstructionRequest::default()
+        },
+    )
+    .await
+    .unwrap();
+    let cancelled = move_to(client, &repo.id, &reply.id, S::Cancelled, "")
+        .await
+        .unwrap();
+    assert_eq!(cancelled.operation.as_ref().unwrap().comments.len(), 1);
+    assert_eq!(
+        help_state(&get(client, &repo.id, &asked.id).await).0,
+        HelpState::Answered
+    );
+
+    // Expiry: an open one untouched for 7 days is withdrawn.
+    let stale = create(client, &repo.id, help(&change.commit_id, "stale"))
+        .await
+        .unwrap()
+        .comment
+        .unwrap();
+    let state_now = daemon.handle.state();
+    let later =
+        reef_daemon::model::Timestamp(reef_daemon::model::Timestamp::now().0 + 8 * 24 * 3_600_000);
+    reef_daemon::comments::expire(state_now, later)
+        .await
+        .unwrap();
+    assert_eq!(
+        help_state(&get(client, &repo.id, &stale.id).await),
+        (HelpState::Withdrawn, InstructionCause::Expired)
+    );
+
+    // The change lands: its open help request is withdrawn.
+    let landing = create(client, &repo.id, help(&change.commit_id, "lander"))
+        .await
+        .unwrap()
+        .comment
+        .unwrap();
+    main_at(&repo, &base.commit_id).await;
+    propose(client, &repo.id, "", &change.commit_id).await;
+    main_at(&repo, &change.commit_id).await;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        // A read loads the repository, which the observer follows.
+        client
+            .get_change(v1::GetChangeRequest {
+                repo: repo.id.clone(),
+                revision: change.commit_id.clone(),
+                skip_snapshot: true,
+                ..v1::GetChangeRequest::default()
+            })
+            .await
+            .unwrap();
+        let now = get(client, &repo.id, &landing.id).await;
+        if help_state(&now).0 == HelpState::Withdrawn {
+            assert_eq!(help_state(&now).1, InstructionCause::ChangeFinal);
+            break;
+        }
+        assert!(Instant::now() < deadline, "the landing never withdrew it");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let error = create(client, &repo.id, help(&change.commit_id, "after"))
+        .await
+        .unwrap_err();
+    assert_eq!(reason(&error).1, "CHANGE_FINAL");
+}
+
+// R3.32 test 8: `GetWorkspace` says to wait while a help request is open or
+// its answer is untaken, and gives the table's step after.
+#[tokio::test(flavor = "multi_thread")]
+async fn step_waits_for_the_answer() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let workspace = session_workspace(client, &repo.id, "stepper").await;
+    let read = || async {
+        client
+            .get_workspace(v1::GetWorkspaceRequest {
+                repo: repo.id.clone(),
+                workspace: workspace.id.clone(),
+                ..v1::GetWorkspaceRequest::default()
+            })
+            .await
+            .unwrap()
+            .workspace
+            .unwrap()
+    };
+    let before = read().await.step();
+    assert_ne!(before, v1::ChangeStep::AwaitHelp);
+    // Another session's help request on the change leaves its step alone.
+    let commit = read().await.commit_id;
+    create(client, &repo.id, help(&commit, "a-helper"))
+        .await
+        .unwrap();
+    assert_eq!(read().await.step(), before);
+    let asked = create(
+        client,
+        &repo.id,
+        CreateCommentRequest {
+            workspace: workspace.id.clone(),
+            ..help("@", "")
+        },
+    )
+    .await
+    .unwrap()
+    .comment
+    .unwrap();
+    let open = read().await;
+    assert_eq!(open.step(), v1::ChangeStep::AwaitHelp);
+    assert_eq!(open.help_request_id, asked.id);
+    // Answered from outside the workspace: from it, it would be the asker.
+    create(
+        client,
+        &repo.id,
+        answer(&open.commit_id, &asked.id, "go ahead"),
+    )
+    .await
+    .unwrap();
+    let untaken = read().await;
+    assert_eq!(untaken.step(), v1::ChangeStep::AwaitHelp);
+    claim(
+        client,
+        &repo.id,
+        ClaimInstructionRequest {
+            client_session: "stepper".into(),
+            ..ClaimInstructionRequest::default()
+        },
+    )
+    .await
+    .unwrap();
+    let after = read().await;
+    assert_eq!(after.step(), before);
+    assert_eq!(after.help_request_id, "");
+}
+
+// R3.32 test 9: through the remote listener a write token asks; an answer
+// needs a linked token; only the asking token withdraws, and claims the
+// answer without taking it.
+#[tokio::test(flavor = "multi_thread")]
+#[expect(clippy::too_many_lines, reason = "each remote rule in one daemon")]
+async fn remote_help() {
+    let (daemon, repo) = fixture().await;
+    let (_, change) = setup(&daemon.client, &repo.id).await;
+    daemon
+        .client
+        .create_identity(CreateIdentityRequest {
+            name: "reviewer".into(),
+            kind: IdentityKind::Person.into(),
+            ..CreateIdentityRequest::default()
+        })
+        .await
+        .unwrap();
+    let asker = remote_client(&daemon, "asker", RemoteScope::Write, "").await;
+    let other = remote_client(&daemon, "other", RemoteScope::Write, "").await;
+    let linked = remote_client(&daemon, "linked", RemoteScope::Write, "reviewer").await;
+    let request = create(&asker, &repo.id, help(&change.commit_id, ""))
+        .await
+        .unwrap()
+        .comment
+        .unwrap();
+    let error = other
+        .withdraw_help_request(WithdrawHelpRequestRequest {
+            repo: repo.id.clone(),
+            id: request.id.clone(),
+            ..WithdrawHelpRequestRequest::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(reason(&error).1, "REMOTE_COMMENT_NOT_OWNED");
+    let error = create(
+        &other,
+        &repo.id,
+        answer(&change.commit_id, &request.id, "x"),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(reason(&error).1, "REMOTE_IDENTITY_REQUIRED");
+    let reply = create(
+        &linked,
+        &repo.id,
+        answer(&change.commit_id, &request.id, "do"),
+    )
+    .await
+    .unwrap()
+    .comment
+    .unwrap();
+    assert_eq!(state(&reply), S::Pending);
+    // Another token, and the local session on the change, do not get it;
+    // the asker does.
+    let scope = ClaimInstructionRequest {
+        repo: repo.id.clone(),
+        change: change.commit_id.clone(),
+        ..ClaimInstructionRequest::default()
+    };
+    let nothing = other.claim_instruction(scope.clone()).await.unwrap();
+    assert!(nothing.comment.is_none());
+    assert!(
+        claim(&daemon.client, &repo.id, scope.clone())
+            .await
+            .is_none()
+    );
+    let taken = asker
+        .claim_instruction(scope.clone())
+        .await
+        .unwrap()
+        .comment
+        .unwrap();
+    assert_eq!(taken.id, reply.id);
+
+    // S-240: a token cannot route answers to a session it names.
+    let forged = create(
+        &other,
+        &repo.id,
+        help(&change.commit_id, "someone-elses-session"),
+    )
+    .await
+    .unwrap()
+    .comment
+    .unwrap();
+    assert_eq!(forged.help.as_ref().unwrap().client_session, "");
+    let routed = create(
+        &linked,
+        &repo.id,
+        answer(&change.commit_id, &forged.id, "do this"),
+    )
+    .await
+    .unwrap()
+    .comment
+    .unwrap();
+    let target = routed.instruction.unwrap().target.unwrap();
+    assert_eq!(target.source(), TargetSource::HelpRequest);
+    assert_eq!(target.client_session, "");
+    let victim = ClaimInstructionRequest {
+        client_session: "someone-elses-session".into(),
+        ..ClaimInstructionRequest::default()
+    };
+    assert!(claim(&daemon.client, &repo.id, victim).await.is_none());
+
+    // A reply to a withdrawn help request is an ordinary instruction: the
+    // asking token does not own it.
+    let withdrawn = create(&asker, &repo.id, help(&change.commit_id, ""))
+        .await
+        .unwrap()
+        .comment
+        .unwrap();
+    asker
+        .withdraw_help_request(WithdrawHelpRequestRequest {
+            repo: repo.id.clone(),
+            id: withdrawn.id.clone(),
+            ..WithdrawHelpRequestRequest::default()
+        })
+        .await
+        .unwrap();
+    let late = create(
+        &linked,
+        &repo.id,
+        CreateCommentRequest {
+            confirm: true,
+            ceilings: Some(InstructionCeilings {
+                max_check_wall_ms: 1,
+                allow_unknown: true,
+                ..InstructionCeilings::default()
+            }),
+            ..answer(&change.commit_id, &withdrawn.id, "late")
+        },
+    )
+    .await
+    .unwrap()
+    .comment
+    .unwrap();
+    assert_ne!(
+        late.instruction
+            .as_ref()
+            .unwrap()
+            .target
+            .as_ref()
+            .unwrap()
+            .source(),
+        TargetSource::HelpRequest
+    );
+    let error = asker.claim_instruction(scope).await.unwrap_err();
+    assert_eq!(reason(&error).1, "REMOTE_COMMENT_NOT_OWNED");
 }

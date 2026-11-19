@@ -94,3 +94,4 @@ This index is maintained by hand. Every PR that adds an ADR or changes a status 
 | [0080](0080-here-walks-the-lifecycle.md) | `reef here` walks the change's lifecycle | accepted |
 | [0081](0081-automatic-landing.md) | Automatic landing and evidence requests | accepted |
 | [0082](0082-resolution-tiers-and-attempts.md) | Resolution tiers and attempt caps | accepted |
+| [0083](0083-help-requests.md) | Help requests from agents | accepted |

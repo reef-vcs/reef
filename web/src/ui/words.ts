@@ -61,6 +61,11 @@ const COMMENT_EVENTS: Record<string, string> = {
   finish: "finished an instruction",
   cancel: "cancelled an instruction",
   release: "handed an instruction back",
+  // Help requests (R3.32).
+  ask: "asked for help",
+  answer: "answered a help request",
+  withdraw: "withdrew a help request",
+  reopen: "reopened a help request",
 };
 
 /** What an operation's first lifecycle transition moved a change to, if any (R3.09). */
@@ -109,7 +114,10 @@ export function operationSentence(operation: WithTransition): string {
     if (remote) return `published a change to ${remote.remote}/${remote.name}`;
   }
   if (operation.kind === OperationKind.COMMENT) {
-    const event = operation.comments?.[0]?.event;
+    // An answer's operation writes the instruction first, then answers the
+    // help request (R3.32): the answer is what happened.
+    const events = operation.comments ?? [];
+    const event = events.some((e) => e.event === "answer") ? "answer" : events[0]?.event;
     if (event !== undefined && COMMENT_EVENTS[event]) return COMMENT_EVENTS[event];
   }
   return SENTENCES[operation.kind] ?? "did something else";

@@ -1830,7 +1830,8 @@ fn root_help_names_every_command() {
         // `publish` took the place of `store` and `backup`, which an
         // operator runs; both are in `--help-all`. #259's `rebase` took the
         // place of `ui`, which a person runs; `fetch` is in `--help-all`
-        // (`rebase` fetches).
+        // (`rebase` fetches). R3.32's `ask` is in `--help-all` and the agent
+        // guide, where an agent that is stuck reads it.
         if command == "completions"
             || command == "ui"
             || command == "fetch"
@@ -1846,6 +1847,7 @@ fn root_help_names_every_command() {
             || command == "landing"
             || command == "conflict"
             || command == "comment"
+            || command == "ask"
         {
             continue;
         }

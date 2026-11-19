@@ -20,10 +20,12 @@ use jj_lib::object_id::ObjectId as _;
 use jj_lib::repo::{ReadonlyRepo, Repo as _};
 use reef_api::v1::{
     self, AddEvidenceRequest, AssignConflictRequest, ChangeStep, ClaimConflictRequest,
-    ConflictAssignment, ConflictAssignmentReason as Reason, ConflictAssignmentState as State,
-    ConflictTier, CreateIdentityRequest, CreateWorkspaceRequest, EditFilesRequest,
-    EvaluatePolicyRequest, GetConflictRequest, GetWorkspaceRequest, IdentityKind as Kind,
-    ListConflictAssignmentsRequest, PolicyRuleStatus as RuleStatus, SignedEvidence,
+    ClaimInstructionRequest, CommentKind, ConflictAssignment, ConflictAssignmentReason as Reason,
+    ConflictAssignmentState as State, ConflictTier, CreateCommentRequest, CreateIdentityRequest,
+    CreateWorkspaceRequest, EditFilesRequest, EvaluatePolicyRequest, GetCommentRequest,
+    GetConflictRequest, GetWorkspaceRequest, HelpInput, HelpReason, HelpState,
+    IdentityKind as Kind, InstructionCause, ListConflictAssignmentsRequest, ListOperationsRequest,
+    OperationFilter, OperationKind, PolicyRuleStatus as RuleStatus, SignedEvidence,
     TransitionActor, Workspace, edit_files_request, file_edit,
 };
 use reef_daemon::client::Client;
@@ -223,7 +225,7 @@ async fn the_one(client: &Client, repo: &str) -> ConflictAssignment {
     open.into_iter().next().unwrap()
 }
 
-async fn step(client: &Client, ws: &Workspace) -> ChangeStep {
+async fn read_workspace(client: &Client, ws: &Workspace) -> Workspace {
     client
         .get_workspace(GetWorkspaceRequest {
             workspace: ws.id.clone(),
@@ -233,7 +235,10 @@ async fn step(client: &Client, ws: &Workspace) -> ChangeStep {
         .unwrap()
         .workspace
         .unwrap()
-        .step()
+}
+
+async fn step(client: &Client, ws: &Workspace) -> ChangeStep {
+    read_workspace(client, ws).await.step()
 }
 
 fn assign(repo: &str, assignment: &str, actor: TransitionActor) -> AssignConflictRequest {
@@ -621,5 +626,297 @@ async fn ignoring_an_ask_block_needs_a_signoff() {
         resolution_rule(client, &repo.id, &resolved.commit_id).await,
         RuleStatus::Unsatisfied
     );
+    daemon.stop().await;
+}
+
+/// A help request about `ws`'s conflict, as `reef here`'s `next` asks it:
+/// reason CONFLICT, naming `assignment`, only while it is blocked.
+fn conflict_question(repo: &str, ws: &Workspace, assignment: &str) -> CreateCommentRequest {
+    CreateCommentRequest {
+        repo: repo.to_owned(),
+        workspace: ws.id.clone(),
+        revision: "@".to_owned(),
+        kind: CommentKind::HelpRequest.into(),
+        text: "The policy says to ask before resolving conflict.txt.".to_owned(),
+        help: Some(HelpInput {
+            reason: HelpReason::Conflict.into(),
+            tried: "Nothing: the conflict's policy tier is ask, so I may not attempt it."
+                .to_owned(),
+            conflict: assignment.to_owned(),
+            while_blocked: true,
+            ..HelpInput::default()
+        }),
+        ..CreateCommentRequest::default()
+    }
+}
+
+/// Asks [`conflict_question`] about `ws`'s blocked conflict.
+async fn ask_about_the_conflict(client: &Client, repo: &str, ws: &Workspace) -> v1::Comment {
+    let stepped = read_workspace(client, ws).await;
+    assert_eq!(stepped.step(), ChangeStep::Ask);
+    client
+        .create_comment(conflict_question(repo, ws, &stepped.conflict_assignment_id))
+        .await
+        .unwrap()
+        .comment
+        .unwrap()
+}
+
+/// `id`'s help request, as `GetComment` reads it.
+async fn help_of(client: &Client, repo: &str, id: &str) -> v1::HelpRequest {
+    client
+        .get_comment(GetCommentRequest {
+            repo: repo.to_owned(),
+            id: id.to_owned(),
+        })
+        .await
+        .unwrap()
+        .comment
+        .unwrap()
+        .help
+        .unwrap()
+}
+
+// The seam with R3.32: a blocked conflict's step names its assignment and
+// why it waits, and a help request about that assignment (`reef ask
+// --reason conflict --conflict asg_…`) is accepted. While the session waits
+// on it the step is AWAIT_HELP; once it takes the answer the conflict asks
+// again, since an answer does not unblock it, but names the answered help
+// request, so `reef here` waits for a person instead of asking again
+// (review of the merge, finding 2).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_blocked_conflict_asks_for_help_about_its_assignment() {
+    let (daemon, repo) = fixture("[conflicts]\ntier = \"ask\"\n").await;
+    let client = &daemon.client;
+    let s = scene(&daemon, &repo, "conflict.txt").await;
+    let blocked = the_one(client, &repo.id).await;
+    let ws = read_workspace(client, &s.b).await;
+    assert_eq!(ws.step(), ChangeStep::Ask);
+    assert_eq!(ws.conflict_assignment_id, blocked.id);
+    assert_eq!(ws.conflict_block_reason(), Reason::Ask);
+    assert_eq!(ws.help_request_id, "", "nothing asked yet");
+
+    let asked = ask_about_the_conflict(client, &repo.id, &s.b).await;
+    let help = asked.help.as_ref().unwrap();
+    assert_eq!(
+        (help.reason(), help.assignment_id.as_str()),
+        (HelpReason::Conflict, blocked.id.as_str())
+    );
+    assert_eq!(help.conflict_id, blocked.conflict_id);
+    let waiting = read_workspace(client, &s.b).await;
+    assert_eq!(waiting.step(), ChangeStep::AwaitHelp);
+    assert_eq!(waiting.help_request_id, asked.id);
+    assert_eq!(waiting.conflict_assignment_id, "");
+
+    // A person answers from outside the workspace, and the session takes it.
+    client
+        .create_comment(CreateCommentRequest {
+            repo: repo.id.clone(),
+            revision: waiting.commit_id.clone(),
+            kind: CommentKind::Instruction.into(),
+            text: "Leave it; I will look at it after lunch.".to_owned(),
+            reply_to: asked.id.clone(),
+            ..CreateCommentRequest::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(step(client, &s.b).await, ChangeStep::AwaitHelp);
+    let taken = client
+        .claim_instruction(ClaimInstructionRequest {
+            workspace: s.b.id.clone(),
+            ..ClaimInstructionRequest::default()
+        })
+        .await
+        .unwrap()
+        .comment
+        .unwrap();
+    assert_eq!(taken.reply_to, asked.id);
+    let after = read_workspace(client, &s.b).await;
+    assert_eq!(after.step(), ChangeStep::Ask);
+    assert_eq!(after.conflict_assignment_id, blocked.id);
+    assert_eq!(
+        after.help_request_id, asked.id,
+        "the answered help request is named, so the agent waits for a person"
+    );
+    // Fix review B: a person's priority change leaves it blocked, and is no
+    // new question.
+    let bumped = client
+        .assign_conflict(AssignConflictRequest {
+            repo: repo.id.clone(),
+            assignment: blocked.id.clone(),
+            priority: Some(5),
+            actor: TransitionActor::Human.into(),
+            ..AssignConflictRequest::default()
+        })
+        .await
+        .unwrap()
+        .assignment
+        .unwrap();
+    assert_eq!((bumped.state(), bumped.priority), (State::Blocked, 5));
+    let bumped_ws = read_workspace(client, &s.b).await;
+    assert_eq!(
+        (bumped_ws.step(), bumped_ws.help_request_id.as_str()),
+        (ChangeStep::Ask, asked.id.as_str())
+    );
+    daemon.stop().await;
+}
+
+// Review of the merge, finding 1: a person who allows a blocked conflict
+// while the agent's help request about it is open, without answering it,
+// withdraws that help request (cause CONFLICT_UNBLOCKED, in an operation of
+// its own on the change), so the agent resolves instead of waiting for an
+// answer that will not come.
+#[tokio::test(flavor = "multi_thread")]
+async fn allowing_a_blocked_conflict_withdraws_the_help_request_about_it() {
+    let (daemon, repo) = fixture("[conflicts]\ntier = \"ask\"\n").await;
+    let client = &daemon.client;
+    let s = scene(&daemon, &repo, "conflict.txt").await;
+    let blocked = the_one(client, &repo.id).await;
+    let asked = ask_about_the_conflict(client, &repo.id, &s.b).await;
+    assert_eq!(step(client, &s.b).await, ChangeStep::AwaitHelp);
+
+    let allowed = client
+        .assign_conflict(assign(&repo.id, &blocked.id, TransitionActor::Human))
+        .await
+        .unwrap()
+        .assignment
+        .unwrap();
+    assert_eq!(allowed.state(), State::Assigned);
+    let after = read_workspace(client, &s.b).await;
+    assert_eq!(after.step(), ChangeStep::Resolve);
+    assert_eq!(after.help_request_id, "");
+
+    let help = help_of(client, &repo.id, &asked.id).await;
+    assert_eq!(
+        (help.state(), help.cause()),
+        (HelpState::Withdrawn, InstructionCause::ConflictUnblocked)
+    );
+    let recorded: Vec<v1::CommentEvent> = client
+        .list_operations_page(ListOperationsRequest {
+            repo: repo.id.clone(),
+            filter: Some(OperationFilter {
+                changes: vec![asked.change_id.clone()],
+                kinds: vec![OperationKind::Comment.into()],
+                ..OperationFilter::default()
+            }),
+            page_size: 100,
+            ..ListOperationsRequest::default()
+        })
+        .await
+        .unwrap()
+        .operations
+        .into_iter()
+        .flat_map(|operation| operation.comments)
+        .filter(|event| event.comment_id == asked.id)
+        .collect();
+    assert!(
+        recorded.iter().any(|event| event.event == "withdraw"
+            && event.cause() == InstructionCause::ConflictUnblocked
+            && event.help_from() == HelpState::Open
+            && event.help_to() == HelpState::Withdrawn),
+        "{recorded:?}"
+    );
+    daemon.stop().await;
+}
+
+// Fix review A: `reef here` said `ask`, then a person allowed the conflict
+// before the agent asked. The question `next` asks (`while_blocked`) is
+// refused, so the agent resolves instead of waiting on a help request
+// nobody will withdraw.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_question_asked_after_an_allow_is_refused() {
+    let (daemon, repo) = fixture("[conflicts]\ntier = \"ask\"\n").await;
+    let client = &daemon.client;
+    let s = scene(&daemon, &repo, "conflict.txt").await;
+    let blocked = the_one(client, &repo.id).await;
+    let stale = read_workspace(client, &s.b).await;
+    assert_eq!(stale.step(), ChangeStep::Ask);
+    client
+        .assign_conflict(assign(&repo.id, &blocked.id, TransitionActor::Human))
+        .await
+        .unwrap();
+    let refused = client
+        .create_comment(conflict_question(
+            &repo.id,
+            &s.b,
+            &stale.conflict_assignment_id,
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        refused.reason(),
+        reef_api::error::CONFLICT_NOT_BLOCKED,
+        "{refused}"
+    );
+    assert_eq!(step(client, &s.b).await, ChangeStep::Resolve);
+    daemon.stop().await;
+}
+
+// Fix review C: an unblock whose withdrawal never ran (a crash after its
+// rows committed) is caught by the sweep's reconcile at start.
+#[tokio::test(flavor = "multi_thread")]
+async fn reconcile_withdraws_a_help_request_an_unblock_missed() {
+    let (daemon, repo) = fixture("[conflicts]\ntier = \"ask\"\n").await;
+    let client = &daemon.client;
+    let s = scene(&daemon, &repo, "conflict.txt").await;
+    assert_eq!(the_one(client, &repo.id).await.state(), State::Blocked);
+    let asked = ask_about_the_conflict(client, &repo.id, &s.b).await;
+    // The allow's rows, written as `record_and_announce` writes them, with
+    // nothing after: what a crash before the withdrawal leaves.
+    let repo_id: reef_daemon::model::RepoId = repo.id.parse().unwrap();
+    let db = &daemon.handle.state().db;
+    let row = db
+        .assignment_of_change(repo_id, &asked.change_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.state, "blocked");
+    let at = reef_daemon::model::Timestamp::now();
+    let mut next = row.clone();
+    "assigned".clone_into(&mut next.state);
+    "allowed".clone_into(&mut next.reason);
+    next.events += 1;
+    next.updated_at = at;
+    let event = reef_daemon::db::AssignmentEventRow {
+        repo_id,
+        id: "cae_00000000000000c1".to_owned(),
+        seq: 0,
+        assignment_id: row.id.clone(),
+        change_id: row.change_id.clone(),
+        conflict_id: row.conflict_id.clone(),
+        from_state: Some("blocked".to_owned()),
+        to_state: "assigned".to_owned(),
+        reason: "allowed".to_owned(),
+        owner: next.owner.clone(),
+        from_workspace_id: None,
+        priority: next.priority,
+        note: None,
+        by_actor: "human".to_owned(),
+        by_agent: None,
+        by_identity_id: None,
+        by_session_id: None,
+        by_remote_token: None,
+        at,
+    };
+    db.record_assignments(repo_id, vec![(next, event)]).unwrap();
+    assert_eq!(
+        help_of(client, &repo.id, &asked.id).await.state(),
+        HelpState::Open
+    );
+
+    let daemon = daemon.restart().await;
+    let client = &daemon.client;
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let help = loop {
+        let help = help_of(client, &repo.id, &asked.id).await;
+        if help.state() != HelpState::Open || std::time::Instant::now() > deadline {
+            break help;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert_eq!(
+        (help.state(), help.cause()),
+        (HelpState::Withdrawn, InstructionCause::ConflictUnblocked)
+    );
+    assert_eq!(step(client, &s.b).await, ChangeStep::Resolve);
     daemon.stop().await;
 }

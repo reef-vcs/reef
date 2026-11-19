@@ -2099,6 +2099,17 @@ impl Client {
             .await
     }
 
+    /// `CommentService.WithdrawHelpRequest` (R3.32): take back an open help
+    /// request.
+    pub async fn withdraw_help_request(
+        &self,
+        request: v1::WithdrawHelpRequestRequest,
+    ) -> Result<v1::WithdrawHelpRequestResponse, ClientError> {
+        let mut client = self.comments();
+        self.call("WithdrawHelpRequest", client.withdraw_help_request(request))
+            .await
+    }
+
     fn landing(&self) -> LandingServiceClient<Svc> {
         LandingServiceClient::with_interceptor(self.channel.clone(), self.agent.clone())
     }

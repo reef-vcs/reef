@@ -69,6 +69,36 @@ pub struct InstructionColumns {
     pub finished_at: Option<Timestamp>,
 }
 
+/// A help request's columns of a comment row (R3.32).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HelpColumns {
+    /// `open`, `answered` or `withdrawn`.
+    pub state: String,
+    /// `decision`, `conflict`, `blocked`, `unclear` or `other`.
+    pub reason: String,
+    /// What the agent tried.
+    pub tried: String,
+    /// Its question.
+    pub question: Option<String>,
+    /// The client session that asked.
+    pub client_session: Option<String>,
+    /// With reason `conflict`: the conflict id when asked.
+    pub conflict_id: Option<String>,
+    /// With reason `conflict`: the open assignment when asked.
+    pub assignment_id: Option<String>,
+    /// The first answer.
+    pub answer_id: Option<String>,
+    /// Why it got there: `request`, `change_final`, `expired`,
+    /// `answer_cancelled`, `conflict_unblocked`.
+    pub cause: String,
+    /// When it was answered.
+    pub answered_at: Option<Timestamp>,
+    /// When it was withdrawn.
+    pub closed_at: Option<Timestamp>,
+    /// Why it was withdrawn, as its withdrawer said.
+    pub summary: Option<String>,
+}
+
 /// One comment, as `comments` holds it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommentRow {
@@ -124,6 +154,8 @@ pub struct CommentRow {
     pub recorded_at: Option<Timestamp>,
     /// For an instruction, its columns.
     pub instruction: Option<InstructionColumns>,
+    /// For a help request, its columns.
+    pub help: Option<HelpColumns>,
     /// When the row last changed.
     pub updated_at: Timestamp,
 }
@@ -176,6 +208,12 @@ pub struct CommentEventRow {
     pub channel: Option<String>,
     /// For a claim, whether it took another session's instruction.
     pub taken: bool,
+    /// A help request's state before; `None` for other events.
+    pub help_from: Option<String>,
+    /// A help request's state after; for `ask`, `open`.
+    pub help_to: Option<String>,
+    /// For `answer`, the instruction that answered.
+    pub help_answer_id: Option<String>,
     /// The operation that recorded it.
     pub operation_id: Option<String>,
     /// GC dropped `operation_id`.
@@ -196,7 +234,10 @@ pub struct CommentFilter {
     pub kinds: Vec<String>,
     /// Instruction states; a state filter leaves notes out.
     pub states: Vec<String>,
-    /// Only instructions this client session is the target or claimer of.
+    /// Help request states; a help state filter leaves other kinds out.
+    pub help_states: Vec<String>,
+    /// Only instructions this client session is the target or claimer of,
+    /// and help requests it asked.
     pub client_session: Option<String>,
     /// Only comments written after this.
     pub created_after: Option<Timestamp>,
@@ -215,6 +256,9 @@ pub struct ClaimQuery {
     pub change_id: Option<String>,
     /// Take an instruction for another session on `change_id`.
     pub take: bool,
+    /// The remote token claiming: it matches the answers to the help
+    /// requests it asked (R3.32).
+    pub asker_token: Option<String>,
 }
 
 const COMMENT_COLUMNS: &str = "repo_id, id, status, change_id, round, commit_id, path, side,
@@ -224,12 +268,19 @@ const COMMENT_COLUMNS: &str = "repo_id, id, status, change_id, round, commit_id,
      target_session_id, target_client_session, target_harness, target_agent,
      target_workspace_id, claimed_client_session, claimed_workspace_id, claimed_agent,
      claimed_token, channel, taken, summary, confirmed_at, delivered_at, started_at,
-     finished_at, updated_at";
+     finished_at, updated_at, help_state, help_reason, help_tried, help_question,
+     help_client_session, help_conflict_id, help_assignment_id, help_answer_id, help_cause,
+     help_answered_at, help_closed_at";
+
+/// How many columns [`COMMENT_COLUMNS`] names: the index of a column a query
+/// selects after them.
+const COMMENT_COLUMN_COUNT: usize = 58;
 
 const EVENT_COLUMNS: &str = "repo_id, id, seq, status, comment_id, change_id, event, from_state,
      to_state, cause, transition_id, agent, actor, identity_id, remote_token, summary,
      claimed_client_session, claimed_workspace_id, claimed_agent, claimed_token, channel, taken,
-     operation_id, operation_collected, created_at, recorded_at";
+     operation_id, operation_collected, created_at, recorded_at, help_from, help_to,
+     help_answer_id";
 
 impl CommentEventRow {
     /// An event of `repo` with every other field empty, written now: the
@@ -258,6 +309,9 @@ impl CommentEventRow {
             claimed_token: None,
             channel: None,
             taken: false,
+            help_from: None,
+            help_to: None,
+            help_answer_id: None,
             operation_id: None,
             operation_collected: false,
             created_at: Timestamp::now(),
@@ -302,6 +356,24 @@ fn comment_from_row(row: &Row<'_>) -> rusqlite::Result<CommentRow> {
         }),
         None => None,
     };
+    let help_state: Option<String> = text_at(row, 47)?;
+    let help = match help_state {
+        Some(state) => Some(HelpColumns {
+            state,
+            reason: text_at(row, 48)?.unwrap_or_default(),
+            tried: text_at(row, 49)?.unwrap_or_default(),
+            question: text_at(row, 50)?,
+            client_session: text_at(row, 51)?,
+            conflict_id: text_at(row, 52)?,
+            assignment_id: text_at(row, 53)?,
+            answer_id: text_at(row, 54)?,
+            cause: text_at(row, 55)?.unwrap_or_default(),
+            answered_at: at(row, 56)?,
+            closed_at: at(row, 57)?,
+            summary: text_at(row, 41)?,
+        }),
+        None => None,
+    };
     Ok(CommentRow {
         repo_id: row.get(0)?,
         id: row.get(1)?,
@@ -329,6 +401,7 @@ fn comment_from_row(row: &Row<'_>) -> rusqlite::Result<CommentRow> {
         operation_collected: row.get::<_, i64>(23)? != 0,
         recorded_at: at(row, 24)?,
         instruction,
+        help,
         updated_at: Timestamp(row.get(46)?),
     })
 }
@@ -361,6 +434,9 @@ fn event_from_row(row: &Row<'_>) -> rusqlite::Result<CommentEventRow> {
         operation_collected: row.get::<_, i64>(23)? != 0,
         created_at: Timestamp(row.get(24)?),
         recorded_at: at(row, 25)?,
+        help_from: text_at(row, 26)?,
+        help_to: text_at(row, 27)?,
+        help_answer_id: text_at(row, 28)?,
     })
 }
 
@@ -399,12 +475,14 @@ impl Db {
     ) -> Result<(), DbError> {
         self.in_transaction(|tx| {
             let i = comment.instruction.as_ref();
+            let h = comment.help.as_ref();
             tx.execute(
                 &format!(
                     "INSERT INTO comments({COMMENT_COLUMNS}) VALUES (?1, ?2, 'pending', ?3, ?4, ?5,
                      ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21,
                      NULL, 0, NULL, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, NULL, NULL,
-                     NULL, NULL, NULL, 0, NULL, ?32, NULL, NULL, NULL, ?21)"
+                     NULL, NULL, NULL, 0, NULL, ?32, NULL, NULL, NULL, ?21, ?33, ?34, ?35, ?36,
+                     ?37, ?38, ?39, NULL, ?40, NULL, NULL)"
                 ),
                 params![
                     comment.repo_id,
@@ -439,6 +517,14 @@ impl Db {
                     i.and_then(|i| i.target_agent.clone()),
                     i.and_then(|i| i.target_workspace_id.clone()),
                     i.and_then(|i| i.confirmed_at.map(|at| at.0)),
+                    h.map(|h| h.state.clone()),
+                    h.map(|h| h.reason.clone()),
+                    h.map(|h| h.tried.clone()),
+                    h.and_then(|h| h.question.clone()),
+                    h.and_then(|h| h.client_session.clone()),
+                    h.and_then(|h| h.conflict_id.clone()),
+                    h.and_then(|h| h.assignment_id.clone()),
+                    h.map(|h| h.cause.clone()),
                 ],
             )?;
             insert_event_in(tx, event)?;
@@ -569,8 +655,13 @@ impl Db {
         }
         in_clause(&mut sql, &mut values, "kind", &filter.kinds);
         in_clause(&mut sql, &mut values, "state", &filter.states);
+        in_clause(&mut sql, &mut values, "help_state", &filter.help_states);
         if let Some(session) = &filter.client_session {
-            sql.push_str(" AND (target_client_session = ? OR claimed_client_session = ?)");
+            sql.push_str(
+                " AND (target_client_session = ? OR claimed_client_session = ?
+                       OR help_client_session = ?)",
+            );
+            values.push(Value::Text(session.clone()));
             values.push(Value::Text(session.clone()));
             values.push(Value::Text(session.clone()));
         }
@@ -674,6 +765,15 @@ impl Db {
             ors.push("(target_client_session IS NULL AND target_workspace_id = ?)".to_owned());
             values.push(Value::Text(workspace.clone()));
         }
+        if let Some(token) = &query.asker_token {
+            ors.push(
+                "(target_source = 'help_request' AND target_client_session IS NULL
+                  AND target_workspace_id IS NULL AND reply_to IN (SELECT h.id FROM comments h
+                  WHERE h.repo_id = comments.repo_id AND h.remote_token = ?))"
+                    .to_owned(),
+            );
+            values.push(Value::Text(token.clone()));
+        }
         if let Some(change) = &query.change_id {
             ors.push("(target_source = 'none' AND change_id = ?)".to_owned());
             values.push(Value::Text(change.clone()));
@@ -767,7 +867,10 @@ impl Db {
                  AND l.state IN ('landed', 'superseded')"
             ))?;
             let rows = finals.query_map([repo], |row| {
-                Ok((comment_from_row(row)?, row.get::<_, String>(47)?))
+                Ok((
+                    comment_from_row(row)?,
+                    row.get::<_, String>(COMMENT_COLUMN_COUNT)?,
+                ))
             })?;
             for row in rows {
                 let (comment, transition) = row?;
@@ -784,7 +887,10 @@ impl Db {
                  AND transition IS NOT NULL"
             ))?;
             let rows = reproposed.query_map([repo], |row| {
-                Ok((comment_from_row(row)?, row.get::<_, String>(47)?))
+                Ok((
+                    comment_from_row(row)?,
+                    row.get::<_, String>(COMMENT_COLUMN_COUNT)?,
+                ))
             })?;
             for row in rows {
                 let (comment, transition) = row?;
@@ -799,7 +905,8 @@ impl Db {
         self.with(|conn| {
             let mut statement = conn.prepare(
                 "SELECT DISTINCT repo_id FROM comments WHERE status = 'committed'
-                 AND state IN ('awaiting_confirmation', 'pending', 'delivered', 'running')",
+                 AND (state IN ('awaiting_confirmation', 'pending', 'delivered', 'running')
+                      OR help_state = 'open')",
             )?;
             statement
                 .query_map([], |row| row.get(0))?
@@ -997,6 +1104,288 @@ impl Db {
         })
     }
 
+    /// Open help requests (R3.32): how many `change` has, how many `repo`
+    /// has, and the id of `change`'s open one asked by the remote `token`,
+    /// else by `client_session`, else with no client session by the
+    /// provenance session `session_id`.
+    pub fn open_help_counts(
+        &self,
+        repo: RepoId,
+        change: &str,
+        client_session: Option<&str>,
+        session_id: Option<&str>,
+        token: Option<&str>,
+    ) -> Result<(u64, u64, Option<String>), DbError> {
+        self.with(|conn| {
+            let by_change: i64 = conn.query_row(
+                "SELECT count(*) FROM comments
+                 WHERE repo_id = ?1 AND change_id = ?2 AND help_state = 'open'",
+                params![repo, change],
+                |row| row.get(0),
+            )?;
+            let by_repo: i64 = conn.query_row(
+                "SELECT count(*) FROM comments WHERE repo_id = ?1 AND help_state = 'open'",
+                params![repo],
+                |row| row.get(0),
+            )?;
+            let mine: Option<String> = match (client_session, session_id) {
+                _ if token.is_some() => conn
+                    .query_row(
+                        "SELECT id FROM comments WHERE repo_id = ?1 AND change_id = ?2
+                         AND help_state = 'open' AND remote_token = ?3 LIMIT 1",
+                        params![repo, change, token],
+                        |row| row.get(0),
+                    )
+                    .optional()?,
+                (Some(client), _) => conn
+                    .query_row(
+                        "SELECT id FROM comments WHERE repo_id = ?1 AND change_id = ?2
+                         AND help_state = 'open' AND help_client_session = ?3 LIMIT 1",
+                        params![repo, change, client],
+                        |row| row.get(0),
+                    )
+                    .optional()?,
+                (None, Some(session)) => conn
+                    .query_row(
+                        "SELECT id FROM comments WHERE repo_id = ?1 AND change_id = ?2
+                         AND help_state = 'open' AND help_client_session IS NULL
+                         AND session_id = ?3 LIMIT 1",
+                        params![repo, change, session],
+                        |row| row.get(0),
+                    )
+                    .optional()?,
+                (None, None) => None,
+            };
+            Ok((
+                u64::try_from(by_change).unwrap_or(0),
+                u64::try_from(by_repo).unwrap_or(0),
+                mine,
+            ))
+        })
+    }
+
+    /// `change`'s newest committed help request that is open (R3.32): what
+    /// holds its automatic landing.
+    pub fn open_help_request(
+        &self,
+        repo: RepoId,
+        change: &str,
+    ) -> Result<Option<CommentRow>, DbError> {
+        self.with(|conn| {
+            conn.query_row(
+                &format!(
+                    "SELECT {COMMENT_COLUMNS} FROM comments
+                     WHERE repo_id = ?1 AND change_id = ?2 AND status = 'committed'
+                     AND help_state = 'open' ORDER BY created_at DESC, id DESC LIMIT 1"
+                ),
+                params![repo, change],
+                comment_from_row,
+            )
+            .optional()
+        })
+    }
+
+    /// `change`'s newest committed help request that a session asked and
+    /// waits on (R3.32): open, or answered with an answer still PENDING. The
+    /// session is its declared `client_session`, else its provenance
+    /// `session_id` for a help request that declared none.
+    pub fn awaited_help_request(
+        &self,
+        repo: RepoId,
+        change: &str,
+        client_session: Option<&str>,
+        session_id: &str,
+    ) -> Result<Option<CommentRow>, DbError> {
+        self.with(|conn| {
+            conn.query_row(
+                &format!(
+                    "SELECT {COMMENT_COLUMNS} FROM comments
+                     WHERE repo_id = ?1 AND change_id = ?2 AND status = 'committed'
+                     AND help_state IS NOT NULL
+                     AND (help_client_session = ?3
+                          OR (help_client_session IS NULL AND session_id = ?4))
+                     AND (help_state = 'open' OR (help_state = 'answered' AND EXISTS (
+                          SELECT 1 FROM comments a
+                          WHERE a.repo_id = comments.repo_id AND a.change_id = comments.change_id
+                          AND a.reply_to = comments.id AND a.status = 'committed'
+                          AND a.kind = 'instruction' AND a.state = 'pending')))
+                     ORDER BY created_at DESC, id DESC LIMIT 1"
+                ),
+                params![repo, change, client_session, session_id],
+                comment_from_row,
+            )
+            .optional()
+        })
+    }
+
+    /// The newest answered help request with reason CONFLICT that a session
+    /// (as [`Self::awaited_help_request`] matches it) asked on `change`
+    /// about `assignment` since the assignment last entered BLOCKED and its
+    /// conflict last changed (`conflict_changed_at`), R3.28: the one that
+    /// makes asking again no use. A priority change or a grant that leaves
+    /// it blocked does not start a new question.
+    pub fn answered_conflict_help_request(
+        &self,
+        repo: RepoId,
+        change: &str,
+        assignment: &str,
+        conflict_changed_at: Timestamp,
+        client_session: Option<&str>,
+        session_id: &str,
+    ) -> Result<Option<CommentRow>, DbError> {
+        self.with(|conn| {
+            conn.query_row(
+                &format!(
+                    "SELECT {COMMENT_COLUMNS} FROM comments
+                     WHERE repo_id = ?1 AND change_id = ?2 AND status = 'committed'
+                     AND help_state = 'answered' AND help_reason = 'conflict'
+                     AND help_assignment_id = ?3 AND created_at >= ?4
+                     AND created_at >= COALESCE((
+                          SELECT MAX(e.at) FROM conflict_assignment_events e
+                          WHERE e.repo_id = ?1 AND e.assignment_id = ?3
+                          AND e.to_state = 'blocked'
+                          AND (e.from_state IS NULL OR e.from_state <> 'blocked')), 0)
+                     AND (help_client_session = ?5
+                          OR (help_client_session IS NULL AND session_id = ?6))
+                     ORDER BY created_at DESC, id DESC LIMIT 1"
+                ),
+                params![
+                    repo,
+                    change,
+                    assignment,
+                    conflict_changed_at,
+                    client_session,
+                    session_id
+                ],
+                comment_from_row,
+            )
+            .optional()
+        })
+    }
+
+    /// `repo`'s committed help requests on `change` in one of `states`.
+    pub fn help_requests_of_change(
+        &self,
+        repo: RepoId,
+        change: &str,
+        states: &[&str],
+    ) -> Result<Vec<CommentRow>, DbError> {
+        let mut sql = format!(
+            "SELECT {COMMENT_COLUMNS} FROM comments
+             WHERE repo_id = ? AND change_id = ? AND status = 'committed'
+             AND help_state IS NOT NULL"
+        );
+        let mut values = vec![
+            Value::Text(repo.to_string()),
+            Value::Text(change.to_owned()),
+        ];
+        let states: Vec<String> = states.iter().map(|state| (*state).to_owned()).collect();
+        in_clause(&mut sql, &mut values, "help_state", &states);
+        sql.push_str(" ORDER BY created_at, id");
+        self.with(|conn| {
+            let mut statement = conn.prepare(&sql)?;
+            statement
+                .query_map(params_from_iter(values), comment_from_row)?
+                .collect::<Result<_, _>>()
+        })
+    }
+
+    /// Open help requests untouched since `before`, oldest first, at most
+    /// `limit`.
+    pub fn stale_help_requests(
+        &self,
+        before: Timestamp,
+        limit: usize,
+    ) -> Result<Vec<CommentRow>, DbError> {
+        self.with(|conn| {
+            let mut statement = conn.prepare(&format!(
+                "SELECT {COMMENT_COLUMNS} FROM comments
+                 WHERE status = 'committed' AND help_state = 'open' AND updated_at < ?1
+                 ORDER BY updated_at, id LIMIT ?2"
+            ))?;
+            statement
+                .query_map(
+                    params![before.0, i64::try_from(limit).unwrap_or(i64::MAX)],
+                    comment_from_row,
+                )?
+                .collect::<Result<_, _>>()
+        })
+    }
+
+    /// `repo`'s open help requests on a change now landed or superseded,
+    /// each with the transition that made it final.
+    pub fn moot_help_requests(&self, repo: RepoId) -> Result<Vec<(CommentRow, String)>, DbError> {
+        let columns = COMMENT_COLUMNS
+            .split(',')
+            .map(|column| format!("c.{}", column.trim()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.with(|conn| {
+            let mut statement = conn.prepare(&format!(
+                "SELECT {columns}, l.transition_id FROM comments c
+                 JOIN lifecycle l ON l.repo_id = c.repo_id AND l.change_id = c.change_id
+                 WHERE c.repo_id = ?1 AND c.status = 'committed' AND c.help_state = 'open'
+                 AND l.state IN ('landed', 'superseded')"
+            ))?;
+            statement
+                .query_map([repo], |row| {
+                    Ok((
+                        comment_from_row(row)?,
+                        row.get::<_, String>(COMMENT_COLUMN_COUNT)?,
+                    ))
+                })?
+                .collect::<Result<_, _>>()
+        })
+    }
+
+    /// `repo`'s open help requests with reason CONFLICT whose assignment
+    /// left BLOCKED after they were asked (R3.28): what
+    /// `comments::after_unblocked` withdraws, read from the rows alone.
+    pub fn unblocked_help_requests(&self, repo: RepoId) -> Result<Vec<CommentRow>, DbError> {
+        let columns = COMMENT_COLUMNS
+            .split(',')
+            .map(|column| format!("c.{}", column.trim()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.with(|conn| {
+            let mut statement = conn.prepare(&format!(
+                "SELECT {columns} FROM comments c
+                 WHERE c.repo_id = ?1 AND c.status = 'committed' AND c.help_state = 'open'
+                 AND c.help_reason = 'conflict' AND c.help_assignment_id IS NOT NULL
+                 AND EXISTS (SELECT 1 FROM conflict_assignment_events e
+                             WHERE e.repo_id = c.repo_id AND e.assignment_id = c.help_assignment_id
+                             AND e.from_state = 'blocked' AND e.to_state <> 'blocked'
+                             AND e.at >= c.created_at)"
+            ))?;
+            statement
+                .query_map([repo], comment_from_row)?
+                .collect::<Result<_, _>>()
+        })
+    }
+
+    /// How many answers to the help request `help` on `change` other than
+    /// `except` were delivered or are not cancelled: none means cancelling
+    /// `except` before delivery leaves it unanswered.
+    pub fn live_answers(
+        &self,
+        repo: RepoId,
+        change: &str,
+        help: &str,
+        except: &str,
+    ) -> Result<u64, DbError> {
+        self.with(|conn| {
+            let count: i64 = conn.query_row(
+                "SELECT count(*) FROM comments WHERE repo_id = ?1 AND change_id = ?2
+                 AND reply_to = ?3 AND id != ?4
+                 AND kind = 'instruction' AND status = 'committed'
+                 AND (state != 'cancelled' OR delivered_at IS NOT NULL)",
+                params![repo, change, help, except],
+                |row| row.get(0),
+            )?;
+            Ok(u64::try_from(count).unwrap_or(0))
+        })
+    }
+
     /// The committed events of `comment`, in order.
     pub fn comment_events(
         &self,
@@ -1020,7 +1409,7 @@ fn insert_event_in(tx: &Transaction<'_>, event: &CommentEventRow) -> Result<(), 
         &format!(
             "INSERT INTO comment_events({EVENT_COLUMNS}) VALUES (?1, ?2, NULL, 'pending', ?3, ?4,
              ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, NULL, 0,
-             ?21, NULL)"
+             ?21, NULL, ?22, ?23, ?24)"
         ),
         params![
             event.repo_id,
@@ -1044,6 +1433,42 @@ fn insert_event_in(tx: &Transaction<'_>, event: &CommentEventRow) -> Result<(), 
             event.channel,
             i64::from(event.taken),
             event.created_at.0,
+            event.help_from,
+            event.help_to,
+            event.help_answer_id,
+        ],
+    )?;
+    Ok(())
+}
+
+/// A help request's move (R3.32), under the rule an instruction's follows:
+/// only from its `from` state. A reopen forgets the answer that was
+/// cancelled.
+fn apply_help_move(
+    tx: &Transaction<'_>,
+    event: &CommentEventRow,
+    from: &str,
+    to: &str,
+    recorded_at: Timestamp,
+) -> Result<(), DbError> {
+    tx.execute(
+        "UPDATE comments SET help_state = ?4, help_cause = ?5, updated_at = ?6,
+           help_answer_id = CASE WHEN ?4 = 'answered' THEN ?7
+                                 WHEN ?4 = 'open' THEN NULL ELSE help_answer_id END,
+           help_answered_at = CASE WHEN ?4 = 'answered' THEN ?6
+                                   WHEN ?4 = 'open' THEN NULL ELSE help_answered_at END,
+           help_closed_at = CASE WHEN ?4 = 'withdrawn' THEN ?6 ELSE help_closed_at END,
+           summary = coalesce(?8, summary)
+         WHERE repo_id = ?1 AND id = ?2 AND help_state = ?3",
+        params![
+            event.repo_id,
+            event.comment_id,
+            from,
+            to,
+            event.cause,
+            recorded_at.0,
+            event.help_answer_id,
+            event.summary,
         ],
     )?;
     Ok(())
@@ -1080,8 +1505,10 @@ fn commit_event_in(
          recorded_at = ?5 WHERE repo_id = ?1 AND id = ?2",
         params![repo, id, seq, operation_id, recorded_at.0],
     )?;
-    let created = event.from_state.is_none();
-    if created {
+    let created = event.from_state.is_none() && event.help_from.is_none();
+    if let (Some(from), Some(to)) = (&event.help_from, &event.help_to) {
+        apply_help_move(tx, &event, from, to, recorded_at)?;
+    } else if created {
         tx.execute(
             "UPDATE comments SET status = 'committed', operation_id = ?3, recorded_at = ?4,
              updated_at = ?4,

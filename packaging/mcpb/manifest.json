@@ -106,6 +106,10 @@
       "description": "Propose a change and the unproposed changes below it (only: it alone). Returns {change, lifecycle, operation_id, transitions}."
     },
     {
+      "name": "ask_for_help",
+      "description": "Ask a person for help. Then wait_for_operations with kinds [comment]: answers come in instructions. Returns {comment, next}."
+    },
+    {
       "name": "land_change",
       "description": "Land a proposed change and those below it, waiting up to 2 minutes; a refusal is a result. Returns {id, outcome, reason, blocking, stack}."
     },

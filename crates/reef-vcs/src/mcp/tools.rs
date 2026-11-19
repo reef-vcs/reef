@@ -487,6 +487,17 @@ pub(super) const TOOLS: &[ToolDef] = &[
         call: propose_change,
     },
     ToolDef {
+        name: "ask_for_help",
+        title: "Ask for help",
+        rpc: "/reef.api.v1.CommentService/CreateComment",
+        description: "Ask a person for help. Then wait_for_operations with kinds [comment]: answers come in instructions. Returns {comment, next}.",
+        destructive: false,
+        idempotent: false,
+        schema: schema::<args::AskForHelp>,
+        output: output::<AskedForHelp<'static>>,
+        call: ask_for_help,
+    },
+    ToolDef {
         name: "land_change",
         title: "Land change",
         rpc: "/reef.api.v1.LandingService/LandChange",
@@ -770,10 +781,6 @@ pub(super) const NOT_TOOLS: &[(&str, &str)] = &[
         "an agent runs `reef landing list`; tools/list is at its budget (#116)",
     ),
     (
-        "/reef.api.v1.CommentService/CreateComment",
-        "a reviewer writes comments with `reef comment add` or the proposal view (R3.31); tools/list is at its budget (#116)",
-    ),
-    (
         "/reef.api.v1.CommentService/GetComment",
         "an agent runs `reef comment show`; wait_for_operations frames the instructions it takes (R3.12)",
     ),
@@ -784,6 +791,10 @@ pub(super) const NOT_TOOLS: &[(&str, &str)] = &[
     (
         "/reef.api.v1.CommentService/UpdateInstruction",
         "an agent proposes again when done, or runs `reef comment fail`; tools/list is at its budget (#116)",
+    ),
+    (
+        "/reef.api.v1.CommentService/WithdrawHelpRequest",
+        "rare: an agent that no longer needs an answer runs `reef comment withdraw`; tools/list is at its budget (#116)",
     ),
     (
         "/reef.api.v1.CommentService/ClaimInstruction",
@@ -1448,6 +1459,56 @@ tool!(propose_change, args::ProposeChange, |call, args| {
     to_value(&brief::Transitioned::from(&transitioned))
 });
 
+/// `ask_for_help`'s result: the help request in brief, and how to wait for
+/// the answer.
+#[derive(serde::Serialize, JsonSchema)]
+pub(super) struct AskedForHelp<'a> {
+    comment: crate::cli::comment::BriefComment<'a>,
+    next: String,
+}
+
+tool!(ask_for_help, args::AskForHelp, |call, args| {
+    let ctx = call.ctx;
+    let scope = call.scope(None, None).await?;
+    let reason = args
+        .reason
+        .map_or(v1::HelpReason::Other, v1::HelpReason::from);
+    let response = Box::pin(
+        ctx.call(
+            ctx.client.create_comment(v1::CreateCommentRequest {
+                repo: scope.repo_id.clone(),
+                workspace: scope.workspace_id(),
+                revision: at(args.revision),
+                kind: v1::CommentKind::HelpRequest.into(),
+                text: args.text,
+                help: Some(v1::HelpInput {
+                    reason: reason.into(),
+                    tried: args.tried,
+                    question: args.question.unwrap_or_default(),
+                    // The change's conflict, with reason conflict; `reef ask
+                    // --conflict` names one by id.
+                    conflict: String::new(),
+                    while_blocked: false,
+                }),
+                // The answer goes to this server's session, whose wait takes it.
+                client_session: crate::cli::ambient::Ambient::current()
+                    .client_session
+                    .unwrap_or_default(),
+                ..v1::CreateCommentRequest::default()
+            }),
+        ),
+    )
+    .await?;
+    let comment = crate::cli::comment::Comment::from(&response.comment.unwrap_or_default());
+    let change = json::reverse_hex(comment.change_id());
+    to_value(&AskedForHelp {
+        next: format!(
+            "wait_for_operations with kinds [\"comment\"] and changes [\"{change}\"]: a person's answer comes back in its instructions"
+        ),
+        comment: crate::cli::comment::BriefComment::from(&comment),
+    })
+});
+
 tool!(land_change, args::LandChange, |call, args| {
     let ctx = call.ctx;
     let scope = call
@@ -1807,7 +1868,7 @@ mod tests {
             method(path);
         }
         let names: BTreeSet<&str> = TOOLS.iter().map(|tool| tool.name).collect();
-        assert_eq!(names.len(), 26);
+        assert_eq!(names.len(), 27);
     }
 
     #[test]

@@ -1541,8 +1541,10 @@ fn liveness(state: &AppState, repo: RepoId, now: Timestamp) -> Result<Vec<Change
 
 /// Records `changes` and announces their events in operations of their own
 /// (for `workspace` and `agent`, when a caller made them); the last
-/// operation's id. A failure to announce is logged: the rows are the
-/// truth.
+/// operation's id. An assignment that leaves BLOCKED then withdraws the
+/// open help requests about it (`comments::after_unblocked`), so an agent
+/// that asked goes on. A failure to announce or withdraw is logged: the
+/// rows are the truth.
 async fn record_and_announce(
     state: &AppState,
     repo: RepoId,
@@ -1554,7 +1556,17 @@ async fn record_and_announce(
         return Ok(Announced::default());
     }
     let events = state.db.record_assignments(repo, changes)?;
-    Ok(announce(state, repo, &events, workspace, agent).await)
+    let announced = announce(state, repo, &events, workspace, agent).await;
+    let blocked = State::Blocked.as_str();
+    let unblocked: Vec<(String, String)> = events
+        .iter()
+        .filter(|event| event.from_state.as_deref() == Some(blocked) && event.to_state != blocked)
+        .map(|event| (event.change_id.clone(), event.assignment_id.clone()))
+        .collect();
+    if let Err(error) = crate::comments::after_unblocked(state, repo, &unblocked).await {
+        tracing::warn!(%repo, error = %ErrorChain(&error), "cannot withdraw help requests about unblocked conflicts");
+    }
+    Ok(announced)
 }
 
 /// The operations [`announce`] wrote.

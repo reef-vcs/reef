@@ -16,6 +16,24 @@ enum CommentKind {
   // Work for the session that made the change: confirmed against its
   // estimate, then taken by that session (ClaimInstruction).
   COMMENT_KIND_INSTRUCTION = 2;
+  // An agent asking a person for help (R3.32, ADR 0083): never delivered
+  // to a session. An instruction that replies to it answers it.
+  COMMENT_KIND_HELP_REQUEST = 3;
+}
+
+// Where a help request is (R3.32). WITHDRAWN is final, and so is ANSWERED
+// once an answer was delivered.
+enum HelpState {
+  // Not set; in a filter, any.
+  HELP_STATE_UNSPECIFIED = 0;
+  // Asked; nobody has answered.
+  HELP_STATE_OPEN = 1;
+  // An instruction replying to it was written.
+  HELP_STATE_ANSWERED = 2;
+  // The asker no longer needs it, or its change landed or was superseded,
+  // or it was left open past its time, or (reason CONFLICT) the conflict
+  // assignment it names stopped waiting for a person.
+  HELP_STATE_WITHDRAWN = 3;
 }
 
 // Where an instruction is. DONE, FAILED and CANCELLED are final.
@@ -52,6 +70,14 @@ enum InstructionCause {
   INSTRUCTION_CAUSE_CHANGE_FINAL = 3;
   // It was left untouched for 7 days.
   INSTRUCTION_CAUSE_EXPIRED = 4;
+  // A help request's every answer was cancelled before one was delivered,
+  // so it is open again.
+  INSTRUCTION_CAUSE_ANSWER_CANCELLED = 5;
+  // An open help request with reason CONFLICT was withdrawn because the
+  // conflict assignment it names left BLOCKED (R3.28): a person allowed or
+  // took the conflict, a policy change lets an agent attempt it, or the
+  // assignment closed.
+  INSTRUCTION_CAUSE_CONFLICT_UNBLOCKED = 6;
 }
 
 // One comment write as an operation's `reef.comment` attribute records it:
@@ -78,4 +104,8 @@ message CommentEvent {
   InstructionState to = 8;
   // Why.
   InstructionCause cause = 9;
+  // For a help request, its state before; unspecified for a new one.
+  HelpState help_from = 10;
+  // For a help request, its state after.
+  HelpState help_to = 11;
 }

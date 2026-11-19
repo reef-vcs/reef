@@ -115,7 +115,7 @@ pub(super) struct GetChange {
     pub(super) repo: Option<String>,
     /// Workspace: id, prefix, or absolute path in it.
     pub(super) workspace: Option<String>,
-    /// A change or commit id, bookmark, or revset naming one commit (default: `@`, the workspace's change).
+    /// A change or commit id, bookmark, or revset naming one commit (default: `@`).
     pub(super) revision: Option<String>,
     /// Read as of this operation (id or prefix).
     pub(super) at_operation: Option<String>,
@@ -431,7 +431,7 @@ pub(super) struct DescribeChange {
     pub(super) repo: Option<String>,
     /// Workspace: id, prefix, or absolute path in it.
     pub(super) workspace: Option<String>,
-    /// The change: a change or commit id, bookmark, or revset naming one commit (default: `@`).
+    /// The change (default: `@`).
     pub(super) revision: Option<String>,
     /// The new description; empty clears it.
     pub(super) description: String,
@@ -447,7 +447,7 @@ pub(super) struct PublishChange {
     pub(super) repo: Option<String>,
     /// Workspace: id, prefix, or absolute path in it.
     pub(super) workspace: Option<String>,
-    /// The change: a change or commit id, bookmark, or revset naming one commit (default: `@`).
+    /// The change (default: `@`).
     pub(super) revision: Option<String>,
     /// The branch on the remote (default: `reef/` and the change id's first 12 letters).
     pub(super) branch: Option<String>,
@@ -469,6 +469,45 @@ pub(super) struct ProposeChange {
     pub(super) revision: Option<String>,
     /// Propose it alone.
     pub(super) only: Option<bool>,
+}
+
+/// `ask_for_help`: on the server's own repository and workspace.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct AskForHelp {
+    /// The change (default: `@`).
+    pub(super) revision: Option<String>,
+    /// What is wrong.
+    pub(super) text: String,
+    /// What you tried.
+    pub(super) tried: String,
+    /// For a person.
+    pub(super) question: Option<String>,
+    /// Default other.
+    pub(super) reason: Option<HelpReason>,
+}
+
+/// Why an agent asks for help.
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub(super) enum HelpReason {
+    Decision,
+    Conflict,
+    Blocked,
+    Unclear,
+    Other,
+}
+
+impl From<HelpReason> for v1::HelpReason {
+    fn from(reason: HelpReason) -> Self {
+        match reason {
+            HelpReason::Decision => Self::Decision,
+            HelpReason::Conflict => Self::Conflict,
+            HelpReason::Blocked => Self::Blocked,
+            HelpReason::Unclear => Self::Unclear,
+            HelpReason::Other => Self::Other,
+        }
+    }
 }
 
 /// `land_change`.
