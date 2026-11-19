@@ -658,6 +658,9 @@ pub mod error {
     /// A resolution of an approval already approved (R3.43). Metadata:
     /// `id`.
     pub const APPROVAL_RESOLVED: &str = "APPROVAL_RESOLVED";
+    /// A resolution of an approval while an approve of it is being checked;
+    /// retry once it ends (R3.43). Metadata: `id`.
+    pub const APPROVAL_BUSY: &str = "APPROVAL_BUSY";
     /// An approve on the socket: only a passkey in the web UI approves
     /// (R3.43). Metadata: `id`.
     pub const APPROVAL_NEEDS_WEB: &str = "APPROVAL_NEEDS_WEB";

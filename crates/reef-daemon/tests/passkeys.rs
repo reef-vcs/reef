@@ -991,7 +991,10 @@ async fn a_dropped_approve_still_ends_approved() {
         })
         .await
         .unwrap_err();
-    assert_eq!(refused.reason(), "APPROVAL_RESOLVED");
+    assert!(
+        ["APPROVAL_RESOLVED", "APPROVAL_BUSY"].contains(&refused.reason()),
+        "{refused:?}"
+    );
     let ended = client
         .get_approval(GetApprovalRequest {
             id: approval.id.clone(),
@@ -1537,5 +1540,163 @@ async fn reset_revokes_what_the_passkeys_certified() {
     assert_eq!(reason(&reused), "PASSKEY_EXISTS", "{reused:?}");
     let mut fresh = Authenticator::new(Algorithm::Es256);
     register(&page, &mut fresh, "alice", None).await.unwrap();
+    daemon.stop().await;
+}
+
+// An approve that fails certifies no key: here the key's read fails, as a
+// busy or full disk would make it, and the approval stays pending with
+// nothing live, so a decline ends it. A failure after the insert would
+// leave a `user_verified` key certified for an approval a decline ends.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_approve_that_fails_certifies_no_key() {
+    use reef_daemon::identity::approvals::Resolution;
+    use reef_daemon::identity::issue::Channel;
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    create_identity(client, "alice").await;
+    let page = ui(client).await;
+    let mut passkey = Authenticator::new(Algorithm::EdDsa);
+    register(&page, &mut passkey, "alice", None).await.unwrap();
+    let change = commit_on(client, &repo.id, "root()", &[("a.txt", "a\n")]).await;
+    let identities = &daemon.handle.state().identity;
+    let key = fresh_key();
+    let key_id = key.public_key().id().to_string();
+    let approval = request_approval(
+        client,
+        "alice",
+        &repo.id,
+        &change.commit_id,
+        payload(&signoff(None), &change.tree_id),
+        &key,
+    )
+    .await
+    .unwrap();
+    let asserted = assertion(&mut passkey, &page.origin, &approval.challenge);
+    let db =
+        rusqlite::Connection::open(daemon.tmp.path().join("state").join("reef.sqlite3")).unwrap();
+    db.execute_batch(
+        "ALTER TABLE identity_authorities RENAME TO identity_authorities_real;
+         CREATE VIEW identity_authorities AS SELECT id, algorithm, public_key, host,
+           json_extract('not json', '$') AS created_at, retired_at, revoked_at,
+           invalid_from, revoke_reason, kind FROM identity_authorities_real;",
+    )
+    .unwrap();
+    let web = Channel::Web {
+        session: "0123456789abcdef".to_owned(),
+    };
+    let failed = identities
+        .resolve_approval(
+            &web,
+            Some(&page.origin),
+            &approval.id,
+            Resolution::Approve(asserted),
+        )
+        .await;
+    db.execute_batch(
+        "DROP VIEW identity_authorities;
+         ALTER TABLE identity_authorities_real RENAME TO identity_authorities;",
+    )
+    .unwrap();
+    assert!(failed.is_err(), "the key's read did not fail");
+    assert_eq!(
+        client.get_session_key(&key_id).await.unwrap_err().reason(),
+        "SESSION_KEY_NOT_FOUND",
+        "a failed approve certified key {key_id}"
+    );
+    let declined = client
+        .resolve_approval(ResolveApprovalRequest {
+            id: approval.id.clone(),
+            resolution: Some(resolve_approval_request::Resolution::Decline(
+                "not mine".to_owned(),
+            )),
+        })
+        .await
+        .unwrap()
+        .approval
+        .unwrap();
+    assert_eq!(declined.state(), ApprovalState::Declined);
+    daemon.stop().await;
+}
+
+// While an approve is being checked, a decline and a second approve are
+// refused as busy, to retry, not as approved: the approve may yet fail.
+// On one thread the approve's task runs only once the test awaits, so the
+// resolutions meet it in flight.
+#[tokio::test(flavor = "current_thread")]
+async fn a_resolution_during_an_approve_is_busy() {
+    use reef_daemon::identity::IdentityError;
+    use reef_daemon::identity::approvals::{Resolution, State};
+    use reef_daemon::identity::issue::Channel;
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    create_identity(client, "alice").await;
+    let page = ui(client).await;
+    let mut passkey = Authenticator::new(Algorithm::EdDsa);
+    register(&page, &mut passkey, "alice", None).await.unwrap();
+    let change = commit_on(client, &repo.id, "root()", &[("a.txt", "a\n")]).await;
+    let identities = &daemon.handle.state().identity;
+    let approval = request_approval(
+        client,
+        "alice",
+        &repo.id,
+        &change.commit_id,
+        payload(&signoff(None), &change.tree_id),
+        &fresh_key(),
+    )
+    .await
+    .unwrap();
+    let asserted = assertion(&mut passkey, &page.origin, &approval.challenge);
+    let web = Channel::Web {
+        session: "0123456789abcdef".to_owned(),
+    };
+    let mut approving = Box::pin(identities.resolve_approval(
+        &web,
+        Some("http://elsewhere.example"),
+        &approval.id,
+        Resolution::Approve(asserted.clone()),
+    ));
+    assert!(futures::poll!(approving.as_mut()).is_pending());
+    let declined = identities
+        .resolve_approval(
+            &web,
+            None,
+            &approval.id,
+            Resolution::Decline("not mine".to_owned()),
+        )
+        .await;
+    assert!(
+        matches!(declined, Err(IdentityError::ApprovalBusy { .. })),
+        "{declined:?}"
+    );
+    let again = identities
+        .resolve_approval(
+            &web,
+            Some(&page.origin),
+            &approval.id,
+            Resolution::Approve(asserted),
+        )
+        .await;
+    assert!(
+        matches!(again, Err(IdentityError::ApprovalBusy { .. })),
+        "{again:?}"
+    );
+    assert!(
+        approving.await.is_err(),
+        "an approve from another origin passed"
+    );
+    let declined = identities
+        .resolve_approval(
+            &web,
+            None,
+            &approval.id,
+            Resolution::Decline("not mine".to_owned()),
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(declined.state, State::Declined { .. }),
+        "{:?}",
+        declined.state
+    );
     daemon.stop().await;
 }

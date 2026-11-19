@@ -356,6 +356,13 @@ pub enum IdentityError {
         /// How it ended.
         end: ApprovalEnd,
     },
+    /// A resolution of an approval while an approve of it is being
+    /// checked: `APPROVAL_BUSY` (R3.43).
+    #[error("approval {id} is being approved; retry once that approve ends")]
+    ApprovalBusy {
+        /// The id.
+        id: String,
+    },
     /// An approve on the socket: `APPROVAL_NEEDS_WEB` (R3.43).
     #[error("approval {id} is approved only with a passkey, in the web UI")]
     ApprovalNeedsWeb {
@@ -420,6 +427,7 @@ impl Classify for IdentityError {
             | Self::PasskeyOverRemote { .. }
             | Self::PasskeyNeedsWeb { .. }
             | Self::ApprovalNeedsWeb { .. } => ErrorKind::PermissionDenied,
+            Self::ApprovalBusy { .. } => ErrorKind::Unavailable,
             Self::Authority(error) => error.kind(),
             Self::Db(error) => error.kind(),
             Self::Task(_) => ErrorKind::Internal,
@@ -578,10 +586,11 @@ impl Advise for IdentityError {
                 ApprovalEnd::Declined => {
                     "The person declined it: request it again only if they ask for it."
                 }
-                ApprovalEnd::Approved => {
-                    "It is approved already, or being approved: GetApproval returns its key."
-                }
+                ApprovalEnd::Approved => "It is approved already: GetApproval returns its key.",
             }),
+            Self::ApprovalBusy { .. } => Advice::hint(
+                "Retry in a moment: an approve of it is being checked, and it ends approved or pending again.",
+            ),
             Self::ApprovalNeedsWeb { .. } => Advice::hint(
                 "Approve it on the web UI's approval page with a passkey; the socket can only decline.",
             ),
@@ -754,6 +763,7 @@ impl IdentityError {
                 },
                 vec![("id", id.clone())],
             ),
+            Self::ApprovalBusy { id } => (reason::APPROVAL_BUSY, vec![("id", id.clone())]),
             Self::ApprovalNeedsWeb { id } => (reason::APPROVAL_NEEDS_WEB, vec![("id", id.clone())]),
             Self::TooManyApprovals { limit } => (
                 reason::TOO_MANY_APPROVALS,

@@ -74,7 +74,7 @@ pub struct Resolved {
 #[derive(Clone, Debug)]
 pub enum State {
     /// Waiting for a passkey; `resolving` while an approve is being
-    /// checked, which a second one waits out as refused.
+    /// checked, which refuses every other resolution until it ends.
     Pending {
         /// An approve is in flight.
         resolving: bool,
@@ -102,30 +102,23 @@ pub enum State {
 }
 
 impl State {
-    /// Declines a pending approval. Refused while an approve is in flight:
-    /// its outcome would replace the decline, approving what was declined
-    /// or making it pending again, so the decliner tries again after it.
-    fn decline(
-        &mut self,
-        at: Timestamp,
-        reason: &str,
-        web_session: Option<&str>,
-    ) -> Result<(), ApprovalEnd> {
-        match self {
-            State::Pending { resolving: false } => {
-                *self = State::Declined {
-                    at,
-                    reason: reason.trim().to_owned(),
-                    web_session: web_session.map(str::to_owned),
-                };
-                Ok(())
+    /// Why a resolution of approval `id` is refused: it ended, or an
+    /// approve of it is in flight (`ApprovalBusy`), whose outcome would
+    /// replace a decline and which a second approve would repeat.
+    fn refusal(&self, id: &str) -> Option<IdentityError> {
+        let end = match self {
+            State::Pending { resolving: false } => return None,
+            State::Pending { resolving: true } => {
+                return Some(IdentityError::ApprovalBusy { id: id.to_owned() });
             }
-            State::Pending { resolving: true } | State::Approved { .. } => {
-                Err(ApprovalEnd::Approved)
-            }
-            State::Declined { .. } => Err(ApprovalEnd::Declined),
-            State::Expired => Err(ApprovalEnd::Expired),
-        }
+            State::Expired => ApprovalEnd::Expired,
+            State::Declined { .. } => ApprovalEnd::Declined,
+            State::Approved { .. } => ApprovalEnd::Approved,
+        };
+        Some(IdentityError::ApprovalEnded {
+            id: id.to_owned(),
+            end,
+        })
     }
 
     /// An approve in flight was refused: pending again.
@@ -195,26 +188,6 @@ impl Approval {
         }
         false
     }
-
-    /// The refusal of a resolution of it, unless it is pending.
-    fn not_pending(&self) -> Option<IdentityError> {
-        let id = self.id.clone();
-        match self.state {
-            State::Pending { .. } => None,
-            State::Expired => Some(IdentityError::ApprovalEnded {
-                id,
-                end: ApprovalEnd::Expired,
-            }),
-            State::Declined { .. } => Some(IdentityError::ApprovalEnded {
-                id,
-                end: ApprovalEnd::Declined,
-            }),
-            State::Approved { .. } => Some(IdentityError::ApprovalEnded {
-                id,
-                end: ApprovalEnd::Approved,
-            }),
-        }
-    }
 }
 
 /// How an approval ended, for the refusal of a resolution.
@@ -250,6 +223,22 @@ pub struct ApprovalRequest {
 struct Held {
     approval: Approval,
     changed: watch::Sender<()>,
+}
+
+impl Held {
+    /// Marks the approval expired if it is, logged and sent.
+    fn expire(&mut self, now: Timestamp) {
+        if self.approval.expire(now) {
+            audit::approval("expired", &self.approval, None);
+            self.changed.send_replace(());
+        }
+    }
+
+    /// The refusal of a resolution of the approval now.
+    fn refusal(&mut self, now: Timestamp) -> Option<IdentityError> {
+        self.expire(now);
+        self.approval.state.refusal(&self.approval.id)
+    }
 }
 
 /// The approvals `Identities` holds.
@@ -344,9 +333,7 @@ impl Identities {
         let mut held = self.approvals.lock();
         let keep = crate::model::duration_millis(KEEP_ENDED);
         held.retain(|_, entry| {
-            if entry.approval.expire(now) {
-                audit::approval("expired", &entry.approval, None);
-            }
+            entry.expire(now);
             entry.approval.is_pending() || now.0 < entry.approval.expires_at.0.saturating_add(keep)
         });
         let pending = held
@@ -387,10 +374,7 @@ impl Identities {
         let entry = held
             .get_mut(id.trim())
             .ok_or_else(|| IdentityError::ApprovalNotFound { id: id.to_owned() })?;
-        if entry.approval.expire(Timestamp::now()) {
-            audit::approval("expired", &entry.approval, None);
-            entry.changed.send_replace(());
-        }
+        entry.expire(Timestamp::now());
         Ok((entry.approval.clone(), entry.changed.subscribe()))
     }
 
@@ -484,21 +468,14 @@ impl Identities {
             .get_mut(id)
             .ok_or_else(|| IdentityError::ApprovalNotFound { id: id.to_owned() })?;
         let now = Timestamp::now();
-        if entry.approval.expire(now) {
-            audit::approval("expired", &entry.approval, None);
-            entry.changed.send_replace(());
-        }
-        if let Some(refusal) = entry.approval.not_pending() {
+        if let Some(refusal) = entry.refusal(now) {
             return Err(refusal);
         }
-        entry
-            .approval
-            .state
-            .decline(now, reason, channel.web_session())
-            .map_err(|end| IdentityError::ApprovalEnded {
-                id: id.to_owned(),
-                end,
-            })?;
+        entry.approval.state = State::Declined {
+            at: now,
+            reason: reason.trim().to_owned(),
+            web_session: channel.web_session().map(str::to_owned),
+        };
         audit::approval("declined", &entry.approval, channel.web_session());
         entry.changed.send_replace(());
         Ok(entry.approval.clone())
@@ -511,18 +488,8 @@ impl Identities {
         let entry = held
             .get_mut(id)
             .ok_or_else(|| IdentityError::ApprovalNotFound { id: id.to_owned() })?;
-        if entry.approval.expire(Timestamp::now()) {
-            audit::approval("expired", &entry.approval, None);
-            entry.changed.send_replace(());
-        }
-        if let Some(refusal) = entry.approval.not_pending() {
+        if let Some(refusal) = entry.refusal(Timestamp::now()) {
             return Err(refusal);
-        }
-        if matches!(entry.approval.state, State::Pending { resolving: true }) {
-            return Err(IdentityError::ApprovalEnded {
-                id: id.to_owned(),
-                end: ApprovalEnd::Approved,
-            });
         }
         entry.approval.state = State::Pending { resolving: true };
         Ok(entry.approval.clone())
@@ -618,25 +585,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_decline_waits_out_an_approve_in_flight() {
-        let at = Timestamp(0);
+    fn a_resolution_waits_out_an_approve_in_flight() {
         let mut state = State::Pending { resolving: true };
         assert!(matches!(
-            state.decline(at, "no", None),
-            Err(ApprovalEnd::Approved)
+            state.refusal("apr_1"),
+            Some(IdentityError::ApprovalBusy { .. })
         ));
         state.approve_failed();
-        assert!(matches!(state, State::Pending { resolving: false }));
-        state.decline(at, " not mine ", Some("web_a")).unwrap();
-        assert!(matches!(
-            &state,
-            State::Declined { reason, web_session: Some(session), .. }
-                if reason == "not mine" && session == "web_a"
-        ));
-        assert!(matches!(
-            state.decline(at, "", None),
-            Err(ApprovalEnd::Declined)
-        ));
+        assert!(state.refusal("apr_1").is_none());
     }
 
     #[test]

@@ -511,9 +511,10 @@ impl Identities {
 
     /// Certifies `issuance`'s key, its request's checks done: the
     /// certificate, signed by the current authority unless it is no longer
-    /// `issuance.audience` (`InvalidProof`), then the session (when new) and
-    /// the key in one transaction under the identity's limit, logged, and
-    /// read back as any read does.
+    /// `issuance.audience` (`InvalidProof`), read as any read does, then the
+    /// session (when new) and the key in one transaction under the
+    /// identity's limit, and logged. The insert is the last step that can
+    /// fail, so an error means no key was certified.
     #[expect(clippy::too_many_lines, reason = "the issuance steps, in their order")]
     pub(crate) async fn certify_key(&self, issuance: Issuance) -> Result<ReadKey, IdentityError> {
         let Issuance {
@@ -628,9 +629,17 @@ impl Identities {
             approval_id,
             web_session: channel.web_session().map(str::to_owned),
         };
+        let read = self
+            .read(vec![row])
+            .await?
+            .pop()
+            .ok_or_else(|| IdentityError::KeyNotFound {
+                field: "key_id",
+                id: key_id.clone(),
+            })?;
         match self
             .db
-            .insert_session_key(new_session.as_ref(), &row, limit)
+            .insert_session_key(new_session.as_ref(), &read.row, limit)
         {
             Ok(KeyInserted::Stored) => {}
             Ok(KeyInserted::Full) => {
@@ -647,14 +656,8 @@ impl Identities {
             }
             Err(error) => return Err(error.into()),
         }
-        audit::issued(&row, &identity.name, token_name);
-        self.read(vec![row])
-            .await?
-            .pop()
-            .ok_or_else(|| IdentityError::KeyNotFound {
-                field: "key_id",
-                id: key_id,
-            })
+        audit::issued(&read.row, &identity.name, token_name);
+        Ok(read)
     }
 
     /// Issues a key the daemon holds for provenance session `session_id`

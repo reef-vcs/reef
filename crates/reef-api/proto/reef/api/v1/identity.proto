@@ -386,9 +386,11 @@ service IdentityService {
   // PASSKEY_ASSERTION_INVALID (metadata `check`), or for no resolution;
   // PERMISSION_DENIED with reason APPROVAL_NEEDS_WEB for an approve on the
   // socket, or PASSKEY_OVER_REMOTE through the remote listener; UNAVAILABLE
-  // with reason AUTHORITY_UNAVAILABLE. An authority rotated since the
-  // request makes the challenge stale: INVALID_ARGUMENT with reason
-  // PASSKEY_ASSERTION_INVALID (`check` `challenge`); request again.
+  // with reason AUTHORITY_UNAVAILABLE, or APPROVAL_BUSY (metadata `id`)
+  // while an approve of it is being checked: retry once that ends. An
+  // authority rotated since the request makes the challenge stale:
+  // INVALID_ARGUMENT with reason PASSKEY_ASSERTION_INVALID (`check`
+  // `challenge`); request again.
   rpc ResolveApproval(ResolveApprovalRequest) returns (ResolveApprovalResponse) {
     option (reef.api.v1.access) = ACCESS_WRITE;
   }
