@@ -7,10 +7,13 @@
 //!    the journal of paths reported since the last scan, which a watcher
 //!    snapshot or a synced read of a notify workspace narrows its scan to
 //!    (R1.30, R2.23, see [`crate::snapshot`]).
-//! 2. (blocking) Lock the jj handle, point it at that head, and
-//!    `begin_snapshot`: lock the working copy, check freshness, scan. If the
-//!    working copy is ahead of the head (the `jj` CLI ran on the registered
-//!    root), reload the repository thread at head and try once more.
+//! 2. (blocking) Lock the jj handle, take the workspace's carry (ADR 0039),
+//!    point the handle at that head, and `begin_snapshot`: lock the working
+//!    copy, check freshness, scan. A carry that does not end on the head's
+//!    view of the workspace was joined after the head was read; the head is
+//!    read again with the carry, in one job. If the working copy is ahead of
+//!    the head (the `jj` CLI ran on the registered root), reload the
+//!    repository thread at head, again with the carry, and try once more.
 //! 3. (repository thread) If the scan changed anything, `commit_snapshot`;
 //!    its result becomes the thread's head.
 //! 4. (blocking) Update the row and index the operation as a local snapshot
@@ -540,7 +543,7 @@ impl Manager {
                 // would (#202).
                 let carry = entry.carry.take();
                 entry.follow_pending.store(false, Ordering::Release);
-                let pipeline = Pipeline {
+                let mut pipeline = Pipeline {
                     entry: &entry,
                     db: &db,
                     id,
@@ -550,7 +553,7 @@ impl Manager {
                     spec: &spec,
                     meta: &meta,
                     prefixes: prefixes.as_deref(),
-                    carry: carry.as_ref(),
+                    carry,
                     committed: Cell::new(false),
                     fail_check_out,
                     provenance: provenance.as_deref(),
@@ -572,11 +575,14 @@ impl Manager {
                     Ok(Ran {
                         recorded: Recorded::Unchanged { wc_commit, .. },
                         ..
-                    }) => carry.as_ref().is_some_and(|carry| &carry.to == wc_commit),
+                    }) => pipeline
+                        .carry
+                        .as_ref()
+                        .is_some_and(|carry| &carry.to == wc_commit),
                     Ok(_) => true,
                     Err(_) => pipeline.committed.get(),
                 };
-                if !reached && let Some(carry) = carry {
+                if !reached && let Some(carry) = pipeline.carry {
                     entry.carry.restore(carry);
                 }
                 ran
@@ -860,8 +866,10 @@ struct Pipeline<'a> {
     meta: &'a OpMeta,
     /// What to narrow the scan to; `None` scans everything.
     prefixes: Option<&'a [PathBuf]>,
-    /// What a write that moved the workspace handed this snapshot.
-    carry: Option<&'a Carry>,
+    /// What a write that moved the workspace handed this snapshot: it ends
+    /// on the view's commit at the head the scan loads, or was taken with
+    /// that head ([`Pipeline::head_with_carry`]).
+    carry: Option<Carry>,
     /// Set once the snapshot's operation is committed.
     committed: Cell<bool>,
     /// `Scheduler::fail_check_outs` (a test hook).
@@ -890,7 +898,7 @@ impl Pipeline<'_> {
         ) -> Result<reef_lib::jj::PendingSnapshot<'r>, SnapshotError> {
             pollster::block_on(repo.begin_snapshot(expected, carry, sources, prefixes))
         }
-        let (expected, prefixes) = ((self.expected, self.carry), self.prefixes);
+        let (expected, prefixes) = ((self.expected, self.carry.as_ref()), self.prefixes);
         match permit.pool() {
             Some(pool) => pool.install(move || scan(repo, expected, sources, prefixes)),
             None => scan(repo, expected, sources, prefixes),
@@ -899,7 +907,7 @@ impl Pipeline<'_> {
 
     /// Steps 2 to 4. The scan permit is released once the scan is done.
     fn run(
-        &self,
+        &mut self,
         repo: &mut Repo,
         head: Arc<ReadonlyRepo>,
         permit: ScanPermit,
@@ -908,6 +916,17 @@ impl Pipeline<'_> {
             reefignore: Some(self.reefignore),
             excludes: &self.spec.excludes,
             mounts: &self.spec.mounts,
+        };
+        let name = self.id.jj_workspace_name();
+        let past_head = self.carry.as_ref().is_some_and(|carry| {
+            reef_lib::jj::repo::view_wc_commit(&head, &name).as_ref() != Some(&carry.to)
+        });
+        // An ancestor's commit after `head` was read joined its carry onto
+        // the one this took (R3.11 review, R3-1).
+        let head = if past_head {
+            self.head_with_carry(false)?
+        } else {
+            head
         };
         repo.set_head(head);
         let behind = match self.begin(repo, &sources, &permit) {
@@ -931,13 +950,7 @@ impl Pipeline<'_> {
             "working copy is ahead of the daemon's head ({:?}); reloading",
             behind.0
         );
-        let head = pollster::block_on(self.entry.repo.call_async(|head| {
-            async move {
-                head.reload().await?;
-                Ok::<_, ManagerError>(head.readonly())
-            }
-            .boxed_local()
-        }))??;
+        let head = self.head_with_carry(true)?;
         repo.set_head(head);
         let pending = self.begin(repo, &sources, &permit)?;
         drop(permit);
@@ -946,6 +959,33 @@ impl Pipeline<'_> {
             repo.set_head(new_head);
         }
         ran
+    }
+
+    /// The repository thread's head, reloaded first if `reload`, with this
+    /// snapshot's carry taken again in the same job: the job that adopts a
+    /// head hands out the carries its commit makes ([`Manager::carry_moved`],
+    /// ADR 0039), so a carry taken with the head ends on the head's view of
+    /// the workspace. The carry goes back to the slot first, where one set
+    /// since joins it, and stays there if the job fails.
+    fn head_with_carry(&mut self, reload: bool) -> Result<Arc<ReadonlyRepo>, ManagerError> {
+        if let Some(carry) = self.carry.take() {
+            self.entry.carry.restore(carry);
+        }
+        let entry = Arc::clone(self.entry);
+        let (head, carry) = pollster::block_on(self.entry.repo.call_async(move |head| {
+            async move {
+                let readonly = if reload {
+                    head.reload().await?;
+                    head.readonly()
+                } else {
+                    head.refresh().await?
+                };
+                Ok::<_, ManagerError>((readonly, entry.carry.take()))
+            }
+            .boxed_local()
+        }))??;
+        self.carry = carry;
+        Ok(head)
     }
 
     /// Steps 3 and 4: commit if anything changed, update the row, and save
@@ -1087,7 +1127,11 @@ impl Pipeline<'_> {
         let manager = self.manager.clone();
         let name = self.id.jj_workspace_name();
         let entry = Arc::clone(self.entry);
-        let unused = self.carry.filter(|_| plan.carried.is_none()).cloned();
+        let unused = self
+            .carry
+            .as_ref()
+            .filter(|_| plan.carried.is_none())
+            .cloned();
         let committed = pollster::block_on(self.entry.repo.call_async(move |head| {
             async move {
                 let before = Arc::clone(head.repo.head());

@@ -1906,6 +1906,71 @@ async fn an_unchanged_snapshot_gives_back_the_carry_it_took() {
     daemon.stop().await;
 }
 
+// Third R3.11 review, R3-1: a follow that loaded the head between two
+// ancestor commits takes the carry the second joined onto the first, and
+// scans at the head that carry ends on.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_follow_that_loaded_the_head_between_two_ancestor_commits_carries_both() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let scheduler = daemon.handle.state().manager.scheduler();
+    let (x, y) = stacked(client, &repo).await;
+    // Y's clean snapshot waits at its commit, holding Y's scan lock.
+    let y_hold = scheduler.hold_commits(y.id.parse().unwrap()).await;
+    let y_task = {
+        let (client, repo, id) = (client.clone(), repo.id.clone(), y.id.clone());
+        tokio::spawn(async move { client.snapshot_workspace(&repo, &id, "").await.map(drop) })
+    };
+    until("Y's snapshot waits at its commit", || {
+        scheduler.held_commits() == 1
+    })
+    .await;
+    // X's first commit hands Y a carry and queues its follow, which waits
+    // for Y's scan lock.
+    write(&x, "x2.txt", "x2\n");
+    snapshot(client, &repo, &x).await;
+    // X's second snapshot waits at its commit.
+    let x_hold = scheduler.hold_commits(x.id.parse().unwrap()).await;
+    write(&x, "x3.txt", "x3\n");
+    let x_task = {
+        let (client, repo, id) = (client.clone(), repo.id.clone(), x.id.clone());
+        tokio::spawn(async move { client.snapshot_workspace(&repo, &id, "").await.map(drop) })
+    };
+    until("X's second snapshot waits at its commit", || {
+        scheduler.held_commits() == 2
+    })
+    .await;
+    // Y's follow loads the head X's first commit made, then waits before
+    // its scan.
+    let scans = scheduler.hold_scans().await;
+    drop(y_hold);
+    y_task.await.unwrap().unwrap();
+    until("Y's follow waits before its scan", || {
+        scheduler.held_scans() >= 1
+    })
+    .await;
+    // X's second commit hands Y a carry that joins the pending one.
+    drop(x_hold);
+    x_task.await.unwrap().unwrap();
+    write(&y, "y-late.txt", "late\n");
+    drop(scans);
+
+    eventually("Y's directory has X's second file", || {
+        read(&y, "x3.txt").is_some()
+    })
+    .await;
+    snapshot(client, &repo, &y).await;
+    y_current(
+        client,
+        &repo,
+        &y,
+        &["x.txt", "x2.txt", "x3.txt", "y.txt", "y-late.txt"],
+    )
+    .await;
+    assert_eq!(change_commits(client, &repo, &x.change_id).await.len(), 1);
+    daemon.stop().await;
+}
+
 /// A plain channel to the daemon, for requests the client would not send.
 async fn raw_channel(socket: &Path) -> tonic::transport::Channel {
     let path = socket.to_owned();
