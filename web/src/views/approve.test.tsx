@@ -6,7 +6,7 @@ import { timestampFromMs } from "@bufbuild/protobuf/wkt";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { equal } from "../sign/bytes";
 import { daemonError, settle } from "../test/fakes";
-import { IdentityDaemon, passkey, TREE } from "../test/identity-daemon";
+import { IdentityDaemon, passkey, REPO, TREE } from "../test/identity-daemon";
 import { act, cleanup, render, screen, waitFor } from "../test/testing-library";
 import { installAuthenticator, removeAuthenticator } from "../test/webauthn";
 import { Approve, timeLeft } from "./Approve";
@@ -53,8 +53,13 @@ describe("the approval page", () => {
     expect(fact("Sign-off")).toBe("signoff, pass, the whole tree");
     expect(fact("Change")).toContain("Fix the lease renewal race");
     expect(fact("Author")).toBe("Ada Agent <ada@example.com>");
-    expect(fact("Tree")).toBe(TREE);
-    expect(fact("Asked by")).toBe("claude@mac in workspace 6ce393d29a64e06c");
+    expect(fact("Repository")).toBe(REPO);
+    expect(fact("Tree")).toContain(TREE);
+    expect(fact("Tree")).toContain("changes below this one that have not landed");
+    expect(screen.queryByText("Also covers"), "no line without unlanded changes below").toBeNull();
+    expect(fact("Asked by")).toBe(
+      "a command that says it is claude@mac, in workspace 6ce393d29a64e06c",
+    );
     expect(screen.getByRole("timer").textContent).toMatch(/^2 min left, until \d\d:\d\d:\d\d$/);
     expect(button("Approve").disabled).toBe(false);
     // Nothing is approved on load.
@@ -164,7 +169,7 @@ describe("the approval page", () => {
     const daemon = daemonWithPasskey();
     const approval = await daemon.pending({ requestedThrough: "web", requestedByAgent: "" });
     await setup(daemon, approval.id);
-    expect(fact("Asked by")).toBe("this browser");
+    expect(fact("Asked by")).toBe("a web UI session");
   });
 });
 
@@ -174,5 +179,16 @@ describe("timeLeft", () => {
     expect(timeLeft(100_400)).toBe("1 min 41 s");
     expect(timeLeft(9_001)).toBe("10 s");
     expect(timeLeft(-5)).toBe("0 s");
+  });
+  it("names the changes below that have not landed, which the tree holds too", async () => {
+    const daemon = daemonWithPasskey();
+    daemon.below = ["Add the payload\n\nbody", ""];
+    installAuthenticator();
+    const approval = await daemon.pending();
+    await setup(daemon, approval.id);
+    const covers = fact("Also covers");
+    expect(covers).toContain("2 changes below that have not landed");
+    expect(covers).toContain("Add the payload");
+    expect(covers).toContain("(no description)");
   });
 });

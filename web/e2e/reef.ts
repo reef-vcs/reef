@@ -33,6 +33,11 @@ function binDir(): string {
   return isAbsolute(dir) ? dir : resolve(WEB_DIR, dir);
 }
 
+/** The lines of `text` its writer has finished, without the last partial one. */
+function complete(text: string): string[] {
+  return text.split("\n").slice(0, -1);
+}
+
 function redact(text: string): string {
   return text.replace(SESSION, "#session=<redacted>");
 }
@@ -63,6 +68,8 @@ export class Reef {
   readonly workspaces: Workspace[] = [];
   private readonly env: NodeJS.ProcessEnv;
   private daemon: ChildProcess | null = null;
+  /** The commands `started` left running, killed at teardown. */
+  private readonly children: ChildProcess[] = [];
   private starts = 0;
   private readonly transcript: string[] = [];
 
@@ -294,6 +301,64 @@ export class Reef {
     return stdout.trim() ? (JSON.parse(stdout) as unknown) : null;
   }
 
+  /**
+   * `reef --no-autostart <args>` left running: its stderr lines as they
+   * come, and its exit with stdout parsed as JSON. For a command that waits
+   * on the browser, such as `evidence add --verified`.
+   */
+  started(args: string[]): {
+    line: (match: RegExp) => Promise<string>;
+    exit: Promise<{ code: number | null; json: unknown }>;
+  } {
+    const argv = ["--no-autostart", ...args];
+    const child = spawn(join(this.bin, "reef"), argv, {
+      env: this.env,
+      cwd: this.root,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    const waiting: { match: RegExp; found: (line: string) => void }[] = [];
+    child.stdout.setEncoding("utf8").on("data", (chunk: string) => (stdout += chunk));
+    child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
+      stderr += chunk;
+      for (const wait of [...waiting]) {
+        const line = complete(stderr).find((each) => wait.match.test(each));
+        if (line !== undefined) {
+          waiting.splice(waiting.indexOf(wait), 1);
+          wait.found(line);
+        }
+      }
+    });
+    // `close`, not `exit`: stdout and stderr are drained by then.
+    this.children.push(child);
+    const closed = once(child, "close");
+    const exit = closed.then(([code]) => {
+      this.transcript.push(`$ reef ${argv.join(" ")}\nexit ${String(code)}\n${stdout}${stderr}`);
+      return {
+        code: code as number | null,
+        json: stdout.trim() ? (JSON.parse(stdout) as unknown) : null,
+      };
+    });
+    const line = (match: RegExp) =>
+      new Promise<string>((found, failed) => {
+        const seen = complete(stderr).find((each) => match.test(each));
+        if (seen !== undefined) {
+          found(seen);
+          return;
+        }
+        waiting.push({ match, found });
+        void closed.then(() => {
+          failed(
+            new Error(
+              redact(`reef ${argv.join(" ")} exited before printing ${String(match)}:\n${stderr}`),
+            ),
+          );
+        });
+      });
+    return { line, exit };
+  }
+
   private async git(...args: string[]) {
     await run("git", args, { env: this.env, cwd: this.fixture, timeout: 60_000 });
   }
@@ -328,6 +393,7 @@ export class Reef {
   }
 
   async dispose() {
+    for (const child of this.children) child.kill("SIGKILL");
     try {
       // Released while the daemon runs: on Linux each workspace is a
       // fuse-overlayfs mount, which outlives a stop (workspaces survive restarts).

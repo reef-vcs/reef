@@ -7,9 +7,15 @@ import { durationMs, timestampFromMs, timestampNow } from "@bufbuild/protobuf/wk
 import { createRouterTransport } from "@connectrpc/connect";
 import type { Connection } from "../api/connection";
 import {
+  EvaluatePolicyResponseSchema,
+  PolicyService,
+  PolicyVerifiedSignerSchema,
+} from "../gen/reef/api/v1/policy_pb";
+import {
   ChangeSchema,
   ChangeService,
   GetChangeResponseSchema,
+  ListChangesResponseSchema,
 } from "../gen/reef/api/v1/changes_pb";
 import {
   AddEvidenceResponseSchema,
@@ -95,6 +101,10 @@ export class IdentityDaemon {
   passkeys: Passkey[] = [];
   readonly approvals = new Map<string, Approval>();
   evidence: Evidence[] = [];
+  /** The descriptions of the changes below the approval's that have not landed. */
+  below: string[] = [];
+  /** What `EvaluatePolicy` reports of the `user_verified` signers; none without a policy. */
+  verified: MessageInitShape<typeof PolicyVerifiedSignerSchema>[] = [];
   readonly fail: Partial<Record<Method, Error>> = {};
   readonly requested: RequestApprovalRequest[] = [];
   readonly resolved: ResolveApprovalRequest[] = [];
@@ -277,7 +287,21 @@ export class IdentityDaemon {
           return create(AddEvidenceResponseSchema, { evidence, created: true });
         },
       });
+      service(PolicyService, {
+        evaluatePolicy: () =>
+          create(EvaluatePolicyResponseSchema, { evaluation: { verified: this.verified } }),
+      });
       service(ChangeService, {
+        listChanges: () =>
+          create(ListChangesResponseSchema, {
+            entries: this.below.map((description, n) => ({
+              change: {
+                changeId: String(n).repeat(32),
+                commitId: String(n).repeat(40),
+                description,
+              },
+            })),
+          }),
         getChange: () =>
           create(GetChangeResponseSchema, {
             change: create(ChangeSchema, {

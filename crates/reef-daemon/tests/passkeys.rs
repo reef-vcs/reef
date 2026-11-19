@@ -1162,7 +1162,8 @@ async fn presence_keys_sign_one_sign_off() {
 }
 
 /// `main`'s policy: every change needs a sign-off by alice with a verified
-/// presence, on a passkey pinned as `pinned`.
+/// presence, on a passkey pinned as `pinned`, and so does a change to the
+/// pins.
 fn verified_policy(pinned: &str) -> String {
     format!(
         r#"
@@ -1170,6 +1171,7 @@ version = 1
 
 [owners]
 identities = ["alice"]
+presence = "user_verified"
 
 [passkeys]
 alice = ["{pinned}"]
@@ -1391,6 +1393,12 @@ async fn reset_revokes_what_the_passkeys_certified() {
         .await
         .unwrap();
     assert!(again.removed.is_empty() && again.revoked_key_ids.is_empty());
+    // A removed passkey's credential id is never registered again, so no
+    // registration can reuse the person's id with another key.
+    let reused = register(&page, &mut passkey, "alice", None)
+        .await
+        .unwrap_err();
+    assert_eq!(reason(&reused), "PASSKEY_EXISTS", "{reused:?}");
     let mut fresh = Authenticator::new(Algorithm::Es256);
     register(&page, &mut fresh, "alice", None).await.unwrap();
     daemon.stop().await;

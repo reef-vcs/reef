@@ -163,7 +163,7 @@ describe("Sign off", () => {
     expect(daemon.added).toEqual([]);
   });
 
-  it("lists the change's sign-offs, with whether a person was verified", async () => {
+  it("lists the change's sign-offs, with whether a person was verified and the policy pins the passkey", async () => {
     const { daemon } = withPasskey();
     const signoff = (id: string, presence: SessionPresence, current: boolean) =>
       create(EvidenceSchema, {
@@ -185,10 +185,18 @@ describe("Sign off", () => {
     daemon.evidence = [
       signoff("a", SessionPresence.USER_VERIFIED, true),
       signoff("b", SessionPresence.NONE, false),
+      signoff("c", SessionPresence.USER_VERIFIED, true),
+    ];
+    daemon.verified = [
+      { evidenceId: "a".repeat(64), identity: "arsood", passkey: "ab".repeat(32), pinned: true },
+      { evidenceId: "c".repeat(64), identity: "arsood", passkey: "ab".repeat(32), pinned: false },
     ];
     await setup(daemon);
     const rows = screen.getAllByRole("listitem").map((row) => row.textContent);
     expect(rows[0]).toMatch(/^arsood · pass · user verified, passkey “YubiKey” ·/);
+    expect(rows[0]).toMatch(/· pinned by this repository's policy$/);
     expect(rows[1]).toMatch(/^arsood · pass · not verified · on an earlier tree ·/);
+    expect(rows[1]).not.toMatch(/pinned/);
+    expect(rows[2]).toMatch(/· not pinned by this repository's policy$/);
   });
 });

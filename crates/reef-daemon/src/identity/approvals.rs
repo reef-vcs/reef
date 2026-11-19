@@ -101,6 +101,41 @@ pub enum State {
     Expired,
 }
 
+impl State {
+    /// Declines a pending approval. Refused while an approve is in flight:
+    /// its outcome would replace the decline, approving what was declined
+    /// or making it pending again, so the decliner tries again after it.
+    fn decline(
+        &mut self,
+        at: Timestamp,
+        reason: &str,
+        web_session: Option<&str>,
+    ) -> Result<(), ApprovalEnd> {
+        match self {
+            State::Pending { resolving: false } => {
+                *self = State::Declined {
+                    at,
+                    reason: reason.trim().to_owned(),
+                    web_session: web_session.map(str::to_owned),
+                };
+                Ok(())
+            }
+            State::Pending { resolving: true } | State::Approved { .. } => {
+                Err(ApprovalEnd::Approved)
+            }
+            State::Declined { .. } => Err(ApprovalEnd::Declined),
+            State::Expired => Err(ApprovalEnd::Expired),
+        }
+    }
+
+    /// An approve in flight was refused: pending again.
+    fn approve_failed(&mut self) {
+        if matches!(self, State::Pending { resolving: true }) {
+            *self = State::Pending { resolving: false };
+        }
+    }
+}
+
 /// A request for a person's verified approval of one sign-off.
 #[derive(Clone, Debug)]
 pub struct Approval {
@@ -150,9 +185,11 @@ impl Approval {
         matches!(self.state, State::Pending { .. })
     }
 
-    /// Marks it expired when pending past its expiry; whether it did.
+    /// Marks it expired when pending past its expiry; whether it did. An
+    /// approve in flight began before the expiry (it checks that first), so
+    /// it is left to finish: approved, or pending and then expired.
     fn expire(&mut self, now: Timestamp) -> bool {
-        if self.is_pending() && now >= self.expires_at {
+        if matches!(self.state, State::Pending { resolving: false }) && now >= self.expires_at {
             self.state = State::Expired;
             return true;
         }
@@ -436,11 +473,14 @@ impl Identities {
         if let Some(refusal) = entry.approval.not_pending() {
             return Err(refusal);
         }
-        entry.approval.state = State::Declined {
-            at: now,
-            reason: reason.trim().to_owned(),
-            web_session: channel.web_session().map(str::to_owned),
-        };
+        entry
+            .approval
+            .state
+            .decline(now, reason, channel.web_session())
+            .map_err(|end| IdentityError::ApprovalEnded {
+                id: id.to_owned(),
+                end,
+            })?;
         audit::approval("declined", &entry.approval, channel.web_session());
         entry.changed.send_replace(());
         Ok(entry.approval.clone())
@@ -484,7 +524,7 @@ impl Identities {
         };
         match approved {
             Err(error) => {
-                entry.approval.state = State::Pending { resolving: false };
+                entry.approval.state.approve_failed();
                 Err(error)
             }
             Ok(key) => {
@@ -551,5 +591,39 @@ impl Identities {
             })
             .await?;
         Ok(super::read::session_key_message(&read, true))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_decline_waits_out_an_approve_in_flight() {
+        let at = Timestamp(0);
+        let mut state = State::Pending { resolving: true };
+        assert!(matches!(
+            state.decline(at, "no", None),
+            Err(ApprovalEnd::Approved)
+        ));
+        state.approve_failed();
+        assert!(matches!(state, State::Pending { resolving: false }));
+        state.decline(at, " not mine ", Some("web_a")).unwrap();
+        assert!(matches!(
+            &state,
+            State::Declined { reason, web_session: Some(session), .. }
+                if reason == "not mine" && session == "web_a"
+        ));
+        assert!(matches!(
+            state.decline(at, "", None),
+            Err(ApprovalEnd::Declined)
+        ));
+    }
+
+    #[test]
+    fn a_failed_approve_leaves_an_expiry() {
+        let mut state = State::Expired;
+        state.approve_failed();
+        assert!(matches!(state, State::Expired));
     }
 }

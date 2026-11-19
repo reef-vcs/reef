@@ -626,8 +626,8 @@ pub mod error {
     /// (`type`, `challenge`, `origin`, `rp`, `flags`, `signature`,
     /// `counter` or `passkey`).
     pub const PASSKEY_ASSERTION_INVALID: &str = "PASSKEY_ASSERTION_INVALID";
-    /// A registration whose credential or public key is a live passkey's
-    /// already (R3.43). Metadata: `id`.
+    /// A registration of a credential id any passkey had, removed or not,
+    /// or of a live passkey's public key (R3.43). Metadata: `id`.
     pub const PASSKEY_EXISTS: &str = "PASSKEY_EXISTS";
     /// No live passkey has the id (R3.43). Metadata: `id`.
     pub const PASSKEY_NOT_FOUND: &str = "PASSKEY_NOT_FOUND";

@@ -6,6 +6,7 @@ import { client, type Connection } from "../api/connection";
 import { isSessionInvalid, reefError, type ReefError } from "../api/errors";
 import type { Change } from "../gen/reef/api/v1/changes_pb";
 import { EvidenceResult, EvidenceService, type Evidence } from "../gen/reef/api/v1/evidence_pb";
+import { PolicyService } from "../gen/reef/api/v1/policy_pb";
 import {
   IdentityService,
   IdentityStatus,
@@ -75,22 +76,39 @@ function useSigner(connection: Connection, onSessionInvalid: () => void): Signer
   return signer;
 }
 
+interface SignOffs {
+  evidence: Evidence[];
+  /** Whether the trunk's policy pins each `user_verified` sign-off's passkey, by evidence id. */
+  pins: ReadonlyMap<string, boolean>;
+}
+
 /** The change's sign-offs, read again after each of this panel's. */
 function useSignOffs(
   connection: Connection,
   repo: string,
-  changeId: string,
+  change: Change,
   version: number,
   onSessionInvalid: () => void,
 ) {
-  const [state, setState] = useState<{ evidence: Evidence[] } | { error: ReefError } | null>(null);
+  const [state, setState] = useState<SignOffs | { error: ReefError } | null>(null);
+  const { changeId, commitId } = change;
   useEffect(() => {
     let current = true;
+    // Pinning is the policy's word on each passkey; without a policy, or
+    // when it cannot be read, the rows say nothing about it.
+    const pins = client(connection, PolicyService)
+      .evaluatePolicy({ repo, revision: commitId, skipSnapshot: true })
+      .then(
+        ({ evaluation }) =>
+          new Map((evaluation?.verified ?? []).map((signer) => [signer.evidenceId, signer.pinned])),
+        () => new Map<string, boolean>(),
+      );
     client(connection, EvidenceService)
       .listEvidence({ repo, changeId, kinds: ["signoff"] })
       .then(
-        ({ evidence }) => {
-          if (current) setState({ evidence });
+        async ({ evidence }) => {
+          const pinned = await pins;
+          if (current) setState({ evidence, pins: pinned });
         },
         (thrown: unknown) => {
           if (!current) return;
@@ -102,7 +120,7 @@ function useSignOffs(
     return () => {
       current = false;
     };
-  }, [connection, repo, changeId, version, onSessionInvalid]);
+  }, [connection, repo, changeId, commitId, version, onSessionInvalid]);
   return state;
 }
 
@@ -139,19 +157,16 @@ export function SignOff({
   connection,
   repo,
   change,
-  pins,
   onSessionInvalid,
 }: {
   connection: Connection;
   repo: string;
   change: Change;
-  /** Whether the repository's policy pins each sign-off's passkey, by evidence id; unknown when absent. */
-  pins?: ReadonlyMap<string, boolean>;
   onSessionInvalid: () => void;
 }) {
   const signer = useSigner(connection, onSessionInvalid);
   const [version, setVersion] = useState(0);
-  const signOffs = useSignOffs(connection, repo, change.changeId, version, onSessionInvalid);
+  const signOffs = useSignOffs(connection, repo, change, version, onSessionInvalid);
   const [action, setAction] = useState<Action>({ kind: "idle" });
   const busy = action.kind === "busy";
   const supported = hasPasskeySupport();
@@ -190,7 +205,7 @@ export function SignOff({
             <SignOffRow
               key={evidence.evidenceId}
               evidence={evidence}
-              pinned={pins?.get(evidence.evidenceId)}
+              pinned={signOffs.pins.get(evidence.evidenceId)}
             />
           ))}
         </ul>

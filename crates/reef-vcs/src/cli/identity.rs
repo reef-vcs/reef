@@ -1225,7 +1225,10 @@ impl TextRender for Passkeys {
         let snippet = passkeys_snippet(&self.0);
         if !snippet.is_empty() {
             writeln!(w)?;
-            writeln!(w, "To pin them, add to the destination's reef-policy.toml:")?;
+            writeln!(
+                w,
+                "To pin them, add to the destination's reef-policy.toml, after checking each is yours: anyone who can use the web UI can add a passkey, an agent included (the Passkeys page's snippet asks for a touch first):"
+            )?;
             write!(w, "{snippet}")?;
         }
         Ok(())

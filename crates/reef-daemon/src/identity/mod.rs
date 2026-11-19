@@ -280,11 +280,11 @@ pub enum IdentityError {
         /// What was found.
         message: String,
     },
-    /// A registration of a live passkey's credential or public key:
-    /// `PASSKEY_EXISTS` (R3.43).
+    /// A registration of a credential any passkey had, or of a live
+    /// passkey's public key: `PASSKEY_EXISTS` (R3.43).
     #[error("passkey {id} has this credential or public key already")]
     PasskeyExists {
-        /// The live passkey's id.
+        /// That passkey's id; it may be removed.
         id: String,
     },
     /// No live passkey has the id: `PASSKEY_NOT_FOUND` (R3.43).
@@ -544,7 +544,7 @@ impl Advise for IdentityError {
                 _ => "Send the browser's bytes exactly as it returned them.",
             }),
             Self::PasskeyExists { .. } => Advice::hint(
-                "This passkey is registered already: `reef identity passkey list` lists the live ones.",
+                "This passkey is registered already, or was and was removed: a credential is never registered twice. Make a new passkey; `reef identity passkey list --all` lists them.",
             ),
             Self::PasskeyNotFound { .. } => Advice::run(
                 "List the live passkeys to find its id.",

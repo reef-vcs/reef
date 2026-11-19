@@ -102,10 +102,10 @@ reef evidence add --kind signoff --result pass --actor human --verified -r @-
 
 1. Builds the statement over the revision's tree and a fresh key, and asks the daemon to approve that one sign-off (`IdentityService.RequestApproval`).
 2. Opens the web UI's approval page for it, through a new web UI session, as `reef ui` opens the app, and says on stderr what it waits for. `--print-url` prints the page's URL instead of opening it, for a shell over SSH.
-3. Waits up to `--timeout` (default 2 minutes) for you to approve or decline on the page. Approving takes one touch of your passkey.
+3. Waits up to `--timeout` (the global flag; 2 minutes here by default) for you to approve or decline on the page. Approving takes one touch of your passkey.
 4. When you approve, signs the statement with the key the approval certified and adds it with the revision. The evidence reads `presence user_verified`.
 
-A decline, the approval's expiry, an approval the daemon no longer holds (a restart drops pending ones) and the timeout each exit 5 with the reason. The command asks nothing on the terminal and runs no login; nothing but a touch on the page approves it. You need a passkey first: `reef identity passkey add` opens the web UI's Passkeys page. [docs/identity.md](identity.md#approving-a-sign-off) has the approval page, the API steps and what the key may sign: exactly that statement, for that change, once.
+A decline (`APPROVAL_DECLINED`), the approval's expiry (`APPROVAL_EXPIRED`), an approval the daemon no longer holds (`APPROVAL_NOT_FOUND`: a restart drops pending ones) and the timeout (`APPROVAL_PENDING`, a client's reason) each exit 5 with the reason and no `next`: no command approves. The command asks nothing on the terminal and runs no login; nothing but a touch on the page approves it. You need a passkey first: `reef identity passkey add` opens the web UI's Passkeys page. [docs/identity.md](identity.md#approving-a-sign-off) has the approval page, the API steps and what the key may sign: exactly that statement, for that change, once.
 
 In the web UI, **Sign off** on a change's detail panel in the smartlog does the same in the page, as `signoff` and `pass` on the change's tree.
 

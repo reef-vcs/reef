@@ -11,7 +11,9 @@ import {
   type Identity,
   type Passkey,
 } from "../gen/reef/api/v1/identity_pb";
+import { equal, hex, sha256 } from "../sign/bytes";
 import { removalChallenge } from "../sign/key";
+import { assertionVerifies } from "../sign/verify";
 import {
   assert,
   create,
@@ -43,7 +45,7 @@ type Action =
 
 const TOML_BARE_KEY = /^[A-Za-z0-9_-]+$/;
 
-/** The `[passkeys]` table pinning every live passkey of `person`. */
+/** The `[passkeys]` table pinning `person`'s passkeys. */
 export function policySnippet({ identity, passkeys }: Person): string {
   const key = TOML_BARE_KEY.test(identity.name) ? identity.name : JSON.stringify(identity.name);
   const fingerprints = passkeys.map((passkey) => JSON.stringify(passkey.fingerprint)).join(", ");
@@ -104,7 +106,60 @@ function PersonCard({
 }) {
   const { identity, passkeys } = person;
   const [label, setLabel] = useState("");
-  const snippet = policySnippet(person);
+  // Anyone who can open this page can add a passkey, an agent included, so
+  // the snippet names only passkeys this browser's authenticator proved it
+  // holds, with a touch.
+  // Each confirmed passkey's fingerprint as computed here from the key its
+  // touch verified with, never the daemon's stored text.
+  const [held, setHeld] = useState<ReadonlyMap<string, string>>(new Map());
+  const [confirming, setConfirming] = useState<Failure | "busy" | null>(null);
+  const pinned = passkeys.flatMap((passkey) => {
+    const fingerprint = held.get(passkey.id);
+    return fingerprint === undefined ? [] : [{ ...passkey, fingerprint }];
+  });
+  const snippet = policySnippet({ identity, passkeys: pinned });
+  async function confirm() {
+    setConfirming("busy");
+    try {
+      const challenge = crypto.getRandomValues(new Uint8Array(32));
+      const asserted = await assert({
+        challenge,
+        rpId: passkeys[0]?.rpId ?? "localhost",
+        credentialIds: passkeys.map((passkey) => passkey.credentialId),
+      });
+      const used = asserted.credentialId ?? new Uint8Array();
+      const found = passkeys.find((passkey) => equal(passkey.credentialId, used));
+      // The touch proves the person holds the passkey only if its signature
+      // verifies with the key the daemon holds for it: a registration that
+      // reuses the person's credential id with another key fails here.
+      const held =
+        found &&
+        (await assertionVerifies(
+          found,
+          {
+            authenticatorData: asserted.authenticatorData ?? new Uint8Array(),
+            clientDataJson: asserted.clientDataJson ?? new Uint8Array(),
+            signature: asserted.signature ?? new Uint8Array(),
+          },
+          challenge,
+          window.location.origin,
+          found.rpId,
+        ));
+      if (!found || !held) {
+        setConfirming({
+          kind: "browser",
+          words:
+            "That passkey's touch does not match the key Reef holds for it. Do not pin it: remove it, or reset this identity's passkeys.",
+        });
+        return;
+      }
+      const fingerprint = hex(await sha256(found.publicKey));
+      setHeld((ids) => new Map([...ids, [found.id, fingerprint]]));
+      setConfirming(null);
+    } catch (thrown) {
+      setConfirming(failure(thrown));
+    }
+  }
   function submit(event: SubmitEvent<HTMLFormElement>) {
     event.preventDefault();
     onAdd(label.trim());
@@ -161,12 +216,34 @@ function PersonCard({
           </div>
           <p className="secondary">
             A repository&apos;s policy counts these passkeys only once its{" "}
-            <code>reef-policy.toml</code> pins them:
+            <code>reef-policy.toml</code> pins them. Pin only a passkey you hold: confirm it with a
+            touch, and the snippet names it.
           </p>
-          <pre className="snippet">{snippet}</pre>
           <p>
-            <Copy text={snippet} label="Copy policy snippet" />
+            <button
+              type="button"
+              disabled={busy || confirming === "busy"}
+              onClick={() => void confirm()}
+            >
+              Confirm a passkey to pin
+            </button>
           </p>
+          {confirming !== null && confirming !== "busy" && <FailureView failure={confirming} />}
+          {pinned.length > 0 && (
+            <>
+              <p className="secondary">
+                Confirmed by a touch:{" "}
+                {pinned
+                  .map((passkey) => `“${passkey.label}” (${passkey.fingerprint.slice(0, 12)})`)
+                  .join(", ")}
+                . Pin only a passkey you recognize.
+              </p>
+              <pre className="snippet">{snippet}</pre>
+              <p>
+                <Copy text={snippet} label="Copy policy snippet" />
+              </p>
+            </>
+          )}
         </>
       )}
       <form className="passkey-add" onSubmit={submit}>

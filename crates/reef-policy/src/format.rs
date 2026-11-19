@@ -859,6 +859,8 @@ struct Loader<'a> {
     entries: usize,
     /// Whether an expression reads `landing` or `batch` (R3.45).
     reads_destination: bool,
+    /// Whether a requirement asks for `presence = "user_verified"` (R3.43).
+    asks_verified: bool,
 }
 
 impl Loader<'_> {
@@ -1038,6 +1040,7 @@ impl Loader<'_> {
         match presence.map(|p| (p.get_ref().as_str(), p.span().start)) {
             None | Some(("none", _)) => Presence::None,
             Some(("user_verified", at)) => {
+                self.asks_verified = true;
                 if !passkeys.keys().any(|who| members.could_include(who)) {
                     let who: Vec<&str> = members
                         .names
@@ -1333,6 +1336,7 @@ impl Policy {
             warnings: Vec::new(),
             entries: 0,
             reads_destination: false,
+            asks_verified: false,
         };
         let mut policy = loader.load(&raw, text);
         if loader.diagnostics.is_empty() {
@@ -1787,6 +1791,20 @@ impl Loader<'_> {
         let landing = self.landing(raw.landing.as_ref());
         let history = self.history(raw.history.as_ref());
 
+        // Pins and presence rules are only as strong as what may change
+        // them: the owners' sign-off on this file.
+        if (!passkeys.is_empty() || self.asks_verified) && owners.presence != Presence::UserVerified
+        {
+            let at = raw.owners.as_ref().map_or(0, |owners| owners.span().start);
+            let warning = self.diagnostic(
+                "owners",
+                "presence",
+                at,
+                "[owners] does not ask for presence user_verified, so anyone who can sign off as an owner, an agent running as one included, can change [passkeys] and the presence rules; add presence = \"user_verified\" to [owners]".to_owned(),
+            );
+            self.warnings.push(warning);
+        }
+
         Policy {
             sha256: crate::sha256_hex(text.as_bytes()),
             owners,
@@ -2041,7 +2059,7 @@ version = 1
 groups = ["maintainers"]
 identities = []
 count = 1
-presence = "none"
+presence = "user_verified"
 
 [groups]
 maintainers = ["alice", "idn_8f3a0c2d91e4b675"]
@@ -2210,6 +2228,13 @@ message = "every commit of the change has a signed, bound provenance record"
 
     #[test]
     fn user_verified_without_a_pin_that_could_meet_it_is_a_warning() {
+        // Only the pin warnings here; the owners' presence has its own test.
+        let warnings = |text: &str| -> Vec<String> {
+            warnings(text)
+                .into_iter()
+                .filter(|warning| !warning.contains("[owners] does not ask"))
+                .collect()
+        };
         let head = "version = 1\n[groups]\nleads = [\"bob\", \"idn_0000000000000002\"]\n";
         let owners =
             format!("{head}[owners]\nidentities = [\"alice\"]\npresence = \"user_verified\"\n");
@@ -2254,6 +2279,29 @@ message = "every commit of the change has a signed, bound provenance record"
         );
         // Pins nothing asks for are not a problem: CEL can read them.
         assert_eq!(warnings(&with(&pin("carol"))), Vec::<String>::new());
+    }
+
+    #[test]
+    fn pins_the_owners_need_no_touch_to_change_are_a_warning() {
+        let pin = format!("[passkeys]\nalice = [\"{FINGERPRINT}\"]\n");
+        let unguarded = [
+            "2:1: owners.presence: [owners] does not ask for presence user_verified, so anyone who can sign off as an owner, an agent running as one included, can change [passkeys] and the presence rules; add presence = \"user_verified\" to [owners]",
+        ];
+        assert_eq!(warnings(&with(&pin)), unguarded);
+        assert_eq!(
+            warnings(&with(
+                "[[signoff]]\nname = \"area\"\nidentities = [\"alice\"]\npresence = \"user_verified\"\n"
+            ))
+            .iter()
+            .filter(|warning| warning.contains("[owners] does not ask"))
+            .count(),
+            1
+        );
+        let guarded = format!(
+            "version = 1\n[owners]\nidentities = [\"alice\"]\npresence = \"user_verified\"\n{pin}"
+        );
+        assert_eq!(warnings(&guarded), Vec::<String>::new());
+        assert_eq!(warnings(&with("")), Vec::<String>::new());
     }
 
     #[test]

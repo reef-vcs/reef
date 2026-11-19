@@ -88,6 +88,44 @@ function useChange(connection: Connection, approval: Approval | null) {
   return change?.commit === commit ? change.change : undefined;
 }
 
+/** At most this many unlanded changes below are named on the page. */
+const BELOW = 20;
+
+/**
+ * The changes below the approval's that have not landed on `trunk()`: the
+ * tree the sign-off covers holds their work too. `undefined` while
+ * reading, `null` when the log could not be read.
+ */
+function useBelow(connection: Connection, approval: Approval | null) {
+  const repo = approval?.repoId ?? "";
+  const commit = approval?.commitId ?? "";
+  const [below, setBelow] = useState<{ commit: string; changes: Change[] | null } | null>(null);
+  useEffect(() => {
+    if (!commit) return;
+    let current = true;
+    client(connection, ChangeService)
+      .listChanges({
+        repo,
+        revset: `trunk()..${commit} ~ ${commit}`,
+        skipSnapshot: true,
+        pageSize: BELOW,
+      })
+      .then(
+        ({ entries }) => {
+          const changes = entries.flatMap((entry) => (entry.change ? [entry.change] : []));
+          if (current) setBelow({ commit, changes });
+        },
+        () => {
+          if (current) setBelow({ commit, changes: null });
+        },
+      );
+    return () => {
+      current = false;
+    };
+  }, [connection, repo, commit]);
+  return below?.commit === commit ? below.changes : undefined;
+}
+
 function msLeft(approval: Approval, now: number): number {
   return approval.expiresAt ? timestampMs(approval.expiresAt) - now : 0;
 }
@@ -112,15 +150,29 @@ export function timeLeft(ms: number): string {
   return rest === 0 ? `${String(minutes)} min` : `${String(minutes)} min ${String(rest)} s`;
 }
 
+/**
+ * Who asked, as far as the daemon can tell: the web listener or the socket,
+ * and the agent name and workspace a command declared, which it may make up.
+ */
 function askedBy(approval: Approval): string {
-  if (approval.requestedThrough === "web") return "this browser";
-  const agent = approval.requestedByAgent || "a command on this machine";
+  if (approval.requestedThrough === "web") return "a web UI session";
+  const agent = approval.requestedByAgent
+    ? `a command that says it is ${approval.requestedByAgent}`
+    : "a command on this machine";
   return approval.requestedWorkspace
-    ? `${agent} in workspace ${approval.requestedWorkspace}`
+    ? `${agent}, in workspace ${approval.requestedWorkspace}`
     : agent;
 }
 
-function Facts({ approval, change }: { approval: Approval; change: Change | null | undefined }) {
+function Facts({
+  approval,
+  change,
+  below,
+}: {
+  approval: Approval;
+  change: Change | null | undefined;
+  below: Change[] | null | undefined;
+}) {
   const subject = change?.description.split("\n")[0]?.trim() ?? "";
   return (
     <dl className="facts">
@@ -160,8 +212,48 @@ function Facts({ approval, change }: { approval: Approval; change: Change | null
           </dd>
         </>
       )}
+      <dt>Repository</dt>
+      <dd className="mono">{approval.repoId}</dd>
       <dt>Tree</dt>
-      <dd className="mono">{approval.treeId}</dd>
+      <dd>
+        <span className="mono">{approval.treeId}</span>
+        <br />
+        <span className="secondary">
+          The sign-off is about this whole tree, changes below this one that have not landed
+          included.
+        </span>
+      </dd>
+      {below === undefined && (
+        <>
+          <dt>Also covers</dt>
+          <dd className="secondary">Reading the changes below.</dd>
+        </>
+      )}
+      {below === null && (
+        <>
+          <dt>Also covers</dt>
+          <dd>
+            The changes below could not be read; the sign-off covers any that have not landed.
+          </dd>
+        </>
+      )}
+      {below && below.length > 0 && (
+        <>
+          <dt>Also covers</dt>
+          <dd>
+            {below.length === BELOW ? `${String(BELOW)} or more` : below.length} change
+            {below.length === 1 ? "" : "s"} below that have not landed:
+            <ul className="below">
+              {below.map((each) => (
+                <li key={each.commitId}>
+                  <span className="mono">{shortId(reverseHex(each.changeId))}</span>{" "}
+                  {each.description.split("\n")[0]?.trim() || "(no description)"}
+                </li>
+              ))}
+            </ul>
+          </dd>
+        </>
+      )}
       <dt>Asked by</dt>
       <dd>{askedBy(approval)}</dd>
     </dl>
@@ -202,6 +294,7 @@ export function Approve({
   const [load, setLoad] = useApproval(connection, id, onSessionInvalid);
   const approval = load.kind === "loaded" ? load.approval : null;
   const change = useChange(connection, approval);
+  const below = useBelow(connection, approval);
   const [action, setAction] = useState<Action>({ kind: "idle" });
   const pending = approval?.state === ApprovalState.PENDING;
   const now = useNow(pending);
@@ -247,7 +340,7 @@ export function Approve({
         One passkey touch approves exactly this sign-off, on this tree of this change, and nothing
         else.
       </p>
-      <Facts approval={shown} change={change} />
+      <Facts approval={shown} change={change} below={below} />
       {pending ? (
         <>
           <p role="timer">

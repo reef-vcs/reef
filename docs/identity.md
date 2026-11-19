@@ -175,7 +175,7 @@ A passkey counts for nothing in a repository until that repository's policy pins
 alice = ["3c9e0d5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f"]
 ```
 
-The Passkeys page's **Copy policy snippet** copies that line, and `reef identity passkey list` prints it. A change to the policy file needs `[owners]`' sign-off, so an agent cannot pin a passkey without the owners. [docs/policy.md](policy.md#pinned-passkeys) has the rules.
+On the Passkeys page, **Confirm a passkey to pin** asks your authenticator for a touch, checks it against the key Reef holds, and **Copy policy snippet** copies the line for the passkeys it confirmed, with each fingerprint computed from the key the touch verified. This holds only on the daemon's own page: open it yourself, with `reef ui` or `reef identity passkey add` from your own terminal. A page on another `localhost` port can look the same and show an agent's fingerprint, and with the default `[ui] listen` port 0 the port changes at every start, so the address bar gives no cue (S-255). `reef identity passkey list` prints the line with every live passkey. A change to the policy file needs `[owners]`' sign-off; with `presence = "user_verified"` in `[owners]`, that takes an owner's pinned passkey, so an agent cannot change the pins. [docs/policy.md](policy.md#pinned-passkeys) has the rules.
 
 ### Approving a sign-off
 
@@ -191,7 +191,7 @@ reef evidence add --kind signoff --result pass --actor human --verified -r @-
 
 `--verified` needs `--actor human` and takes any kind, result and target. The command builds the statement over the revision's tree and a fresh key, and asks the daemon for an approval. It then opens the approval page, `/approve/<id>`, in your browser through a new web UI session, as `reef ui` opens the app; `--print-url` prints the URL instead, for SSH. It waits up to `--timeout` (default 2 minutes) for you to approve or decline. When you approve, it signs the statement with the key the approval certified and adds the sign-off, whose presence is `user_verified`. A decline, the approval's expiry, an approval the daemon no longer holds (a restart drops pending ones) or the timeout ends the command with exit code 5 and the reason. It asks nothing on the terminal and runs no login: the approval happens in the browser.
 
-The approval page names, before its buttons, the identity you sign as, the kind, result and target, the change with its description and author, its tree, who asked (the CLI's agent and workspace, or this browser), and the time left. **Approve** asks for your passkey; **Decline** ends the approval. The page approves nothing when it loads. Your platform's passkey prompt shows only "localhost", so the page is where you read what you approve.
+The approval page names, before its buttons, the identity you sign as, the kind, result and target, the change with its description and author, the repository, its tree (the sign-off covers the whole tree, changes below that have not landed included), who asked (a command, with the agent name and workspace it declares, or a web UI session), and the time left. **Approve** asks for your passkey; **Decline** ends the approval. The page approves nothing when it loads. Your platform's passkey prompt shows only "localhost", so the page is where you read what you approve.
 
 Over the API, the CLI's steps are:
 
@@ -254,7 +254,7 @@ Every evidence read reports `identity` beside `signature`: the certified key (id
 
 A keyless key reports `issuer_kind: sigstore` and `sigstore` (the OIDC issuer and subject, the match, the log index, Fulcio's CI claims). A revocation made after the evidence was witnessed is still reported, beside `bound`. Evidence whose own signature does not verify reads `invalid` with no key: its key id is not believed. A key whose certificate does not verify reports only its id and the daemon's records of it, and never matches an identity filter. The same envelope added to a second repository after its key expired reads `expired` there: each repository's row has its own `added_at`.
 
-A `user_verified` key's presence is printed with its passkey's label, and whether the policy at the revision's destination pins it: `presence user_verified (passkey "MacBook Touch ID", pinned here)`, or `(not pinned by this repository's policy)`. Where no destination is known, the line names the passkey only. A read that finds the key on evidence other than the statement and change it approved, which only a database changed behind the daemon can hold, reports that object's presence as `none`.
+A `user_verified` key's presence is printed with its passkey's label. `reef evidence show` also says whether the policy at `trunk()` pins it: `presence user_verified (passkey "MacBook Touch ID", pinned here)`, or `(passkey "MacBook Touch ID", not pinned by this repository's policy)`. With no policy at `trunk()`, and in `reef identity session show`, the line names the passkey only. `EvaluatePolicy` reports the same per signer, and `reef policy eval` prints it. A read that finds the key on evidence other than the statement and change it approved, which only a database changed behind the daemon can hold, reports that object's presence as `none`.
 
 ## Revocation
 

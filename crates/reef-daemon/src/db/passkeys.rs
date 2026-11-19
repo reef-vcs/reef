@@ -149,7 +149,8 @@ impl Db {
     }
 
     /// Stores `row` unless its identity already holds `limit` live
-    /// passkeys, or a live one has its credential id or fingerprint.
+    /// passkeys, any passkey, removed or not, had its credential id, or a
+    /// live one has its fingerprint.
     pub fn insert_passkey(
         &self,
         row: &PasskeyRow,
@@ -164,10 +165,15 @@ impl Db {
             if usize::try_from(live).unwrap_or(usize::MAX) >= limit {
                 return Ok(PasskeyInserted::Full);
             }
+            // A credential id is never registered again, even after its
+            // passkey was removed: a registration that reuses a person's
+            // credential id with another key would otherwise pass for the
+            // person's authenticator wherever only the id is compared.
             let existing: Option<String> = tx
                 .query_row(
                     "SELECT id FROM passkeys
-                     WHERE removed_at IS NULL AND (credential_id = ?1 OR fingerprint = ?2)",
+                     WHERE credential_id = ?1 OR (removed_at IS NULL AND fingerprint = ?2)
+                     ORDER BY removed_at IS NULL DESC LIMIT 1",
                     params![row.credential_id, row.fingerprint],
                     |found| found.get(0),
                 )

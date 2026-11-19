@@ -1,7 +1,9 @@
 // Verified human presence in a real browser against a real daemon (R3.43):
 // a passkey added on the Passkeys page, pinned by a policy the test lands,
-// signs off a change that then lands; a second, unpinned passkey's sign-off
-// does not count; an authenticator that cannot verify the user is refused;
+// signs off a change that then lands, from the change detail panel and with
+// `reef evidence add --verified`; a second, unpinned passkey's sign-off
+// does not count, nor does an owner's sign-off without a touch on a change
+// to the pins; an authenticator that cannot verify the user is refused;
 // and a passkey is removed with a touch. Chromium only: the passkeys come
 // from CDP virtual authenticators, which only Chromium has.
 import type { CDPSession, Page } from "@playwright/test";
@@ -136,17 +138,26 @@ test("a person signs off with a pinned passkey, and only pinned passkeys count",
     await page.goto(`${url}passkeys`);
     const card = await addPasskey(page, identity, "Virtual Touch ID");
     expect(await first.credentials()).toBe(1);
+    await card.getByRole("button", { name: "Confirm a passkey to pin" }).click();
     const text = (await card.locator("pre").textContent()) ?? "";
     expect(text).toMatch(new RegExp(`^\\[passkeys\\]\\n${identity} = \\["[0-9a-f]{64}"\\]\\n$`));
     return text;
   });
 
+  // The owners' presence guards the pins: without it, any owner's
+  // sign-off, an agent's included, could change them.
+  const guarded = base(identity).replace(
+    `identities = ["${identity}"]\n`,
+    `identities = ["${identity}"]\npresence = "user_verified"\n`,
+  );
+  const policy = `${guarded}\n${snippet}\n[[signoff]]\nname = "verified"\nidentities = ["${identity}"]\npresence = "user_verified"\n`;
+
   await test.step("land a policy that pins it and needs a verified sign-off", async () => {
     const [ws] = reef.workspaces;
     if (!ws) throw new Error("setup made no workspace");
-    const policy = `${base(identity)}\n${snippet}\n[[signoff]]\nname = "verified"\nidentities = ["${identity}"]\npresence = "user_verified"\n`;
     const commit = await reef.edit(ws, { "reef-policy.toml": policy });
-    // A change to the policy needs the owners' sign-off, which the current policy asks no presence of.
+    // A change to the policy needs the owners' sign-off, which the policy
+    // before this one asks no presence of: the one change a person must check.
     await reef.reef([
       "evidence",
       "add",
@@ -171,8 +182,43 @@ test("a person signs off with a pinned passkey, and only pinned passkeys count",
     await expect(panel.getByRole("status")).toHaveText(
       "Signed off: user verified, passkey “Virtual Touch ID”.",
     );
-    await expect(panel.getByRole("listitem")).toContainText([/user verified/]);
+    await expect(panel.getByRole("listitem")).toContainText([
+      /user verified.*pinned by this repository's policy/,
+    ]);
     expect(await evidenceOn(reef, commit)).toContain("user_verified");
+    expect(await land(reef, commit)).toContain("landed");
+  });
+
+  await test.step("reef evidence add --verified, approved on the page it prints", async () => {
+    const ws = await reef.workspace("e2e cli sign-off");
+    const commit = await reef.edit(ws, { "cli.txt": "signed off from the CLI\n" });
+    const command = reef.started([
+      "evidence",
+      "add",
+      "--repo",
+      reef.repo,
+      "-r",
+      commit,
+      "--kind",
+      "signoff",
+      "--result",
+      "pass",
+      "--actor",
+      "human",
+      "--verified",
+      "--print-url",
+      "-o",
+      "json",
+    ]);
+    const approveUrl = (await command.line(/#session=/)).trim();
+    expect(new URL(approveUrl).pathname).toMatch(/^\/approve\/apr_[0-9a-f]{16}$/);
+    await command.line(/^Waiting for your approval in the browser: sign off /);
+    await page.goto(approveUrl);
+    await expect(page.getByText(identity, { exact: false }).first()).toBeVisible();
+    await page.getByRole("button", { name: "Approve" }).click();
+    const { code, json } = await command.exit;
+    expect(code, JSON.stringify(json)).toBe(0);
+    expect(JSON.stringify(json)).toContain("user_verified");
     expect(await land(reef, commit)).toContain("landed");
   });
 
@@ -196,11 +242,43 @@ test("a person signs off with a pinned passkey, and only pinned passkeys count",
     await expect(panel.getByRole("status")).toHaveText(
       "Signed off: user verified, passkey “Second key”.",
     );
+    await expect(panel.getByRole("listitem")).toContainText([
+      /not pinned by this repository's policy/,
+    ]);
     expect(await evidenceOn(reef, commit)).toContain("user_verified");
     await expect(
       reef.reef(["policy", "eval", "--repo", reef.repo, "-r", commit, "--require-allow"]),
       "a sign-off from a passkey the policy does not pin meets no presence",
     ).rejects.toThrow(/exit 5/);
+  });
+
+  await test.step("changing the pins needs an owner's touch", async () => {
+    const ws = await reef.workspace("e2e repin");
+    const commit = await reef.edit(ws, {
+      "reef-policy.toml": `${policy}\n# an agent's edit to the pins\n`,
+    });
+    await reef.reef([
+      "evidence",
+      "add",
+      "--repo",
+      reef.repo,
+      "-r",
+      commit,
+      "--kind",
+      "signoff",
+      "--result",
+      "pass",
+      "--actor",
+      "human",
+    ]);
+    // The owners' sign-off is there, but without a pinned passkey's touch.
+    const evaluated = (await reef.reef(["policy", "eval", "--repo", reef.repo, "-r", commit])) as {
+      rules: { name: string; status: string }[];
+    };
+    expect(
+      evaluated.rules.find((rule) => rule.name === "builtin:owners")?.status,
+      "an owner's sign-off without a passkey's touch does not change the policy",
+    ).toBe("unsatisfied");
   });
 
   await test.step("an authenticator that does not verify the user approves nothing", async () => {

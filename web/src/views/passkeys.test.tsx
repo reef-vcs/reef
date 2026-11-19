@@ -8,7 +8,13 @@ import { removalChallenge } from "../sign/key";
 import { settle } from "../test/fakes";
 import { IdentityDaemon, passkey, person } from "../test/identity-daemon";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "../test/testing-library";
-import { installAuthenticator, removeAuthenticator } from "../test/webauthn";
+import { hex, sha256 } from "../sign/bytes";
+import {
+  CREDENTIAL_ID,
+  installAuthenticator,
+  removeAuthenticator,
+  type FakeKey,
+} from "../test/webauthn";
 import { Passkeys, policySnippet } from "./Passkeys";
 
 afterEach(() => {
@@ -35,14 +41,57 @@ async function add(name: string, label: string) {
   });
 }
 
+/** An Ed25519 passkey: its row's key, and the authenticator that holds it. */
+async function heldKey(): Promise<{
+  row: { publicKey: Uint8Array; algorithm: number };
+  key: FakeKey;
+}> {
+  const pair = await crypto.subtle.generateKey("Ed25519", false, ["sign", "verify"]);
+  return {
+    row: {
+      publicKey: new Uint8Array(await crypto.subtle.exportKey("spki", pair.publicKey)),
+      algorithm: -8,
+    },
+    key: {
+      credentialId: CREDENTIAL_ID,
+      sign: async (data) =>
+        new Uint8Array(await crypto.subtle.sign("Ed25519", pair.privateKey, new Uint8Array(data))),
+    },
+  };
+}
+
 describe("the Passkeys page", () => {
-  it("lists each person identity's passkeys with the snippet that pins them", async () => {
+  it("pins no passkey whose key is not the one the touching authenticator holds", async () => {
     const daemon = new IdentityDaemon();
+    const person = await heldKey();
+    const agent = await heldKey();
+    // An agent's registration that reuses the person's credential id with its own key.
+    daemon.passkeys = [{ ...passkey(daemon.arsood, "MacBook Touch ID", 1), ...agent.row }];
+    const authenticator = installAuthenticator();
+    authenticator.key = person.key;
+    await setup(daemon);
+    await act(() => {
+      within(card("arsood")).getByRole("button", { name: "Confirm a passkey to pin" }).click();
+    });
+    await waitFor(() => {
+      expect(within(card("arsood")).getByRole("alert").textContent).toContain("Do not pin it");
+    });
+    expect(card("arsood").querySelector("pre")).toBeNull();
+  });
+
+  it("lists each person identity's passkeys, and pins only one a touch confirms", async () => {
+    const daemon = new IdentityDaemon();
+    const held = await heldKey();
     daemon.passkeys = [
-      passkey(daemon.arsood, "MacBook Touch ID", 1),
-      { ...passkey(daemon.arsood, "YubiKey", 2), lastUsedAt: timestampFromMs(1_795_100_000_000) },
+      { ...passkey(daemon.arsood, "MacBook Touch ID", 1), ...held.row },
+      {
+        ...passkey(daemon.arsood, "YubiKey", 2),
+        credentialId: new Uint8Array([0x99]),
+        lastUsedAt: timestampFromMs(1_795_100_000_000),
+      },
     ];
-    installAuthenticator();
+    const authenticator = installAuthenticator();
+    authenticator.key = held.key;
     await setup(daemon);
     expect(screen.queryByRole("region", { name: /^ci-bot/ })).toBeNull();
     const rows = within(card("arsood")).getAllByRole("row").slice(1);
@@ -52,7 +101,18 @@ describe("the Passkeys page", () => {
     ]);
     expect(within(rows[0]!).getByText("1".repeat(64))).toBeTruthy();
     expect(within(rows[0]!).getByText("never")).toBeTruthy();
-    const snippet = `[passkeys]\narsood = ["${"1".repeat(64)}", "${"2".repeat(64)}"]\n`;
+    expect(card("arsood").querySelector("pre"), "no snippet before a touch").toBeNull();
+    await act(() => {
+      within(card("arsood")).getByRole("button", { name: "Confirm a passkey to pin" }).click();
+    });
+    await waitFor(() => {
+      expect(card("arsood").querySelector("pre")).not.toBeNull();
+    });
+    expect(authenticator.gets).toHaveLength(1);
+    // The fake authenticator holds the first passkey only, pinned by the
+    // fingerprint of the key its touch verified with.
+    const fingerprint = hex(await sha256(held.row.publicKey));
+    const snippet = `[passkeys]\narsood = ["${fingerprint}"]\n`;
     expect(card("arsood").querySelector("pre")?.textContent).toBe(snippet);
 
     const writeText = vi.fn(() => Promise.resolve());
