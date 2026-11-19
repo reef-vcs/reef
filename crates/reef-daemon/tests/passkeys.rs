@@ -23,12 +23,12 @@ use reef_api::v1::evidence_service_client::EvidenceServiceClient;
 use reef_api::v1::identity_service_client::IdentityServiceClient;
 use reef_api::v1::{
     self, AddEvidenceRequest, ApprovalState, CreateIdentityRequest, CreateWebSessionResponse,
-    EditFilesRequest, FileEdit, GetApprovalRequest, GetChangeRequest, IdentityKind as Kind,
-    LandChangeRequest, LandingOutcome, LandingReason, LifecycleState, ListPasskeysRequest,
-    PasskeyAssertion, RegisterPasskeyRequest, RemoteScope, RemovePasskeyRequest,
-    RequestApprovalRequest, ResetPasskeysRequest, ResolveApprovalRequest, SessionPresence,
-    StartPasskeyRegistrationRequest, TransitionChangeRequest, edit_files_request, file_edit,
-    resolve_approval_request,
+    EditFilesRequest, EvaluatePolicyRequest, FileEdit, GetApprovalRequest, GetChangeRequest,
+    IdentityKind as Kind, LandChangeRequest, LandingOutcome, LandingReason, LifecycleState,
+    ListPasskeysRequest, PasskeyAssertion, RegisterPasskeyRequest, RemoteScope,
+    RemovePasskeyRequest, RequestApprovalRequest, ResetPasskeysRequest, ResolveApprovalRequest,
+    SessionPresence, StartPasskeyRegistrationRequest, TransitionChangeRequest, edit_files_request,
+    file_edit, resolve_approval_request,
 };
 use reef_daemon::client::remote::{RemoteTarget, RemoteUrl, Token};
 use reef_daemon::client::{Client, ClientError};
@@ -1240,9 +1240,34 @@ async fn propose_and_land(client: &Client, repo: &str, change: &v1::Change) -> v
         .unwrap()
 }
 
+/// What `EvaluatePolicy` reports of `change`'s `user_verified` signers:
+/// identity, passkey and whether `main`'s policy pins it.
+async fn verified_signers(
+    client: &Client,
+    repo: &str,
+    change: &v1::Change,
+) -> Vec<(String, String, bool)> {
+    client
+        .evaluate_policy(EvaluatePolicyRequest {
+            repo: repo.to_owned(),
+            revision: change.commit_id.clone(),
+            skip_snapshot: true,
+            ..EvaluatePolicyRequest::default()
+        })
+        .await
+        .unwrap()
+        .evaluation
+        .unwrap()
+        .verified
+        .into_iter()
+        .map(|signer| (signer.identity, signer.passkey, signer.pinned))
+        .collect()
+}
+
 // 8. Policy end to end: a `[[signoff]]` that needs `user_verified` lands a
 // change signed off with a pinned passkey, and blocks one signed off with
-// an unpinned passkey of the same identity.
+// an unpinned passkey of the same identity; `EvaluatePolicy` reports each
+// signer's passkey and whether the policy pins it.
 #[tokio::test(flavor = "multi_thread")]
 async fn landing_counts_only_pinned_passkeys() {
     let (daemon, repo) = fixture().await;
@@ -1252,7 +1277,7 @@ async fn landing_counts_only_pinned_passkeys() {
     let mut pinned = Authenticator::new(Algorithm::EdDsa);
     let pinned_key = register(&page, &mut pinned, "alice", None).await.unwrap();
     let mut unpinned = Authenticator::new(Algorithm::Es256);
-    register(&page, &mut unpinned, "alice", Some(&mut pinned))
+    let unpinned_key = register(&page, &mut unpinned, "alice", Some(&mut pinned))
         .await
         .unwrap();
     let main = commit_on(
@@ -1279,6 +1304,10 @@ async fn landing_counts_only_pinned_passkeys() {
         ))
         .await
         .unwrap();
+    assert_eq!(
+        verified_signers(client, &repo.id, &change).await,
+        [("alice".to_owned(), pinned_key.fingerprint.clone(), true)]
+    );
     let landed = propose_and_land(client, &repo.id, &change).await;
     assert_eq!(landed.outcome(), LandingOutcome::Landed, "{landed:#?}");
 
@@ -1294,6 +1323,10 @@ async fn landing_counts_only_pinned_passkeys() {
         ))
         .await
         .unwrap();
+    assert_eq!(
+        verified_signers(client, &repo.id, &next).await,
+        [("alice".to_owned(), unpinned_key.fingerprint.clone(), false)]
+    );
     let blocked = propose_and_land(client, &repo.id, &next).await;
     assert_eq!(blocked.outcome(), LandingOutcome::Blocked, "{blocked:#?}");
     assert_eq!(blocked.reason(), LandingReason::Policy);

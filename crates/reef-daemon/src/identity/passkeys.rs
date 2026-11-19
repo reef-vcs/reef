@@ -77,6 +77,69 @@ impl Passkeys {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// A new registration challenge for `identity_id` from `web_session`,
+    /// accepted until [`CHALLENGE_LIFETIME`] after `now`. Expired ones are
+    /// dropped, and the oldest when [`MAX_CHALLENGES`] are held.
+    fn start(&self, identity_id: &str, web_session: &str, now: Instant) -> [u8; 32] {
+        let mut challenge = [0_u8; 32];
+        rand::rng().fill(&mut challenge);
+        let mut challenges = self.challenges();
+        challenges.retain(|_, started| started.expires > now);
+        while challenges.len() >= MAX_CHALLENGES {
+            let Some(oldest) = challenges
+                .iter()
+                .min_by_key(|(_, started)| started.expires)
+                .map(|(challenge, _)| *challenge)
+            else {
+                break;
+            };
+            challenges.remove(&oldest);
+        }
+        challenges.insert(
+            challenge,
+            Started {
+                identity_id: identity_id.to_owned(),
+                web_session: web_session.to_owned(),
+                expires: now + CHALLENGE_LIFETIME,
+            },
+        );
+        challenge
+    }
+
+    /// The registration challenge `challenge`, taken at `now`: it must be
+    /// `web_session`'s and unexpired. Another session's is left in place.
+    /// The challenge and its identity's id.
+    fn take(
+        &self,
+        challenge: &[u8],
+        web_session: &str,
+        now: Instant,
+    ) -> Result<([u8; 32], String), IdentityError> {
+        let stale = |message: &str| IdentityError::PasskeyInvalid {
+            check: "challenge",
+            message: message.to_owned(),
+        };
+        let challenge: [u8; 32] = challenge
+            .try_into()
+            .map_err(|_| stale("a registration challenge is 32 bytes"))?;
+        let mut challenges = self.challenges();
+        let Entry::Occupied(entry) = challenges.entry(challenge) else {
+            return Err(stale(
+                "no registration was started with this challenge, or it was used already",
+            ));
+        };
+        if entry.get().web_session != web_session {
+            return Err(stale(
+                "this registration was started by another web UI session",
+            ));
+        }
+        let started = entry.remove();
+        if started.expires <= now {
+            return Err(stale("the registration challenge expired"));
+        }
+        Ok((challenge, started.identity_id))
+    }
+
     fn change(&self) -> MutexGuard<'_, ()> {
         self.changes.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -204,29 +267,9 @@ impl Identities {
                 limit: MAX_PASSKEYS,
             });
         }
-        let mut challenge = [0_u8; 32];
-        rand::rng().fill(&mut challenge);
-        let now = Instant::now();
-        let mut challenges = self.passkeys.challenges();
-        challenges.retain(|_, started| started.expires > now);
-        while challenges.len() >= MAX_CHALLENGES {
-            let Some(oldest) = challenges
-                .iter()
-                .min_by_key(|(_, started)| started.expires)
-                .map(|(challenge, _)| *challenge)
-            else {
-                break;
-            };
-            challenges.remove(&oldest);
-        }
-        challenges.insert(
-            challenge,
-            Started {
-                identity_id: identity.id.clone(),
-                web_session: web_session.to_owned(),
-                expires: now + CHALLENGE_LIFETIME,
-            },
-        );
+        let challenge = self
+            .passkeys
+            .start(&identity.id, web_session, Instant::now());
         Ok(Registration {
             challenge,
             expires_at: Timestamp(
@@ -237,38 +280,6 @@ impl Identities {
             identity,
             live,
         })
-    }
-
-    /// The registration challenge `challenge`, taken: it must be this web
-    /// UI session's and unexpired. Another session's is left in place.
-    fn take_challenge(
-        &self,
-        challenge: &[u8],
-        web_session: &str,
-    ) -> Result<([u8; 32], String), IdentityError> {
-        let stale = |message: &str| IdentityError::PasskeyInvalid {
-            check: "challenge",
-            message: message.to_owned(),
-        };
-        let challenge: [u8; 32] = challenge
-            .try_into()
-            .map_err(|_| stale("a registration challenge is 32 bytes"))?;
-        let mut challenges = self.passkeys.challenges();
-        let Entry::Occupied(entry) = challenges.entry(challenge) else {
-            return Err(stale(
-                "no registration was started with this challenge, or it was used already",
-            ));
-        };
-        if entry.get().web_session != web_session {
-            return Err(stale(
-                "this registration was started by another web UI session",
-            ));
-        }
-        let started = entry.remove();
-        if started.expires <= Instant::now() {
-            return Err(stale("the registration challenge expired"));
-        }
-        Ok((challenge, started.identity_id))
     }
 
     /// `RegisterPasskey` through `channel`, whose page is at `origin`.
@@ -285,7 +296,9 @@ impl Identities {
                 message,
             });
         }
-        let (challenge, identity_id) = self.take_challenge(&request.challenge, web_session)?;
+        let (challenge, identity_id) =
+            self.passkeys
+                .take(&request.challenge, web_session, Instant::now())?;
         let registered = webauthn::check_registration(
             RP_ID,
             &challenge,
@@ -490,5 +503,35 @@ impl Identities {
                 return Ok(id);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_registration_challenge_expires() {
+        let passkeys = Passkeys::default();
+        let now = Instant::now();
+        let challenge = passkeys.start("idn_1", "web_a", now);
+        let late = now + CHALLENGE_LIFETIME;
+        assert!(matches!(
+            passkeys.take(&challenge, "web_a", late),
+            Err(IdentityError::PasskeyInvalid { check: "challenge", message })
+                if message.contains("expired")
+        ));
+        assert!(
+            passkeys.take(&challenge, "web_a", now).is_err(),
+            "an expired challenge is gone once tried"
+        );
+        let challenge = passkeys.start("idn_1", "web_a", now);
+        assert!(passkeys.take(&challenge, "web_b", now).is_err());
+        assert_eq!(
+            passkeys
+                .take(&challenge, "web_a", now + CHALLENGE_LIFETIME / 2)
+                .unwrap(),
+            (challenge, "idn_1".to_owned())
+        );
     }
 }

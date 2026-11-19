@@ -5291,9 +5291,20 @@ pub struct SessionKey {
     pub agent: Option<String>,
     /// Its session; successive keys of one session share it.
     pub session_id: String,
-    /// How a human's presence was established: `none` (not verified).
+    /// How a human's presence was established: `none` (not verified), or
+    /// `user_verified` (a passkey approved the one sign-off it signs,
+    /// R3.43).
     #[schemars(schema_with = "session_presence_name_schema_or_null")]
     pub presence: Option<String>,
+    /// For `user_verified`, the passkey whose assertion its certificate
+    /// carries; `null` otherwise.
+    pub passkey: Option<PasskeyRef>,
+    /// For `user_verified`, the one sign-off it may sign; `null` otherwise.
+    pub approves: Option<Approves>,
+    /// For `user_verified`, the approval it was issued through.
+    pub approval_id: Option<String>,
+    /// The web UI session it was issued through, 16 hex digits.
+    pub web_session: Option<String>,
     /// Where its private half lives: `client` or `daemon`.
     #[schemars(schema_with = "key_custody_name_schema_or_null")]
     pub custody: Option<String>,
@@ -5331,6 +5342,13 @@ impl From<&v1::SessionKey> for SessionKey {
             agent: text(&key.agent),
             session_id: key.session_id.clone(),
             presence: name(session_presence_name(key.presence)),
+            passkey: key.passkey.as_ref().map(PasskeyRef::from),
+            approves: key.approves.as_ref().map(|approves| Approves {
+                statement_sha256: approves.statement_sha256.clone(),
+                change_id: approves.change_id.clone(),
+            }),
+            approval_id: text(&key.approval_id),
+            web_session: web_caller(key.web_session.as_ref()),
             custody: name(key_custody_name(key.custody)),
             issuer_kind: name(issuer_kind_name(key.issuer_kind)),
             authority_key_id: key.authority_key_id.clone(),
@@ -5343,6 +5361,105 @@ impl From<&v1::SessionKey> for SessionKey {
             sigstore: key.sigstore.as_ref().map(SigstoreCertificate::from),
         }
     }
+}
+
+/// A web UI session's id, if any (R3.43).
+fn web_caller(caller: Option<&v1::WebCaller>) -> Option<String> {
+    caller.and_then(|caller| text(&caller.session))
+}
+
+/// The passkey whose assertion a `user_verified` certificate carries
+/// (R3.43).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct PasskeyRef {
+    /// `pk_` and 16 hex digits; empty when the daemon has no record of it.
+    pub id: String,
+    /// The label the person gave it.
+    pub label: String,
+    /// SHA-256 of its public key, hex: what a policy's `[passkeys]` pins.
+    pub fingerprint: String,
+}
+
+impl From<&v1::PasskeyRef> for PasskeyRef {
+    fn from(passkey: &v1::PasskeyRef) -> Self {
+        Self {
+            id: passkey.id.clone(),
+            label: passkey.label.clone(),
+            fingerprint: passkey.fingerprint.clone(),
+        }
+    }
+}
+
+/// The one sign-off a `user_verified` key may sign (R3.43).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct Approves {
+    /// SHA-256 of the statement it signs, hex.
+    pub statement_sha256: String,
+    /// The change the evidence is added for, 32 hex digits.
+    pub change_id: String,
+}
+
+/// A passkey registered to a person identity (R3.43).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct Passkey {
+    /// `pk_` and 16 hex digits.
+    pub id: String,
+    /// The identity's id.
+    pub identity_id: String,
+    /// The identity's name.
+    pub identity: String,
+    /// The label the person gave it.
+    pub label: String,
+    /// SHA-256 of its public key, hex: what a policy's `[passkeys]` pins.
+    pub fingerprint: String,
+    /// Its COSE algorithm: -7 (ES256), -8 (`EdDSA`) or -257 (RS256).
+    pub algorithm: i32,
+    /// The `WebAuthn` RP ID.
+    pub rp_id: String,
+    /// The last sign count an assertion reported.
+    pub sign_count: u32,
+    /// When it was added.
+    pub created_at: Option<String>,
+    /// The web UI session it was added through.
+    pub created_web_session: Option<String>,
+    /// When an accepted assertion last used it.
+    pub last_used_at: Option<String>,
+    /// When it was removed; `null` while live.
+    pub removed_at: Option<String>,
+    /// Why: `removed` or `reset`, with the reason given.
+    pub removed_reason: Option<String>,
+    /// The web UI session that removed it; `null` for a reset.
+    pub removed_web_session: Option<String>,
+}
+
+impl From<&v1::Passkey> for Passkey {
+    fn from(passkey: &v1::Passkey) -> Self {
+        Self {
+            id: passkey.id.clone(),
+            identity_id: passkey.identity_id.clone(),
+            identity: passkey.identity.clone(),
+            label: passkey.label.clone(),
+            fingerprint: passkey.fingerprint.clone(),
+            algorithm: passkey.algorithm,
+            rp_id: passkey.rp_id.clone(),
+            sign_count: passkey.sign_count,
+            created_at: time(passkey.created_at.as_ref()),
+            created_web_session: web_caller(passkey.created_web_session.as_ref()),
+            last_used_at: time(passkey.last_used_at.as_ref()),
+            removed_at: time(passkey.removed_at.as_ref()),
+            removed_reason: text(&passkey.removed_reason),
+            removed_web_session: web_caller(passkey.removed_web_session.as_ref()),
+        }
+    }
+}
+
+/// What `reef identity passkey reset` removed and revoked (R3.43).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct PasskeysReset {
+    /// The passkeys it removed.
+    pub removed: Vec<Passkey>,
+    /// The unexpired session keys they certified, now revoked.
+    pub revoked_key_ids: Vec<String>,
 }
 
 /// A session key `reef identity session issue` made (R3.03): its record,

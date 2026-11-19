@@ -1867,8 +1867,9 @@ mod tests {
         assert_eq!(edit_path(&scope, "src/a.rs/".to_owned()), "src/a.rs/");
     }
 
-    /// R3.01 test 18, R3.02 test 18, R3.03 test 16 and R3.42: evidence,
-    /// artifacts and identities have no tools, and each method says why.
+    /// R3.01 test 18, R3.02 test 18, R3.03 test 16, R3.42 and R3.43:
+    /// evidence, artifacts, identities and passkeys have no tools, and each
+    /// method says why.
     #[test]
     fn evidence_is_not_a_tool() {
         let evidence: Vec<&str> = reef_api::methods()
@@ -1878,7 +1879,7 @@ mod tests {
                     || path.starts_with("/reef.api.v1.IdentityService/")
             })
             .collect();
-        assert_eq!(evidence.len(), 20);
+        assert_eq!(evidence.len(), 28);
         for path in evidence {
             assert!(NOT_TOOLS.iter().any(|(rpc, _)| *rpc == path), "{path}");
             assert!(!TOOLS.iter().any(|tool| tool.rpc == path), "{path}");

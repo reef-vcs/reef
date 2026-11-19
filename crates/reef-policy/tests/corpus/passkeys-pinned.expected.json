@@ -119,5 +119,19 @@
     }
   ],
   "sha256": "fcf3bc58e3d24a5bb35486a3cc5435e5d5ba84238eb1e8a73f61ec3795af6dbc",
+  "verified": [
+    {
+      "evidence_id": "ev-0",
+      "identity": "alice",
+      "passkey": "3c9e0d5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f",
+      "pinned": true
+    },
+    {
+      "evidence_id": "ev-1",
+      "identity": "bob",
+      "passkey": "b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "pinned": true
+    }
+  ],
   "version": 1
 }

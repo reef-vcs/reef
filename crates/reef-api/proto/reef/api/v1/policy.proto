@@ -271,6 +271,22 @@ message PolicyEvaluation {
   uint64 cost = 10;
   // The input as JSON (`reef schema policy input`), with `include_input`.
   string input_json = 11;
+  // Every evidence object whose key's certificate says `user_verified`, and
+  // whether this policy pins its passkey (R3.43).
+  repeated PolicyVerifiedSigner verified = 12;
+}
+
+// An evidence object signed by a `user_verified` key (R3.43).
+message PolicyVerifiedSigner {
+  // The evidence id.
+  string evidence_id = 1;
+  // The signer's identity, by name (or id when the name is not known).
+  string identity = 2;
+  // The passkey's fingerprint: the SHA-256 of its public key, hex.
+  string passkey = 3;
+  // `[passkeys]` pins the passkey for the identity, so the key counts as
+  // `user_verified`; otherwise it counts as `none`.
+  bool pinned = 4;
 }
 
 // The change to judge and the policy to judge it by.

@@ -949,6 +949,16 @@ pub(crate) fn evaluation_message(evaluation: &Evaluation) -> v1::PolicyEvaluatio
             resolutions: count(evaluation.input.resolutions),
         }),
         cost: evaluation.cost,
+        verified: evaluation
+            .verified
+            .iter()
+            .map(|signer| v1::PolicyVerifiedSigner {
+                evidence_id: signer.evidence_id.clone(),
+                identity: signer.identity.clone(),
+                passkey: signer.passkey.clone(),
+                pinned: signer.pinned,
+            })
+            .collect(),
         ..v1::PolicyEvaluation::default()
     }
 }

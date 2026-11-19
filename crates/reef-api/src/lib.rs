@@ -188,8 +188,9 @@ pub const API_DIGESTS: &[&str] = &[
     // `ListPasskeys`, `StartPasskeyRegistration`, `RegisterPasskey`,
     // `RemovePasskey`, `ResetPasskeys`, `RequestApproval`, `GetApproval`,
     // `ResolveApproval`, `WebCaller`, `Evidence.web_session` and
-    // `CreateWebSessionRequest.path`. Revision 42 once R3.11's 41 lands.
-    "b1881a5d1a2fb35521ff8d21e1b46743082992852586e64b3957f0f751b3042a",
+    // `CreateWebSessionRequest.path`, `PolicyEvaluation.verified` and
+    // `PolicyVerifiedSigner`. Revision 42 once R3.11's 41 lands.
+    "200f34e496a87db1f66063aeca89dae82053dbd032ee29edb07c0b172e86e7ef",
 ];
 
 /// blake3 of the v1 descriptors without comments, as of [`API_REVISION`]:
@@ -668,6 +669,10 @@ pub mod error {
     /// any other key (R3.43). Metadata: `field` (`statement`, `change` or
     /// `presence`).
     pub const PRESENCE_STATEMENT_MISMATCH: &str = "PRESENCE_STATEMENT_MISMATCH";
+    /// `reef evidence add --verified` whose approval is still pending when
+    /// its wait ends (R3.43): a client's reason, never a daemon's.
+    /// Metadata: `id`.
+    pub const APPROVAL_PENDING: &str = "APPROVAL_PENDING";
     /// A second evidence object signed by a passkey-approved key, which
     /// signs one (R3.43). Metadata: `key_id`, `evidence_id` (the one it
     /// signed).

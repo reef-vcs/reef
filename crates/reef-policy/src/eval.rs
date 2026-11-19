@@ -112,6 +112,23 @@ pub struct Rejected {
     pub why: String,
 }
 
+/// An evidence object signed by a key whose certificate says
+/// `user_verified`, and whether this policy pins its passkey (R3.43).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+#[schemars(rename = "policy.VerifiedSigner")]
+pub struct VerifiedSigner {
+    /// The evidence id.
+    pub evidence_id: String,
+    /// The signer's identity, by name (or id when the name is not known).
+    pub identity: String,
+    /// The passkey's fingerprint.
+    pub passkey: String,
+    /// `[passkeys]` pins the passkey for the identity, so the key counts as
+    /// `user_verified`; otherwise it counts as `none`.
+    pub pinned: bool,
+}
+
 /// A sign-off a rule needs, and what it has.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
@@ -270,6 +287,10 @@ pub struct Evaluation {
     /// The evaluation's cost bound, summed over the expressions it ran.
     #[serde(default)]
     pub cost: u64,
+    /// Every evidence object whose key's certificate says `user_verified`,
+    /// and whether this policy pins its passkey.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub verified: Vec<VerifiedSigner>,
 }
 
 impl Evaluation {
@@ -283,6 +304,7 @@ impl Evaluation {
             rules: Vec::new(),
             input: InputSummary::of(input),
             cost: 0,
+            verified: Vec::new(),
         }
     }
 
@@ -296,6 +318,7 @@ impl Evaluation {
             rules: Vec::new(),
             input: InputSummary::of(input),
             cost: 0,
+            verified: Vec::new(),
         }
     }
 
@@ -496,6 +519,7 @@ impl Policy {
             ],
             input: InputSummary::of(input),
             cost: 0,
+            verified: Vec::new(),
         })
     }
 
@@ -640,7 +664,28 @@ impl Policy {
             rules,
             input: InputSummary::of(&evaluator.input),
             cost: evaluator.total,
+            verified: self.verified(input),
         }
+    }
+
+    /// The evidence objects of `input` signed by `user_verified` keys, before
+    /// evaluation reads their presence as the policy counts it.
+    fn verified(&self, input: &Input) -> Vec<VerifiedSigner> {
+        input
+            .evidence
+            .iter()
+            .filter(|e| Presence::of_key(&e.key.presence) == Some(Presence::UserVerified))
+            .map(|e| VerifiedSigner {
+                evidence_id: e.id.clone(),
+                identity: if e.key.identity.is_empty() {
+                    e.key.identity_id.clone()
+                } else {
+                    e.key.identity.clone()
+                },
+                passkey: e.key.passkey.clone(),
+                pinned: self.presence(&e.key) == Some(Presence::UserVerified),
+            })
+            .collect()
     }
 
     /// Sorts the input, marks `self` and attestor sets, keeps what the policy

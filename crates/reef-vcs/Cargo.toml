@@ -70,3 +70,8 @@ tokio.workspace = true
 tokio-stream.workspace = true    # tests/old_daemon.rs serves its fake 0.1 daemon on a Unix socket
 toml.workspace = true
 nix = { workspace = true, features = ["signal", "user"] }
+# tests/verified.rs: a passkey's approval through the web UI's gRPC-web (R3.43)
+reef-evidence = { workspace = true, features = ["testing"] }
+hyper-util = { workspace = true, features = ["client-legacy", "http1", "tokio"] }
+tonic-web.workspace = true
+tower.workspace = true

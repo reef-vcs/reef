@@ -63,7 +63,7 @@ impl TextRender for Shown<'_> {
 
 /// Why no browser can be opened here, if none can: over SSH, or on Linux
 /// with no display. `$BROWSER` overrides both.
-fn no_browser_here() -> Option<&'static str> {
+pub(crate) fn no_browser_here() -> Option<&'static str> {
     if std::env::var_os("BROWSER").is_some_and(|b| !b.is_empty()) {
         return None;
     }
@@ -101,7 +101,7 @@ fn opener(path: &Path) -> Command {
 
 /// Runs the opener on `path`; whether it exited zero within
 /// [`OPENER_WAIT`] (one still running then is taken as having opened).
-fn open(path: &Path) -> bool {
+pub(crate) fn open(path: &Path) -> bool {
     let Ok(mut child) = opener(path).spawn() else {
         return false;
     };

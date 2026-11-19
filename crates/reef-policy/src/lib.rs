@@ -41,6 +41,7 @@ pub mod schema;
 pub use conflict::ConflictDecision;
 pub use eval::{
     Decision, Evaluation, InputSummary, Need, Rejected, RuleKind, RuleResult, SignoffNeed, Status,
+    VerifiedSigner,
 };
 pub use format::{
     Checks, DEFAULT_ATTEMPTS, DEFAULT_TIER, Diagnostic, HistorySettings, LandingSettings, Message,
