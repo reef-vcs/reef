@@ -183,7 +183,7 @@ regex = "1"
 cel = { version = "=0.15.0", default-features = false, features = ["regex"] }
 # Sigstore keyless verification (R3.42, ADR 0066): offline, no default features (no aws-lc, no TUF,
 # no HTTP); `reef-evidence` supplies a ring `CryptoProvider`. Pinned: breaking minors are frequent.
-sigstore-verify = { version = "=0.15.1", default-features = false }
+sigstore-verify = { version = "=0.16.0", default-features = false }
 sigstore-trust-root = { version = "=0.15.1", default-features = false }
 sigstore-crypto = { version = "=0.15.1", default-features = false }
 sigstore-types = { version = "=0.15.1", default-features = false }
