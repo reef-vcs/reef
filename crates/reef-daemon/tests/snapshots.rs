@@ -457,6 +457,117 @@ async fn stale_diverges_when_dirty() {
     assert!(!Path::new(&b.path).join("from-a.txt").exists());
 }
 
+/// Another jj client on the registered root, with every operation stamped
+/// `stamp`: it loads the head now and describes workspace `ws`'s commit,
+/// and commits when the returned sender is used.
+async fn stale_describe(
+    repo: &SyntheticRepo,
+    ws: &Workspace,
+    stamp: &str,
+) -> (std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>) {
+    use jj_lib::config::{ConfigLayer, ConfigSource};
+    use jj_lib::default_backend_factories::{
+        default_backend_factories, default_working_copy_factories, default_workspace_loader_factory,
+    };
+    let (root, name) = (repo.root.clone(), format!("reef-{}", ws.id));
+    let layer = format!("debug.operation-timestamp = {stamp:?}");
+    let (go, wait) = std::sync::mpsc::channel::<()>();
+    let (loaded, is_loaded) = std::sync::mpsc::channel::<()>();
+    let client = std::thread::spawn(move || {
+        let mut config = test_settings().config().clone();
+        config.add_layer(ConfigLayer::parse(ConfigSource::User, &layer).unwrap());
+        let settings =
+            jj_lib::settings::UserSettings::from_config_and_home_dir(config, None).unwrap();
+        let workspace = default_workspace_loader_factory()
+            .create(&root)
+            .unwrap()
+            .load(
+                &settings,
+                &default_backend_factories(),
+                &default_working_copy_factories(),
+            )
+            .unwrap();
+        let head = pollster::block_on(workspace.repo_loader().load_at_head(None)).unwrap();
+        let name = jj_lib::ref_name::WorkspaceName::new(&name);
+        let id = head.view().get_wc_commit_id(name).unwrap();
+        let commit = pollster::block_on(head.store().get_commit_async(id)).unwrap();
+        let mut tx = head.start_transaction();
+        let described = tx.repo_mut().rewrite_commit(&commit);
+        pollster::block_on(described.set_description("another client's").write()).unwrap();
+        pollster::block_on(tx.repo_mut().rebase_descendants()).unwrap();
+        loaded.send(()).unwrap();
+        wait.recv().unwrap();
+        pollster::block_on(tx.commit("another client's describe")).unwrap();
+    });
+    tokio::task::spawn_blocking(move || is_loaded.recv().unwrap())
+        .await
+        .unwrap();
+    (go, client)
+}
+
+// Issue #344: another jj client loads the head, then the agent writes a
+// file and Reef snapshots it, then the client commits a describe of the
+// workspace's commit. Its clock is behind, so jj's merge of the two
+// operation heads keeps the client's commit, made before the file. The
+// workspace has no edits, but that commit did not come from its last
+// snapshot: it keeps its file and diverges (ADR 0018, ADR 0087).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_clean_workspace_keeps_its_file_over_an_older_rewrite() {
+    let (daemon, repo) = fixture().await;
+    let ws = create(&daemon, &repo, None).await;
+    let _hold = daemon.handle.state().manager.scheduler().pause(id_of(&ws));
+    write(&ws, "one.txt", "one\n");
+    daemon
+        .client
+        .snapshot_workspace(&repo.id, &ws.id, "")
+        .await
+        .unwrap();
+    let (go, client) = stale_describe(&repo, &ws, "2001-01-01T00:00:00+00:00").await;
+    write(&ws, "two.txt", "two\n");
+    let snapshot = daemon
+        .client
+        .snapshot_workspace(&repo.id, &ws.id, "")
+        .await
+        .unwrap();
+    assert!(snapshot.changed);
+    tokio::task::spawn_blocking(move || {
+        go.send(()).unwrap();
+        client.join().unwrap();
+    })
+    .await
+    .unwrap();
+
+    daemon
+        .client
+        .snapshot_workspace(&repo.id, &ws.id, "")
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(Path::new(&ws.path).join("two.txt"))
+            .ok()
+            .as_deref(),
+        Some("two\n"),
+        "the file stays on disk"
+    );
+    let row = inspect(&daemon, &repo, &ws).await;
+    assert!(row.divergent, "the change says it diverged");
+    assert_eq!(row.attention(), Attention::Divergent);
+    assert_eq!(row.change_id, ws.change_id);
+    assert!(
+        tree_has(&repo.root, &row.commit_id, "two.txt").await,
+        "and its commit has the file"
+    );
+    let error = open(&repo.root)
+        .await
+        .resolve_revision(&ws.change_id)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, RevisionError::Ambiguous { .. }),
+        "the client's commit stays visible beside it: {error:?}"
+    );
+}
+
 // 8. The daemon sees the outside operation when it refreshes its head
 // before the scan, so the scan finds the working copy fresh; the
 // `RepoBehind` answer itself (an outside write between refresh and scan)

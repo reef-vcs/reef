@@ -959,9 +959,13 @@ impl Repo {
     /// - fresh: plan a rewrite of the view's working-copy commit;
     /// - the working copy is newer than the loaded repository, or a sibling
     ///   of it: [`SnapshotError::RepoBehind`]; reload at head and retry;
-    /// - stale (another operation rewrote the working-copy commit) with no
-    ///   edits since the last update, or with files that already match the
-    ///   rewritten commit: check it out on disk
+    /// - stale (another operation rewrote the working-copy commit) with
+    ///   files that already match the rewritten commit, or with no edits
+    ///   since the last update and a view's commit that came from the
+    ///   commit it last snapshotted (`expected_commit`, or the one at the
+    ///   working copy's operation), read from the operation log (#344, ADR
+    ///   0087):
+    ///   check it out on disk
     ///   ([`PendingSnapshot::adopted`]); nothing to commit;
     /// - stale with edits, and Reef moved the working-copy commit from
     ///   `expected_commit` to the view's ([`moved_by_reef`]): plan a rewrite of
@@ -970,9 +974,9 @@ impl Repo {
     ///   when the move includes that commit ([`SnapshotPlan::carried`]),
     ///   or, when the merge is the view's tree, check it out as above (ADR
     ///   0039, ADR 0084);
-    /// - stale with edits otherwise: plan a rewrite of `expected_commit`
-    ///   instead, which makes the change divergent
-    ///   ([`SnapshotPlan::divergent`]);
+    /// - stale otherwise: plan a rewrite of `expected_commit` instead,
+    ///   which makes the change divergent ([`SnapshotPlan::divergent`]) and
+    ///   leaves the files on disk as they are;
     /// - no working-copy commit in the view (the workspace was forgotten):
     ///   plan a new commit on `expected_commit`'s parents
     ///   ([`SnapshotPlan::recover`]).
@@ -1072,23 +1076,28 @@ impl Repo {
                 let changed = new_tree.tree_ids_and_labels() != wc.tree().tree_ids_and_labels();
                 (CommitIdHex::of(wc.id()), changed, false, None)
             }
-            Some(wc)
-                if new_tree.tree_ids_and_labels() == old_tree.tree_ids_and_labels()
-                    || new_tree.tree_ids_and_labels() == wc.tree().tree_ids_and_labels() =>
-            {
-                // Nothing of the workspace's own would be lost: follow the
-                // rewrite. The second case is a working copy whose state was
-                // not saved after its own snapshot was committed (a failed
-                // finish, a crash): the files already are the commit's.
+            Some(wc) if new_tree.tree_ids_and_labels() == wc.tree().tree_ids_and_labels() => {
+                // A working copy whose state was not saved after its own
+                // snapshot was committed (a failed finish, a crash): the
+                // files already are the commit's.
                 updated_files = check_out(&mut locked, wc).await?;
                 adopted = true;
                 (CommitIdHex::of(wc.id()), false, false, None)
             }
             Some(wc) => {
                 let last = own_last().await?;
-                match carried_tree(&repo, &name, (wc, &last), unfinished, &new_tree).await? {
+                let merged = if new_tree.tree_ids_and_labels() == old_tree.tree_ids_and_labels() {
+                    // With no edits, nothing of the workspace's own is lost
+                    // by following a rewrite of the commit it last
+                    // snapshotted. A commit made from an older one would
+                    // take that snapshot's files off disk (#344): diverge.
+                    came_from(&repo, &name, last.id()).await?.then(|| wc.tree())
+                } else {
+                    carried_tree(&repo, &name, (wc, &last), unfinished, &new_tree).await?
+                };
+                match merged {
                     Some(merged) if merged.tree_ids() == wc.tree_ids() => {
-                        // The edits were already the commit's.
+                        // The edits, if any, were already the commit's.
                         updated_files = check_out(&mut locked, wc).await?;
                         adopted = true;
                         (CommitIdHex::of(wc.id()), false, false, None)
@@ -1366,25 +1375,69 @@ async fn followed(
         name,
         from,
         unfinished,
+        limit: Some(FOLLOW_LIMIT),
     };
-    let Some(moves) = walk.moves().await? else {
+    let Some(mut moves) = walk.moves().await? else {
         return Ok(None);
     };
+    // A merge's rebase is no move of Reef's: no carry leads through it.
+    moves.retain(|step| !step.merged);
     let mut trail = Trail::default();
     for step in &moves {
         if !walk.reefs_move(step, &mut trail).await? {
             return Ok(None);
         }
     }
+    let led = leads(&moves, from, repo.view().get_wc_commit_id(name));
+    Ok(led.then_some(Followed { base: trail.base }))
+}
+
+/// Whether `moves`, in [`Walk::moves`]' order, lead from `from` to `to`,
+/// each one starting at a commit that `from` or an earlier move reached.
+fn leads(moves: &[Move], from: &CommitId, to: Option<&CommitId>) -> bool {
     let mut reached = HashSet::from([from]);
     for step in moves.iter().rev() {
         if reached.contains(&step.was) {
             reached.insert(&step.now);
         }
     }
-    let to = repo.view().get_wc_commit_id(name);
-    let led = to.is_some_and(|to| reached.contains(to));
-    Ok(led.then_some(Followed { base: trail.base }))
+    to.is_some_and(|to| reached.contains(to))
+}
+
+/// Whether the commit `repo`'s view has for workspace `name` came from
+/// `from`, the commit the workspace last snapshotted (#344): the operations
+/// since `from` moved the workspace there from `from`, whoever wrote them
+/// ([`leads`]). A merge of operation heads that rebased the workspace's
+/// commit made the new one from its predecessor. Checking it out then loses
+/// nothing of the workspace's own: an operation that had `from` rewrote it,
+/// or moved the workspace off it on purpose.
+///
+/// False for a commit another jj client made from an older commit, having
+/// loaded the head before `from` was written, that the merge of its
+/// operation head with Reef's kept. jj keeps, for a workspace both heads
+/// moved, the commit of the head stamped earlier, so a client whose clock
+/// is behind wins. False too when the walk cannot tell: the store no
+/// longer has an operation it needs, or the workspace was forgotten and
+/// added again since `from` ([`Walk::moves`]).
+async fn came_from(
+    repo: &ReadonlyRepo,
+    name: &WorkspaceName,
+    from: &CommitId,
+) -> Result<bool, SnapshotError> {
+    // No limit: another client's move queues no follow, so a busy
+    // repository can write any number of operations before this snapshot,
+    // and `read_back` has read them all by the time a limit would count.
+    let walk = Walk {
+        repo,
+        name,
+        from,
+        unfinished: None,
+        limit: None,
+    };
+    let Some(moves) = walk.moves().await? else {
+        return Ok(false);
+    };
+    Ok(leads(&moves, from, repo.view().get_wc_commit_id(name)))
 }
 
 /// An operation that moved the workspace's commit.
@@ -1392,6 +1445,9 @@ struct Move {
     op: Operation,
     was: CommitId,
     now: CommitId,
+    /// A merge of operation heads, whose rebase made `now`, a commit none
+    /// of the heads had, from `was`.
+    merged: bool,
 }
 
 /// What the moves ordered before the one [`Walk::reefs_move`] judges
@@ -1412,6 +1468,8 @@ struct Walk<'a> {
     name: &'a WorkspaceName,
     from: &'a CommitId,
     unfinished: Option<&'a Unfinished>,
+    /// The most operations since `from` it judges; `None` for no bound.
+    limit: Option<usize>,
 }
 
 /// An operation the store no longer has reads as `None`.
@@ -1574,10 +1632,57 @@ impl Log {
     }
 }
 
+/// The moves of `op`, a merge of operation heads. Keeping one head's commit
+/// for the workspace is no move: that head's own operations moved it, and
+/// [`leads`] checks that they lead to the commit kept. A commit none of the
+/// heads had is one the merge's rebase made, from the predecessors jj
+/// recorded for it in `op`. A merge of three heads or more rebases after
+/// each head it merges in, so a predecessor can be a commit `op` wrote
+/// itself and rebased again: the move is from that commit's predecessors.
+async fn merged(
+    op: &Operation,
+    log: &Log,
+    commits: &mut Commits<'_>,
+) -> Result<Vec<Move>, SnapshotError> {
+    let Some(now) = commits.at(op).await? else {
+        return Ok(Vec::new());
+    };
+    for parent in op.parent_ids() {
+        let Some(parent) = log.ops.get(parent) else {
+            return Ok(Vec::new());
+        };
+        if commits.at(parent).await?.as_ref() == Some(&now) {
+            return Ok(Vec::new());
+        }
+    }
+    let mut found = op
+        .predecessors_for_commit(&now)
+        .unwrap_or_default()
+        .to_vec();
+    let mut seen = HashSet::new();
+    let mut moves = Vec::new();
+    while let Some(was) = found.pop() {
+        if !seen.insert(was.clone()) {
+            continue;
+        }
+        match op.predecessors_for_commit(&was) {
+            Some(earlier) => found.extend_from_slice(earlier),
+            None => moves.push(Move {
+                op: op.clone(),
+                was,
+                now: now.clone(),
+                merged: true,
+            }),
+        }
+    }
+    Ok(moves)
+}
+
 impl Walk<'_> {
     /// The operations since `from` that moved the workspace's commit, each
     /// before the moves in its history: those with one parent whose view
-    /// has another commit for it. An operation is since `from` when it is
+    /// has another commit for it, and the merges whose rebase made the
+    /// workspace's commit ([`merged`]). An operation is since `from` when it is
     /// in the head's history and in the history of no operation there
     /// whose view has `from` for the workspace. So an operation of another
     /// client that loaded the head before `from` was written, and committed
@@ -1585,7 +1690,7 @@ impl Walk<'_> {
     /// said when the operations were written does not change it. `None`
     /// when the workspace was added or forgotten since, and when the
     /// operations since `from` cannot be judged: there are more than
-    /// [`FOLLOW_LIMIT`] of them, the log could not be read back far enough
+    /// `limit` of them, the log could not be read back far enough
     /// to know them ([`Walk::read_back`]), or they could not all be put in
     /// order ([`Log::since_in_order`]).
     async fn moves(&self) -> Result<Option<Vec<Move>>, SnapshotError> {
@@ -1596,7 +1701,7 @@ impl Walk<'_> {
         let Some(log) = self.read_back(&mut commits).await? else {
             return Ok(None);
         };
-        if log.since().count() > FOLLOW_LIMIT {
+        if self.limit.is_some_and(|limit| log.since().count() > limit) {
             return Ok(None);
         }
         let Some(since) = log.since_in_order(self.repo.op_id()) else {
@@ -1604,9 +1709,8 @@ impl Walk<'_> {
         };
         let mut moves = Vec::new();
         for op in since {
-            // A merge of heads is no move: `followed` checks that the
-            // moves lead to the commit it kept.
             let [parent] = op.parent_ids() else {
+                moves.extend(merged(op, &log, &mut commits).await?);
                 continue;
             };
             let Some(parent) = log.ops.get(parent) else {
@@ -1618,6 +1722,7 @@ impl Walk<'_> {
                     op: op.clone(),
                     was,
                     now,
+                    merged: false,
                 }),
                 _ => return Ok(None),
             }
@@ -1691,7 +1796,7 @@ impl Walk<'_> {
     /// Whether `step` is a move of Reef's that kept the workspace's edits
     /// in their change.
     async fn reefs_move(&self, step: &Move, trail: &mut Trail) -> Result<bool, SnapshotError> {
-        let Move { op, was, now } = step;
+        let Move { op, was, now, .. } = step;
         let class = super::oplog::classify(&super::oplog::entry(op));
         let mover = class
             .workspace_id

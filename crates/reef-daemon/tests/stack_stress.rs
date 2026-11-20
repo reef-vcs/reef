@@ -33,7 +33,10 @@
 //! That move is not Reef's, so the workspace's change must come out
 //! divergent (ADR 0018), with every byte its agent wrote on disk and in
 //! its row's commit. A snapshot that carried the edit across the rewrite,
-//! through the merge of the three operation heads, fails the seed.
+//! through the merge of the three operation heads, fails the seed. The
+//! client loads the head while the other workspaces may still be
+//! following, so a clean one can meet a commit made before its last
+//! snapshot (#344): it must keep that snapshot's files too.
 //!
 //! The other clients of a seed share a clock ([`Clock`]), and in two
 //! seeds of three it is wrong: an hour ahead, or stopped when the seed
@@ -614,16 +617,14 @@ impl Scene<'_> {
     /// workspace. Every request finishes first: one by change id must not
     /// find the change divergent.
     ///
-    /// Every workspace has followed first too, so that no snapshot of
-    /// Reef's commits while the other client holds its rewrite. jj merges
-    /// the later of two operation heads into the earlier, by their stamps.
-    /// A client whose clock is behind then has its commit kept for a
-    /// workspace both moved, a commit made before that snapshot's files,
-    /// and a workspace with no edits checks it out (ADR 0018). main does
-    /// the same.
+    /// The workspaces may still be following, so a snapshot of Reef's can
+    /// commit while the other client holds its rewrite. jj merges the later
+    /// of two operation heads into the earlier, by their stamps, so a
+    /// client whose clock is behind has its commit kept for a workspace
+    /// both moved: one made before that snapshot's files. A workspace with
+    /// no edits must not check it out (#344, ADR 0087).
     async fn rewrite_outside(&mut self) -> Result<usize, String> {
         self.finish().await?;
-        follows(&self.daemon.client, self.repo, self.stack).await?;
         let at = self.rng.below(self.stack.members.len());
         writeln!(self.log, "  Rewrite({at})").unwrap();
         let name = format!("{}-outside", self.tag);
