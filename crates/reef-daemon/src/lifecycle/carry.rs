@@ -191,6 +191,18 @@ pub(crate) struct Carry {
     pub more: bool,
 }
 
+/// Who holds the repository's create lock, shared, and its lifecycle lock
+/// while a carry is recorded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Locks {
+    /// Nobody yet: the carry takes both.
+    Free,
+    /// The caller, since the operation that moved the proposals: no other
+    /// carry can record them first. The owners of the ones left conflicted
+    /// are told by the carry follower, outside the locks.
+    Held,
+}
+
 /// Carries every proposal of `repo` (of `only`, when given: full change
 /// ids, with no limit on the checks) whose change moved onto new commits of
 /// the same parent changes with its own diff unchanged, in one operation.
@@ -201,7 +213,7 @@ pub(crate) async fn carry(
     repo: RepoId,
     only: Option<&[String]>,
 ) -> Result<Carry, LifecycleError> {
-    carry_because(state, repo, only, None).await
+    carry_because(state, repo, only, None, Locks::Free).await
 }
 
 /// [`carry`], each carry naming `because`, the change below and what
@@ -212,6 +224,7 @@ pub(crate) async fn carry_because(
     repo: RepoId,
     only: Option<&[String]>,
     because: Option<(&str, DependencyEvent)>,
+    locks: Locks,
 ) -> Result<Carry, LifecycleError> {
     if only.is_some_and(<[String]>::is_empty) {
         return Ok(Carry::default());
@@ -277,7 +290,7 @@ pub(crate) async fn carry_because(
             row.change_id == conflicted.change.as_str()
                 && row.state == LifecycleState::Proposed.as_str()
         });
-        if let (true, Some(below)) = (proposed, conflicted.moved.first()) {
+        if let (true, Some(below), Locks::Free) = (proposed, conflicted.moved.first(), locks) {
             super::dependents::tell_conflicted(
                 state,
                 repo,
@@ -294,11 +307,18 @@ pub(crate) async fn carry_because(
             more,
         });
     }
+    let create_lock = state.manager.repo_lock(repo);
+    let lifecycle_lock = state.lifecycle.lock(repo);
+    let _taken = match locks {
+        Locks::Free => Some((create_lock.read_owned().await, lifecycle_lock.lock().await)),
+        Locks::Held => None,
+    };
     record_carries(state, repo, (&rows, because), &found, more).await
 }
 
 /// Records the carries of `found`, read from `rows`, each checked again
-/// under the lifecycle lock, in one operation.
+/// under the lifecycle lock, which the caller holds with the repository's
+/// create lock, in one operation.
 async fn record_carries(
     state: &Arc<AppState>,
     repo: RepoId,
@@ -306,10 +326,6 @@ async fn record_carries(
     found: &[reef_lib::jj::lifecycle::Carried],
     more: bool,
 ) -> Result<Carry, LifecycleError> {
-    let create_lock = state.manager.repo_lock(repo);
-    let _shared = create_lock.read_owned().await;
-    let lifecycle_lock = state.lifecycle.lock(repo);
-    let _held = lifecycle_lock.lock().await;
     // What each carry names: the parent change that moved, and what
     // happened to it.
     let mut causes: HashMap<&str, (String, DependencyEvent)> = HashMap::new();

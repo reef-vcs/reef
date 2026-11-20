@@ -26,7 +26,7 @@ use reef_api::v1::{
 };
 use reef_daemon::client::{Client, ClientError};
 use reef_daemon::snapshot::SnapshotOutcome;
-use reef_daemon::testing::{SyntheticRepo, TestDaemon, no_automatic_snapshots};
+use reef_daemon::testing::{SyntheticRepo, TestDaemon, no_automatic_snapshots, test_settings};
 use reef_testing::synth::Preset;
 use tonic::Code;
 
@@ -2268,6 +2268,191 @@ async fn an_ancestor_commit_between_an_edit_and_its_follow_is_followed() {
         &repo,
         &y,
         &["x.txt", "x2.txt", "y.txt", "y-edit.txt", "y-late.txt"],
+    )
+    .await;
+    daemon.stop().await;
+}
+
+/// Another jj client on the registered root. It loads the head when made
+/// and commits a bookmark on its working-copy commit when told, so its
+/// operation is concurrent with every operation the daemon wrote in
+/// between, and the daemon's next load merges the two operation heads.
+struct OtherClient {
+    go: std::sync::mpsc::Sender<()>,
+    done: std::thread::JoinHandle<()>,
+}
+
+impl OtherClient {
+    fn load(root: &Path) -> Self {
+        use jj_lib::default_backend_factories::{
+            default_backend_factories, default_working_copy_factories,
+            default_workspace_loader_factory,
+        };
+        let root = root.to_owned();
+        let (go, told) = std::sync::mpsc::channel();
+        let (tell, loaded) = std::sync::mpsc::channel();
+        let done = std::thread::spawn(move || {
+            let workspace = default_workspace_loader_factory()
+                .create(&root)
+                .unwrap()
+                .load(
+                    &test_settings(),
+                    &default_backend_factories(),
+                    &default_working_copy_factories(),
+                )
+                .unwrap();
+            let repo = pollster::block_on(workspace.repo_loader().load_at_head(None)).unwrap();
+            let mut tx = repo.start_transaction();
+            let on = repo.view().wc_commit_ids().values().next().unwrap().clone();
+            tx.repo_mut().set_local_bookmark_target(
+                jj_lib::ref_name::RefName::new("other-client"),
+                jj_lib::op_store::RefTarget::normal(on),
+            );
+            tell.send(()).unwrap();
+            told.recv().unwrap();
+            pollster::block_on(tx.commit("another client's bookmark")).unwrap();
+        });
+        loaded.recv().unwrap();
+        Self { go, done }
+    }
+
+    fn commit_now(self) {
+        self.go.send(()).unwrap();
+        self.done.join().unwrap();
+    }
+
+    async fn commit(self) {
+        tokio::task::spawn_blocking(move || self.commit_now())
+            .await
+            .unwrap();
+    }
+}
+
+/// Whether the daemon merged two operation heads.
+async fn merged_operations(client: &Client, repo: &SyntheticRepo) -> bool {
+    operations(client, repo, OperationFilter::default())
+        .await
+        .iter()
+        .any(|operation| operation.parent_ids.len() > 1)
+}
+
+/// Waits for `ws`'s row to be on its change's one visible commit, with
+/// `path` in its directory; panics if the change diverges first.
+async fn follows(client: &Client, repo: &SyntheticRepo, ws: &v1::Workspace, path: &str) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let row = get(client, repo, ws).await;
+        let commits = change_commits(client, repo, &ws.change_id).await;
+        assert!(
+            !row.divergent && commits.len() == 1,
+            "the change diverged: {commits:?}, {row:?}"
+        );
+        if commits == [row.commit_id.clone()] && read(ws, path).is_some() {
+            return;
+        }
+        assert!(Instant::now() < deadline, "never followed: {row:?}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+// Seventh R3.11 review, F1: another jj client's operation, concurrent with
+// X's snapshot, leaves a merge of two operation heads. Y, with an edit of
+// its own, still carries it onto the commit X's snapshot rebased.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_descendant_carries_across_a_merge_with_another_clients_operation() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let (x, y) = stacked(client, &repo).await;
+    write(&y, "y-late.txt", "late\n");
+    write(&x, "x2.txt", "x2\n");
+    let other = OtherClient::load(&repo.root);
+    held_at_commit(&daemon, &repo, &x, other.commit())
+        .await
+        .unwrap();
+
+    follows(client, &repo, &y, "x2.txt").await;
+    snapshot(client, &repo, &y).await;
+    follows(client, &repo, &y, "x2.txt").await;
+    let y_row = get(client, &repo, &y).await;
+    for path in ["x.txt", "x2.txt", "y.txt", "y-late.txt"] {
+        assert!(read(&y, path).is_some(), "{path} on disk");
+        assert!(
+            file(client, &repo, &y_row.commit_id, path).await.is_some(),
+            "{path} in Y's commit"
+        );
+    }
+    assert!(merged_operations(client, &repo).await);
+    daemon.stop().await;
+}
+
+// Seventh R3.11 review, F1: issue #80's plain case with another jj client
+// beside it. An edit of a workspace's `@` by change id, while its agent
+// writes, with the other client's operation concurrent with the edit: one
+// commit, as without the other client.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_write_carries_across_a_merge_with_another_clients_operation() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let w = create(client, &repo, "w@test", None).await;
+    write(&w, "one.txt", "one\n");
+    snapshot(client, &repo, &w).await;
+    let other = OtherClient::load(&repo.root);
+    let request = rewrite(&repo, None, &w.change_id, vec![content("api.txt", "api\n")]);
+    let edit = {
+        let client = client.clone();
+        async move { client.edit_files(request).await }
+    };
+    let late = || {
+        write(&w, "late.txt", "late\n");
+        other.commit_now();
+    };
+    at_follow_hold(&daemon, edit, late).await.unwrap();
+
+    follows(client, &repo, &w, "api.txt").await;
+    snapshot(client, &repo, &w).await;
+    follows(client, &repo, &w, "api.txt").await;
+    let row = get(client, &repo, &w).await;
+    for path in ["one.txt", "api.txt", "late.txt"] {
+        assert!(
+            file(client, &repo, &row.commit_id, path).await.is_some(),
+            "{path} in the commit"
+        );
+    }
+    assert!(merged_operations(client, &repo).await);
+    daemon.stop().await;
+}
+
+// ADR 0084: a restart between Reef's move of a workspace and the
+// workspace's follow costs nothing. X's snapshot rebases Y's commit, and
+// Y's follow fails before it scans; the daemon restarts; Y's next snapshot
+// reads the move from the operation log and carries Y's edit.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restart_between_a_move_and_its_follow_still_carries() {
+    let (daemon, repo) = fixture().await;
+    let (x, y) = stacked(&daemon.client, &repo).await;
+    let scheduler = daemon.handle.state().manager.scheduler();
+    write(&y, "y-late.txt", "late\n");
+    write(&x, "x2.txt", "x2\n");
+    // X's snapshot has scanned: every scan after it fails, Y's follow too.
+    held_at_commit(&daemon, &repo, &x, async { scheduler.fail_scans(true) })
+        .await
+        .unwrap();
+    let y_row = get(&daemon.client, &repo, &y).await;
+    assert_ne!(
+        change_commits(&daemon.client, &repo, &y.change_id).await,
+        std::slice::from_ref(&y_row.commit_id),
+        "X's snapshot moved Y's commit"
+    );
+
+    let daemon = daemon.restart().await;
+    let client = &daemon.client;
+    assert_eq!(read(&y, "x2.txt"), None, "Y had not followed");
+    snapshot(client, &repo, &y).await;
+    y_current(
+        client,
+        &repo,
+        &y,
+        &["x.txt", "x2.txt", "y.txt", "y-late.txt"],
     )
     .await;
     daemon.stop().await;

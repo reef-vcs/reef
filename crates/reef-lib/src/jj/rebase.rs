@@ -756,32 +756,46 @@ async fn describe_move(
     })
 }
 
-/// The mutable children of `commit` (R3.11's dependents of a superseded
-/// change): those [`RebaseMode::Children`] moves onto `destination`, and
-/// those it leaves because `destination` descends from them, each as its
-/// change.
+/// The mutable children of `change`'s visible commits (R3.11's dependents
+/// of a superseded change), each as its change: those
+/// [`RebaseMode::Children`] moves onto `destination`, and those it leaves
+/// because `destination` descends from them; with no `destination`, it
+/// leaves none. Read by change, in the one view: a commit id read earlier
+/// is hidden once its workspace snapshots, and a hidden commit has no
+/// children.
 pub async fn children_of(
     repo: &ReadonlyRepo,
-    commit: &CommitIdHex,
-    destination: &CommitIdHex,
+    change: &ChangeIdHex,
+    destination: Option<&CommitIdHex>,
 ) -> Result<(Vec<ChangeIdHex>, Vec<ChangeIdHex>), RebaseError> {
     let (mut moves, mut stays) = (Vec::new(), Vec::new());
-    let children = collect(
-        repo,
-        &ResolvedRevsetExpression::commits(vec![commit.to_id()]).children(),
-    )
-    .await?;
+    let commits: Vec<CommitId> = repo
+        .resolve_change_id(&change.to_id())
+        .await
+        .map_err(|error| RebaseError::Revision(RevisionError::Other(error.into())))?
+        .map(|targets| {
+            targets
+                .visible_with_offsets()
+                .map(|(_, id)| id.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    let children = collect(repo, &ResolvedRevsetExpression::commits(commits).children()).await?;
     for child in children {
         let id = CommitIdHex::of(&child);
         if revset::immutable_head(repo, &id).await?.is_some() {
             continue;
         }
         let change = ChangeIdHex::of(repo.store().get_commit_async(&child).await?.change_id());
-        if repo
-            .index()
-            .is_ancestor(&child, &destination.to_id())
-            .await?
-        {
+        let stay = match destination {
+            Some(destination) => {
+                repo.index()
+                    .is_ancestor(&child, &destination.to_id())
+                    .await?
+            }
+            None => false,
+        };
+        if stay {
             stays.push(change);
         } else {
             moves.push(change);

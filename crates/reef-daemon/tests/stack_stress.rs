@@ -5,10 +5,14 @@
 //! writes, snapshots, and describes and edits by change id, with the
 //! daemon's hold hooks (`Scheduler::hold_commits`, `hold_follows`,
 //! `hold_scans`) taken and released between them, so snapshots, writes and
-//! their follow-ups interleave in ways a timer never would. Half the seeds
-//! end with the bottom change superseded by a new change, which rebases the
-//! workspaces above onto it while they write. After each scene every
-//! workspace must hold, with no change divergent:
+//! their follow-ups interleave in ways a timer never would. Another jj
+//! client on the registered root loads the head and commits later, so the
+//! daemon merges its operation with the ones it wrote meanwhile. Half the
+//! seeds end with the bottom change superseded by a new change, which
+//! rebases the workspaces above onto it while they write; in half of
+//! those a snapshot of the superseded change's workspace is held between
+//! its scan and its commit when the supersede starts. After each scene
+//! every workspace must hold, with no change divergent:
 //!
 //! - every file its agent wrote, with the bytes written, on disk and in
 //!   its change (no lost edit);
@@ -18,7 +22,9 @@
 //!   any snapshot of it is asked for.
 //!
 //! A request that fails, or does not answer within [`HANG`], fails the seed
-//! too.
+//! too. So does a supersede that does not move the workspace above: the
+//! script gives it no reason to leave one (a divergent change, too many to
+//! move), and one left with no reason named is never right.
 //!
 //! A seed's script is a function of the seed. Where a step lands against
 //! requests still running depends on the scheduler: a step that does not
@@ -105,6 +111,17 @@ struct Stack {
     successor: Option<(String, String, String)>,
 }
 
+/// What the seeds of one daemon exercised.
+#[derive(Default)]
+struct Covered {
+    /// Merges of two operation heads: another client's operation beside
+    /// the daemon's.
+    merges: usize,
+    /// Supersedes, each of which moved the workspaces above.
+    supersedes: usize,
+    failures: Vec<(u64, String)>,
+}
+
 impl Stack {
     /// What workspace `at` must hold of the changes below it: each change,
     /// with its files.
@@ -144,6 +161,8 @@ enum Step {
     HoldFollows,
     /// Snapshots wait before their scan.
     HoldScans,
+    /// Another jj client loads the head; it commits when released.
+    HoldOther,
     /// The oldest hold is released.
     Release,
     /// The bottom change is superseded by a new change on its parent.
@@ -154,9 +173,8 @@ enum Step {
 enum Done {
     Nothing,
     Added(usize, String, String),
-    /// The successor and its file; `None` when the dependents stayed. Then
-    /// what the daemon said of them.
-    Superseded(Option<(String, String, String)>, String),
+    /// The successor and its file.
+    Superseded(String, String, String),
 }
 
 struct Scene<'a> {
@@ -182,13 +200,14 @@ impl Scene<'_> {
         };
         loop {
             let step = match self.rng.below(100) {
-                0..30 => Step::Write(member),
-                30..52 => Step::Snapshot(member),
-                52..62 => Step::Describe(member),
-                62..72 => Step::Add(member),
-                72..82 => Step::HoldCommit(member),
-                82..90 => Step::HoldFollows,
-                90..93 => Step::HoldScans,
+                0..28 => Step::Write(member),
+                28..49 => Step::Snapshot(member),
+                49..58 => Step::Describe(member),
+                58..67 => Step::Add(member),
+                67..76 => Step::HoldCommit(member),
+                76..83 => Step::HoldFollows,
+                83..86 => Step::HoldScans,
+                86..93 => Step::HoldOther,
                 _ => Step::Release,
             };
             let possible = match step {
@@ -197,6 +216,7 @@ impl Scene<'_> {
                 }
                 Step::HoldFollows => !held(&self.holds, |step| matches!(step, Step::HoldFollows)),
                 Step::HoldScans => !held(&self.holds, |step| matches!(step, Step::HoldScans)),
+                Step::HoldOther => !held(&self.holds, |step| matches!(step, Step::HoldOther)),
                 Step::Release => !self.holds.is_empty(),
                 // A final state: no write names a superseded change.
                 Step::Describe(at) | Step::Add(at) => at > 0 || !self.superseding,
@@ -294,6 +314,12 @@ impl Scene<'_> {
                 let hold = scheduler.hold_scans().await;
                 self.holds.push((step, Box::new(hold)));
             }
+            Step::HoldOther => {
+                let (root, on) = (self.repo.root.clone(), self.stack.base.clone());
+                let load = move || OtherClient::load(&root, &name, &on);
+                let other = tokio::task::spawn_blocking(load).await.unwrap();
+                self.holds.push((step, Box::new(other)));
+            }
             Step::Supersede => {
                 self.superseding = true;
                 let change = self.stack.members[0].ws.change_id.clone();
@@ -306,6 +332,32 @@ impl Scene<'_> {
                 // What the hold held runs on before the next step.
                 tokio::time::sleep(SETTLE).await;
             }
+        }
+    }
+
+    /// Runs the scene's script. With `supersede`, the bottom change is
+    /// superseded part-way, half the time while a snapshot of its workspace
+    /// waits between its scan and its commit.
+    async fn play(&mut self, supersede: bool) {
+        let steps = 6 + self.rng.below(6);
+        let supersede_at = self.rng.below(steps);
+        let racing_a_snapshot = self.rng.below(2) == 0;
+        for nth in 0..steps {
+            if !supersede || nth != supersede_at {
+                let step = self.pick();
+                self.run(step).await;
+                continue;
+            }
+            if racing_a_snapshot {
+                // The superseded change's commit moves under the supersede.
+                self.run(Step::Write(0)).await;
+                let held = |(step, _): &(Step, _)| matches!(step, Step::HoldCommit(_));
+                if !self.holds.iter().any(held) {
+                    self.run(Step::HoldCommit(0)).await;
+                }
+                self.run(Step::Snapshot(0)).await;
+            }
+            self.run(Step::Supersede).await;
         }
     }
 
@@ -323,10 +375,9 @@ impl Scene<'_> {
                 Done::Added(at, path, contents) => {
                     self.stack.members[at].added.insert(path, contents);
                 }
-                Done::Superseded(successor, said) => {
-                    writeln!(self.log, "  superseded: {said}").unwrap();
-                    self.stack.members[0].superseded = successor.is_some();
-                    self.stack.successor = successor;
+                Done::Superseded(successor, path, contents) => {
+                    self.stack.members[0].superseded = true;
+                    self.stack.successor = Some((successor, path, contents));
                 }
             }
         }
@@ -375,19 +426,12 @@ async fn supersede(
         ..v1::TransitionChangeRequest::default()
     };
     let superseded = client.transition_change(request).await.map_err(text)?;
-    let said = format!("{:?}", superseded.moved);
-    // A commit that moved meanwhile refuses the rebase (ADR 0084, decision
-    // 6), and a supersede that found no dependent names none: the stack
-    // then stays on the change.
-    let moved = !superseded.moved.is_empty()
-        && superseded
-            .moved
-            .iter()
-            .all(|moved| moved.skipped.is_empty());
-    Ok(Done::Superseded(
-        moved.then_some((successor, path, name)),
-        said,
-    ))
+    // The workspace above is a dependent (ADR 0084, decision 6).
+    let moved = &superseded.moved;
+    if moved.is_empty() || moved.iter().any(|moved| !moved.skipped.is_empty()) {
+        return Err(format!("it did not move every dependent: {moved:?}"));
+    }
+    Ok(Done::Superseded(successor, path, name))
 }
 
 #[allow(
@@ -569,8 +613,9 @@ async fn create(client: &Client, repo: &SyntheticRepo, at: usize, on: Option<Str
 }
 
 /// One seed: a stack, then [`SCENES`] scenes, each checked. In half the
-/// seeds the last scene supersedes the bottom change part-way.
-async fn seed(daemon: &TestDaemon, repo: &SyntheticRepo, seed: u64) -> Result<(), String> {
+/// seeds the last scene supersedes the bottom change part-way. Returns
+/// whether it did.
+async fn seed(daemon: &TestDaemon, repo: &SyntheticRepo, seed: u64) -> Result<bool, String> {
     let client = &daemon.client;
     let mut rng = Rng(seed);
     let depth = 2 + rng.below(2);
@@ -634,16 +679,7 @@ async fn seed(daemon: &TestDaemon, repo: &SyntheticRepo, seed: u64) -> Result<()
             tasks: Vec::new(),
             log: String::new(),
         };
-        let steps = 6 + scene.rng.below(6);
-        let supersede_at = scene.rng.below(steps);
-        for nth in 0..steps {
-            let step = if last && supersedes && nth == supersede_at {
-                Step::Supersede
-            } else {
-                scene.pick()
-            };
-            scene.run(step).await;
-        }
+        scene.play(last && supersedes).await;
         let finished = scene.finish().await;
         log.push_str(&scene.log);
         let checked = match finished {
@@ -666,38 +702,96 @@ async fn seed(daemon: &TestDaemon, repo: &SyntheticRepo, seed: u64) -> Result<()
     }
     match failure {
         Some(error) => Err(format!("{error}\n{log}")),
-        None => Ok(()),
+        None => Ok(supersedes),
     }
+}
+
+/// How many operations of `repo` merge two operation heads.
+async fn merges(client: &Client, repo: &SyntheticRepo) -> usize {
+    let request = v1::ListOperationsRequest {
+        repo: repo.id.clone(),
+        ..v1::ListOperationsRequest::default()
+    };
+    let operations = client.list_operations_limited(request, 0).await.unwrap();
+    operations
+        .items
+        .iter()
+        .filter(|operation| operation.parent_ids.len() > 1)
+        .count()
+}
+
+/// A transaction of another jj client on the registered root, loaded at
+/// the head now, that sets bookmark `name` on `commit`.
+fn bookmark_set(root: &Path, name: &str, commit: &str) -> jj_lib::transaction::Transaction {
+    use jj_lib::default_backend_factories::{
+        default_backend_factories, default_working_copy_factories, default_workspace_loader_factory,
+    };
+    let workspace = default_workspace_loader_factory()
+        .create(root)
+        .unwrap()
+        .load(
+            &test_settings(),
+            &default_backend_factories(),
+            &default_working_copy_factories(),
+        )
+        .unwrap();
+    let repo = pollster::block_on(workspace.repo_loader().load_at_head(None)).unwrap();
+    let mut tx = repo.start_transaction();
+    tx.repo_mut().set_local_bookmark_target(
+        jj_lib::ref_name::RefName::new(name),
+        jj_lib::op_store::RefTarget::normal(
+            jj_lib::backend::CommitId::try_from_hex(commit).unwrap(),
+        ),
+    );
+    tx
 }
 
 /// Sets the `main` bookmark from outside the daemon, as `jj bookmark set`.
 async fn bookmark_main(repo: &SyntheticRepo, commit: &str) {
     let (root, commit) = (repo.root.clone(), commit.to_owned());
     let set = move || {
-        use jj_lib::default_backend_factories::{
-            default_backend_factories, default_working_copy_factories,
-            default_workspace_loader_factory,
-        };
-        let workspace = default_workspace_loader_factory()
-            .create(&root)
-            .unwrap()
-            .load(
-                &test_settings(),
-                &default_backend_factories(),
-                &default_working_copy_factories(),
-            )
-            .unwrap();
-        let repo = pollster::block_on(workspace.repo_loader().load_at_head(None)).unwrap();
-        let mut tx = repo.start_transaction();
-        tx.repo_mut().set_local_bookmark_target(
-            jj_lib::ref_name::RefName::new("main"),
-            jj_lib::op_store::RefTarget::normal(
-                jj_lib::backend::CommitId::try_from_hex(&commit).unwrap(),
-            ),
-        );
+        let tx = bookmark_set(&root, "main", &commit);
         pollster::block_on(tx.commit("bookmark set")).unwrap();
     };
     tokio::task::spawn_blocking(set).await.unwrap();
+}
+
+/// Another jj client on the registered root: it loaded the head when made,
+/// and commits a bookmark when dropped. Its operation is concurrent with
+/// every operation the daemon wrote in between, so the daemon's next load
+/// merges the two operation heads.
+struct OtherClient {
+    go: std::sync::mpsc::Sender<()>,
+    done: Option<std::thread::JoinHandle<()>>,
+}
+
+impl OtherClient {
+    fn load(root: &Path, name: &str, commit: &str) -> Self {
+        let (root, name, commit) = (root.to_owned(), name.to_owned(), commit.to_owned());
+        let (go, told) = std::sync::mpsc::channel();
+        let (tell, loaded) = std::sync::mpsc::channel();
+        let done = std::thread::spawn(move || {
+            let tx = bookmark_set(&root, &name, &commit);
+            tell.send(()).unwrap();
+            if told.recv().is_ok() {
+                pollster::block_on(tx.commit("another client's bookmark")).unwrap();
+            }
+        });
+        loaded.recv().unwrap();
+        Self {
+            go,
+            done: Some(done),
+        }
+    }
+}
+
+impl Drop for OtherClient {
+    fn drop(&mut self) {
+        let _ = self.go.send(());
+        if let Some(done) = self.done.take() {
+            done.join().unwrap();
+        }
+    }
 }
 
 fn knob(name: &str, default: u64) -> u64 {
@@ -720,23 +814,25 @@ async fn a_stack_survives_random_interleavings() {
             no_automatic_snapshots(config);
         })
         .await;
-        let mut failures = Vec::new();
+        let mut covered = Covered::default();
         for seed_number in (first..first + seeds).filter(|seed| seed % jobs == job) {
-            if let Err(error) = seed(&daemon, &repo, seed_number).await {
-                failures.push((seed_number, error));
+            match seed(&daemon, &repo, seed_number).await {
+                Ok(superseded) => covered.supersedes += usize::from(superseded),
+                Err(error) => covered.failures.push((seed_number, error)),
             }
         }
+        covered.merges = merges(&daemon.client, &repo).await;
         daemon.stop().await;
-        failures
+        covered
     });
-    let mut failures: Vec<(u64, String)> = futures::future::join_all(runs)
-        .await
-        .into_iter()
-        .flatten()
-        .collect();
+    let covered = futures::future::join_all(runs).await;
+    let count = |of: fn(&Covered) -> usize| covered.iter().map(of).sum::<usize>();
+    let (merged, supersedes) = (count(|job| job.merges), count(|job| job.supersedes));
+    let mut failures: Vec<(u64, String)> =
+        covered.into_iter().flat_map(|job| job.failures).collect();
     failures.sort();
     println!(
-        "stack stress: {seeds} seeds from {first}, {} failed, in {:?}",
+        "stack stress: {seeds} seeds from {first}, {} failed, in {:?}; {merged} merges of operation heads, {supersedes} supersedes",
         failures.len(),
         begun.elapsed()
     );

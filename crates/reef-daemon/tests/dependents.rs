@@ -697,6 +697,163 @@ async fn supersede_moves_the_dependents() {
     daemon.stop().await;
 }
 
+// Seventh R3.11 review, F2: the carry follower looks between a supersede's
+// operation and the supersede's own carry of its dependents. The response
+// still says the dependent was carried: it was.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_supersede_reports_a_carry_the_follower_raced() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let lifecycles = &daemon.handle.state().lifecycle;
+    let main = setup(client, &repo).await;
+    let a = commit_on(client, &repo.id, &main.commit_id, &[("a.txt", "a\n")]).await;
+    let b = commit_on(client, &repo.id, &a.commit_id, &[("b.txt", "b\n")]).await;
+    let a2 = commit_on(client, &repo.id, &main.commit_id, &[("a.txt", "a2\n")]).await;
+    client
+        .transition_change(transition(&repo.id, &b.change_id, State::Proposed, true))
+        .await
+        .unwrap();
+
+    let hold = lifecycles.hold_supersede_carries().await;
+    let request = TransitionChangeRequest {
+        superseded_by: a2.change_id.clone(),
+        ..transition(&repo.id, &a.change_id, State::Superseded, false)
+    };
+    let supersede = {
+        let client = client.clone();
+        tokio::spawn(async move { client.transition_change(request).await })
+    };
+    eventually("the supersede reaches its carry", || async {
+        lifecycles.held_supersede_carries() > 0
+    })
+    .await;
+    // The follower's look. It carries B, or waits for the supersede to.
+    let state = std::sync::Arc::downgrade(daemon.handle.state());
+    let id = repo.id.parse().unwrap();
+    let follower =
+        tokio::spawn(async move { reef_daemon::lifecycle::carry::carry_now(&state, id).await });
+    let begun = Instant::now();
+    while !follower.is_finished() && begun.elapsed() < Duration::from_secs(2) {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    drop(hold);
+    let superseded = supersede.await.unwrap().unwrap();
+    follower.await.unwrap().unwrap();
+
+    let moved = &superseded.moved;
+    assert_eq!(moved.len(), 1, "{moved:?}");
+    assert_eq!(moved[0].change_id, b.change_id);
+    assert!(moved[0].carried && !moved[0].conflicted, "{moved:?}");
+    let last = lifecycle(client, &repo.id, &b.change_id)
+        .await
+        .last
+        .unwrap();
+    assert_eq!(last.cause(), TransitionCause::Dependency);
+    let dependency = last.dependency.unwrap();
+    assert_eq!(dependency.change_id, a2.change_id);
+    assert_eq!(dependency.event(), DependencyEvent::Superseded);
+    daemon.stop().await;
+}
+
+// Seventh R3.11 review, F3: a snapshot of the superseded change's workspace
+// commits while the supersede runs. Whichever goes first, the supersede
+// moves the workspace above onto the successor and says so. It never
+// answers with no dependents while one stays on the superseded change.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_supersede_racing_a_snapshot_of_the_superseded_change_moves_its_dependents() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let scheduler = daemon.handle.state().manager.scheduler();
+    let main = setup(client, &repo).await;
+    let mut outcomes = Vec::new();
+    for round in 0..12u64 {
+        let a = worker(
+            client,
+            &repo,
+            "a@test",
+            &main.commit_id,
+            &[(format!("a{round}.txt").as_str(), "a\n")],
+        )
+        .await;
+        let b = worker(
+            client,
+            &repo,
+            "b@test",
+            &a.commit_id,
+            &[(format!("b{round}.txt").as_str(), "b\n")],
+        )
+        .await;
+        client
+            .transition_change(transition(&repo.id, &a.change_id, State::Proposed, false))
+            .await
+            .unwrap();
+        let successor = commit_on(
+            client,
+            &repo.id,
+            &main.commit_id,
+            &[(format!("s{round}.txt").as_str(), "s\n")],
+        )
+        .await;
+
+        // A's agent writes; its snapshot waits between scan and commit.
+        write_files(&a, &[(format!("a{round}-late.txt").as_str(), "late\n")]);
+        let hold = scheduler.hold_commits(a.id.parse().unwrap()).await;
+        let snapshot = {
+            let (client, repo, id) = (client.clone(), repo.id.clone(), a.id.clone());
+            tokio::spawn(async move { client.snapshot_workspace(&repo, &id, "").await })
+        };
+        eventually("A's snapshot reaches its commit", || async {
+            scheduler.held_commits() > 0
+        })
+        .await;
+        let request = TransitionChangeRequest {
+            superseded_by: successor.change_id.clone(),
+            ..transition(&repo.id, &a.change_id, State::Superseded, false)
+        };
+        let supersede = {
+            let client = client.clone();
+            tokio::spawn(async move { client.transition_change(request).await })
+        };
+        // The supersede is at a different step each round when the
+        // snapshot commits.
+        tokio::time::sleep(Duration::from_micros(500 * round)).await;
+        drop(hold);
+        snapshot.await.unwrap().unwrap();
+        let moved = supersede.await.unwrap().unwrap().moved;
+
+        let parents = change(client, &repo.id, &b.change_id)
+            .await
+            .parent_change_ids;
+        let on = if parents == [successor.change_id.clone()] {
+            "the successor"
+        } else if parents == [a.change_id.clone()] {
+            "the superseded change"
+        } else {
+            "neither"
+        };
+        let said: Vec<&str> = moved
+            .iter()
+            .map(|moved| match moved.skipped.as_str() {
+                "" => "moved",
+                skipped => skipped,
+            })
+            .collect();
+        outcomes.push(format!("round {round}: said {said:?}, B is on {on}"));
+        for ws in [&a, &b] {
+            client
+                .release_workspace(&repo.id, &ws.id, false, true)
+                .await
+                .unwrap();
+        }
+    }
+    daemon.stop().await;
+    let wrong: Vec<&String> = outcomes
+        .iter()
+        .filter(|outcome| !outcome.ends_with("said [\"moved\"], B is on the successor"))
+        .collect();
+    assert!(wrong.is_empty(), "{wrong:#?}\nof {outcomes:#?}");
+}
+
 // Review finding 1: a declined change that a rewrite below it rebases is
 // still declined: the changes above it stay held, and proposing the stack
 // does not put it back.

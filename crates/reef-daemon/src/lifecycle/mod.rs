@@ -73,9 +73,52 @@ pub struct Lifecycle {
     /// Each repository's last read of the proposals above a declined or
     /// withdrawn change, by what it read (R3.11).
     pub(crate) above: dependents::AboveCache,
+    /// Test hook: while [`Lifecycle::hold_supersede_carries`]' guard holds
+    /// it for writing, a supersede that moved dependents waits before it
+    /// carries them.
+    #[cfg(any(test, feature = "testing"))]
+    carry_hold: Arc<tokio::sync::RwLock<()>>,
+    /// Test hook: supersedes waiting at the hold now.
+    #[cfg(any(test, feature = "testing"))]
+    held_carries: std::sync::atomic::AtomicUsize,
 }
 
+/// Holds every supersede before it carries its dependents; see
+/// [`Lifecycle::hold_supersede_carries`].
+#[cfg(any(test, feature = "testing"))]
+#[must_use = "dropping the guard lets the held supersedes carry at once"]
+#[derive(Debug)]
+pub struct CarryHold(
+    #[allow(dead_code, reason = "held for its drop")] tokio::sync::OwnedRwLockWriteGuard<()>,
+);
+
 impl Lifecycle {
+    /// Test hook: until the guard drops, every supersede that moved
+    /// dependents waits after its operation and before it carries them.
+    #[cfg(any(test, feature = "testing"))]
+    pub async fn hold_supersede_carries(&self) -> CarryHold {
+        CarryHold(Arc::clone(&self.carry_hold).write_owned().await)
+    }
+
+    /// Test hook: how many supersedes wait at
+    /// [`Lifecycle::hold_supersede_carries`]' hold now.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn held_supersede_carries(&self) -> usize {
+        self.held_carries.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Where a supersede waits while `Lifecycle::hold_supersede_carries` (a
+    /// test hook) holds it.
+    async fn supersede_carry_hold_point(&self) {
+        #[cfg(any(test, feature = "testing"))]
+        {
+            use std::sync::atomic::Ordering;
+            self.held_carries.fetch_add(1, Ordering::SeqCst);
+            drop(self.carry_hold.read().await);
+            self.held_carries.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
     /// `repo`'s lifecycle lock: held from a transition's state check to its
     /// commit, by every transition and by R3.13's landing. A read waiting
     /// for a pending transition takes it alone and drops it at once
@@ -943,41 +986,7 @@ pub async fn transition(
             {
                 tracing::warn!(error = %ErrorChain(&error), "cannot carry proposals before a stack proposal");
             }
-            let mut outcome = transition_inner(&state, request).await?;
-            // A supersede's dependents that still apply on the successor
-            // follow it at once (R3.11), with the locks released.
-            let moved: Vec<String> = outcome
-                .moved
-                .iter()
-                .filter(|moved| moved.skipped.is_empty() && !moved.conflicted)
-                .map(|moved| moved.change.clone())
-                .collect();
-            // Each names the successor, its children's children too.
-            let successor = outcome
-                .transition
-                .as_ref()
-                .and_then(|row| row.superseded_by.clone())
-                .unwrap_or_default();
-            if !moved.is_empty() {
-                let because = Some((successor.as_str(), DependencyEvent::Superseded));
-                match carry::carry_because(&state, repo, Some(&moved), because).await {
-                    Ok(carried) => {
-                        for row in carried.rows {
-                            if let Some(moved) = outcome
-                                .moved
-                                .iter_mut()
-                                .find(|moved| moved.change == row.change_id)
-                            {
-                                moved.carried = true;
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        tracing::warn!(error = %ErrorChain(&error), "cannot carry a supersede's dependents now; the carry follower does");
-                    }
-                }
-            }
-            Ok(outcome)
+            transition_inner(&state, request).await
         }
         .instrument(span),
     )
@@ -991,7 +1000,7 @@ pub async fn transition(
 )]
 #[tracing::instrument(skip_all, fields(repo = %request.repo, to = request.to.as_str()))]
 async fn transition_inner(
-    state: &AppState,
+    state: &Arc<AppState>,
     request: TransitionRequest,
 ) -> Result<TransitionOutcome, LifecycleError> {
     check_request(&request)?;
@@ -1167,7 +1176,7 @@ async fn transition_inner(
     let mut moved = Vec::new();
     let superseding = match (&facts.info, &facts.superseded_by) {
         (Some(info), Some(successor)) if request.to == LifecycleState::Superseded => {
-            Some((info.commit_id.clone(), successor.clone()))
+            Some((info.change_id.clone(), successor.clone()))
         }
         _ => None,
     };
@@ -1190,6 +1199,13 @@ async fn transition_inner(
         }
         _ => record(state, repo, planned, meta).await?,
     };
+    let successor = recorded
+        .rows
+        .iter()
+        .find(|row| row.change_id == change)
+        .and_then(|row| row.superseded_by.clone())
+        .unwrap_or_default();
+    carry_moved(state, repo, &successor, &mut moved).await;
     let lifecycle = state.db.lifecycle_row(repo, &change)?;
     tracing::info!(
         change_id = %change,
@@ -1210,6 +1226,43 @@ async fn transition_inner(
         change: facts.info,
         moved,
     })
+}
+
+/// Carries the dependents a supersede by `successor` moved (`moved`) that
+/// still apply on it, at once (R3.11), each naming the successor, its
+/// children's children too, and marks them carried. The caller holds the
+/// lifecycle lock it superseded under, so the carry follower, which the
+/// supersede's operation wakes, cannot record a carry first: a dependent
+/// `moved` reports as not carried was not carried.
+async fn carry_moved(
+    state: &Arc<AppState>,
+    repo: RepoId,
+    successor: &str,
+    moved: &mut [MovedDependent],
+) {
+    let still_apply: Vec<String> = moved
+        .iter()
+        .filter(|moved| moved.skipped.is_empty() && !moved.conflicted)
+        .map(|moved| moved.change.clone())
+        .collect();
+    if still_apply.is_empty() {
+        return;
+    }
+    state.lifecycle.supersede_carry_hold_point().await;
+    let because = Some((successor, DependencyEvent::Superseded));
+    let only = Some(still_apply.as_slice());
+    match carry::carry_because(state, repo, only, because, carry::Locks::Held).await {
+        Ok(carried) => {
+            for row in carried.rows {
+                if let Some(moved) = moved.iter_mut().find(|moved| moved.change == row.change_id) {
+                    moved.carried = true;
+                }
+            }
+        }
+        Err(error) => {
+            tracing::warn!(error = %ErrorChain(&error), "cannot carry a supersede's dependents now; the carry follower does");
+        }
+    }
 }
 
 /// The transition `request` makes of `member`, whose row is `current`, or
@@ -1902,18 +1955,23 @@ async fn record_in_write(
     Ok((Recorded { op_id, rows }, written))
 }
 
-/// A supersede of `superseded` (its visible commit) by `successor` that
-/// moves its dependents (the commit's mutable children, with their
-/// descendants) onto the successor's visible commit, with the transition,
-/// in one operation of kind `transition` (R3.11, ADR 0084). Their
-/// workspaces follow as for any rebase; dependents whose own diff still
-/// applies are carried right after. `None` when it has none to move.
+/// A supersede of `superseded` by `successor` that moves its dependents
+/// (the mutable children of its visible commit, with their descendants)
+/// onto the successor's visible commit, with the transition, in one
+/// operation of kind `transition` (R3.11, ADR 0084). Their workspaces
+/// follow as for any rebase; dependents whose own diff still applies are
+/// carried right after. `None` when it has none to move.
+///
+/// Both changes are named by change id, here and in the write, and read
+/// in the job that uses them: a snapshot of either one's workspace may
+/// rewrite its commit at any point, and the dependents are the children of
+/// the commit the change has then.
 async fn supersede_moving(
     state: &AppState,
     request: &TransitionRequest,
     planned: &Planned,
     meta: &OpMeta,
-    (superseded, successor): (&reef_lib::jj::CommitIdHex, &ChangeIdHex),
+    (superseded, successor): (&ChangeIdHex, &ChangeIdHex),
     shared: Arc<tokio::sync::OwnedRwLockReadGuard<()>>,
 ) -> Result<(Option<Recorded>, Vec<MovedDependent>), LifecycleError> {
     let repo = request.repo;
@@ -1923,23 +1981,21 @@ async fn supersede_moving(
         .call_async(move |head| {
             async move {
                 let repo = head.repo.readonly();
-                let Some(onto) = reef_lib::jj::assignment::visible_commit(&repo, &to)
+                // A successor with no visible commit leaves no dependent
+                // where it is by descending from it: the rebase onto it
+                // is refused, and reports them all.
+                let onto = reef_lib::jj::assignment::visible_commit(&repo, &to)
                     .await
                     .map_err(|error| LifecycleError::Read(ErrorChain(&error).to_string()))?
-                else {
-                    return Ok(None);
-                };
-                reef_lib::jj::rebase::children_of(&repo, &from, &onto.commit)
+                    .map(|visible| visible.commit);
+                reef_lib::jj::rebase::children_of(&repo, &from, onto.as_ref())
                     .await
-                    .map(Some)
                     .map_err(|error| LifecycleError::Read(ErrorChain(&error).to_string()))
             }
             .boxed_local()
         })
         .await??;
-    let Some((moves, stays)) = read else {
-        return Ok((None, Vec::new()));
-    };
+    let (moves, stays) = read;
     let skipped = |changes: &[ChangeIdHex], why: &str| -> Vec<MovedDependent> {
         changes
             .iter()
@@ -1968,12 +2024,12 @@ async fn supersede_moving(
         successor
     );
     let write = Write::Rebase {
-        revision: superseded.to_string(),
-        // By change, resolved when the write plans: the successor's
+        // Both by change, resolved when the write plans: either one's
         // workspace may snapshot in between.
+        revision: superseded.reverse_hex(),
         onto: successor.reverse_hex(),
         mode: reef_lib::jj::rebase::RebaseMode::Children,
-        expected: superseded.to_string(),
+        expected: String::new(),
         remote: None,
         transitions: vec![planned.record()],
         description,
@@ -1995,9 +2051,9 @@ async fn supersede_moving(
     {
         Ok(written) => written,
         // The rebase was refused before anything was written (a
-        // divergent dependent, too many to move, a commit that moved
-        // meanwhile): the supersede is recorded alone, and the
-        // dependents are reported where they are.
+        // divergent change among them, too many to move): the supersede
+        // is recorded alone, and the dependents are reported where they
+        // are.
         Err(LifecycleError::Manager(error)) if before_writing(&error) => {
             tracing::warn!(error = %ErrorChain(&error), "a supersede could not move its dependents; recording it alone");
             dependents.extend(skipped(&moves, "rebase_refused"));

@@ -1122,6 +1122,223 @@ async fn a_snapshot_below_carries() {
     }
 }
 
+/// Another jj client's operation on `at`, a bookmark set on `commit`,
+/// concurrent with whatever `main` wrote since `at`: `main`'s next reload
+/// merges the two operation heads.
+async fn concurrent_bookmark(at: &Arc<ReadonlyRepo>, commit: &CommitIdHex) {
+    let mut tx = at.start_transaction();
+    tx.repo_mut().set_local_bookmark_target(
+        jj_lib::ref_name::RefName::new("concurrent"),
+        jj_lib::op_store::RefTarget::normal(CommitId::try_from_hex(commit.as_str()).unwrap()),
+    );
+    tx.commit("another client's bookmark").await.unwrap();
+}
+
+/// Another jj client's rewrite of `commit` on `at`, which empties its
+/// tree, concurrent with whatever `main` wrote since `at`. It moves every
+/// working copy on the commit.
+async fn concurrent_rewrite(at: &Arc<ReadonlyRepo>, commit: &CommitIdHex) {
+    let id = CommitId::try_from_hex(commit.as_str()).unwrap();
+    let old = at.store().get_commit_async(&id).await.unwrap();
+    let mut tx = at.start_transaction();
+    tx.repo_mut()
+        .rewrite_commit(&old)
+        .set_tree(at.store().root_commit().tree())
+        .write()
+        .await
+        .unwrap();
+    tx.repo_mut().rebase_descendants().await.unwrap();
+    tx.commit("another client's rewrite").await.unwrap();
+}
+
+/// Reloads `main` at head, which merges two operation heads.
+async fn merge_heads(fx: &mut Fixture) {
+    fx.main.reload_at_head().await.unwrap();
+    assert_eq!(
+        fx.main.head().operation().parent_ids().len(),
+        2,
+        "the head is a merge of two operations"
+    );
+}
+
+/// `y`'s snapshot against `main`'s head, with edits on `expected`, takes
+/// ADR 0018's fourth arm.
+async fn assert_diverges(fx: &Fixture, y: &mut Repo, expected: &CommitIdHex) {
+    y.set_head(Arc::clone(fx.main.head()));
+    let pending = y
+        .begin_snapshot(Some(expected), None, &IgnoreSources::default(), None)
+        .await
+        .unwrap();
+    assert!(pending.changed());
+    assert!(!pending.carried());
+    assert_eq!(&pending.plan().rewrite_of, expected);
+    assert!(pending.plan().divergent);
+}
+
+// Review 7, F1: another jj client's operation concurrent with the snapshot
+// of the workspace below leaves a merge of the two operation heads. The
+// merge took this workspace's commit from the snapshot's side, and the
+// client's side never moved it: the move is still Reef's.
+#[tokio::test]
+async fn a_merge_beside_a_snapshot_below_carries() {
+    let x_id = "00000000000000aa";
+    let mut fx = Fixture::new().await;
+    let base = fx.main.wc_change().unwrap().commit_id;
+    let (mut x, x_root, _) = fx
+        .create(&format!("reef-{x_id}"), StartPoint::NewOn(base))
+        .await;
+    let below = x.wc_change().unwrap().commit_id;
+    let (mut y, y_root, _) = fx
+        .create(&format!("reef-{Y}"), StartPoint::NewOn(below.clone()))
+        .await;
+    let c = y.wc_change().unwrap().commit_id;
+    write(&x_root, "from-x.txt", "x\n");
+    write(&y_root, "from-y.txt", "y\n");
+    let fork = Arc::clone(fx.main.head());
+    x.set_head(Arc::clone(&fork));
+    let pending = x
+        .begin_snapshot(Some(&below), None, &IgnoreSources::default(), None)
+        .await
+        .unwrap();
+    let meta = OpMeta::new(OpKind::Snapshot, "reef: snapshot workspace x").workspace(x_id);
+    let x_snapshot = commit_snapshot(&fork, pending.plan(), &meta).await.unwrap();
+    pending.finish(&x_snapshot.op_id).await.unwrap();
+    concurrent_bookmark(&fork, &below).await;
+    merge_heads(&mut fx).await;
+    let rebased = reef_lib::jj::view_wc_commit(fx.main.head(), &format!("reef-{Y}")).unwrap();
+    assert_ne!(rebased, c);
+
+    let (committed, files) = carry_snapshot(&fx, &mut y, (&c, &rebased), None).await;
+    assert_eq!(files, 1, "x's file");
+    for path in ["from-x.txt", "from-y.txt"] {
+        assert!(y_root.join(path).is_file(), "{path} on disk");
+        assert!(
+            file_in(&committed.repo, &committed.commit_id, path)
+                .await
+                .is_some(),
+            "{path} in the commit"
+        );
+    }
+}
+
+// Review 7, F1: the other client loaded the head before this workspace's
+// last snapshot, and committed after Reef's write: its side of the merge
+// has a commit older than the one the working copy was checked out from.
+// It still never moved it.
+#[tokio::test]
+async fn a_merge_with_a_side_older_than_the_last_snapshot_carries() {
+    let mut fx = Fixture::new().await;
+    let (mut y, y_root, c0) = busy_workspace(&mut fx, &[("a.txt", "a\n")]).await;
+    let fork = Arc::clone(fx.main.head());
+    write(&y_root, "b.txt", "b\n");
+    let c = y
+        .snapshot("reef: snapshot workspace y")
+        .await
+        .unwrap()
+        .wc_commit;
+    assert_ne!(c, c0);
+    fx.main.reload_at_head().await.unwrap();
+    let c2 = write_on(&mut fx, &c, &[content("api.txt", "api\n")]).await;
+    concurrent_bookmark(&fork, &c0).await;
+    merge_heads(&mut fx).await;
+    write(&y_root, "late.txt", "late\n");
+
+    let (committed, files) = carry_snapshot(&fx, &mut y, (&c, &c2), None).await;
+    assert_eq!(files, 1, "the write's file");
+    for path in ["a.txt", "b.txt", "api.txt", "late.txt"] {
+        assert!(
+            file_in(&committed.repo, &committed.commit_id, path)
+                .await
+                .is_some(),
+            "{path} in the commit"
+        );
+    }
+}
+
+// Review 7, F1: a merge after Reef's write, of two operations that both
+// left this workspace's commit alone, is walked through to the write.
+#[tokio::test]
+async fn a_merge_after_the_write_carries() {
+    let mut fx = Fixture::new().await;
+    let (mut y, y_root, c) = busy_workspace(&mut fx, &[("a.txt", "a\n")]).await;
+    let c2 = write_on(&mut fx, &c, &[content("api.txt", "api\n")]).await;
+    let fork = Arc::clone(fx.main.head());
+    let base = fx.main.wc_change().unwrap().commit_id;
+    fx.create("reef-00000000000000cc", StartPoint::NewOn(base.clone()))
+        .await;
+    concurrent_bookmark(&fork, &base).await;
+    merge_heads(&mut fx).await;
+    write(&y_root, "late.txt", "late\n");
+
+    let (committed, _) = carry_snapshot(&fx, &mut y, (&c, &c2), None).await;
+    for path in ["a.txt", "api.txt", "late.txt"] {
+        assert!(
+            file_in(&committed.repo, &committed.commit_id, path)
+                .await
+                .is_some(),
+            "{path} in the commit"
+        );
+    }
+}
+
+// Review 7, F1: a merge does not launder a move that is not Reef's. ADR
+// 0018's fourth arm stands when the other client's side moved this
+// workspace's commit, alone or beside a write of Reef's, and when the
+// merge is beside another workspace's snapshot of the same change.
+#[tokio::test]
+async fn a_merge_keeps_arm_four_for_moves_that_are_not_reefs() {
+    // (a) only the other client moved the commit; Reef's side is unrelated.
+    let mut fx = Fixture::new().await;
+    let (mut y, y_root, c) = busy_workspace(&mut fx, &[("a.txt", "a\n")]).await;
+    let fork = Arc::clone(fx.main.head());
+    let base = fx.main.wc_change().unwrap().commit_id;
+    fx.create("reef-00000000000000cc", StartPoint::NewOn(base))
+        .await;
+    concurrent_rewrite(&fork, &c).await;
+    merge_heads(&mut fx).await;
+    let moved = reef_lib::jj::view_wc_commit(fx.main.head(), &format!("reef-{Y}")).unwrap();
+    assert_ne!(moved, c, "the other client's rewrite moved y");
+    write(&y_root, "late.txt", "late\n");
+    assert_diverges(&fx, &mut y, &c).await;
+
+    // (b) both sides moved it: Reef's write and the other client's rewrite.
+    let mut fx = Fixture::new().await;
+    let (mut y, y_root, c) = busy_workspace(&mut fx, &[("a.txt", "a\n")]).await;
+    let fork = Arc::clone(fx.main.head());
+    write_on(&mut fx, &c, &[content("api.txt", "api\n")]).await;
+    concurrent_rewrite(&fork, &c).await;
+    merge_heads(&mut fx).await;
+    write(&y_root, "late.txt", "late\n");
+    assert_diverges(&fx, &mut y, &c).await;
+
+    // (c) two workspaces on one change: x's snapshot is not y's to follow,
+    // with a merge beside it either.
+    let x_id = "00000000000000aa";
+    let mut fx = Fixture::new().await;
+    let base = fx.main.wc_change().unwrap().commit_id;
+    let (mut x, x_root, _) = fx
+        .create(&format!("reef-{x_id}"), StartPoint::NewOn(base.clone()))
+        .await;
+    let shared = x.wc_change().unwrap().commit_id;
+    let (mut y, y_root, _) = fx
+        .create(&format!("reef-{Y}"), StartPoint::Edit(shared.clone()))
+        .await;
+    write(&x_root, "from-x.txt", "x\n");
+    write(&y_root, "from-y.txt", "y\n");
+    let fork = Arc::clone(fx.main.head());
+    x.set_head(Arc::clone(&fork));
+    let pending = x
+        .begin_snapshot(Some(&shared), None, &IgnoreSources::default(), None)
+        .await
+        .unwrap();
+    let meta = OpMeta::new(OpKind::Snapshot, "reef: snapshot workspace x").workspace(x_id);
+    let x_snapshot = commit_snapshot(&fork, pending.plan(), &meta).await.unwrap();
+    pending.finish(&x_snapshot.op_id).await.unwrap();
+    concurrent_bookmark(&fork, &base).await;
+    merge_heads(&mut fx).await;
+    assert_diverges(&fx, &mut y, &shared).await;
+}
+
 // Issue #80: a carried snapshot whose check-out failed is merged again over
 // the disk tree it took, which gives its own commit back: it adopts with no
 // operation, also when the first merge conflicted.

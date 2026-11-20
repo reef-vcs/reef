@@ -480,9 +480,8 @@ message MovedDependent {
   bool conflicted = 4;
   // Why it was left where it was: `ancestor_of_successor` (the
   // superseding change descends from it), or `rebase_refused` (a divergent
-  // change among them, too many to move, or a commit that moved meanwhile:
-  // the supersede was recorded alone); empty when it
-  // moved.
+  // change among them, or too many to move: the supersede was recorded
+  // alone); empty when it moved.
   string skipped = 5;
 }
 

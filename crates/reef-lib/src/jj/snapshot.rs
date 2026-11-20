@@ -63,6 +63,7 @@ use jj_lib::merge::Merge;
 use jj_lib::merged_tree::MergedTree;
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store::{OpStoreError, OperationId};
+use jj_lib::operation::Operation;
 use jj_lib::ref_name::{WorkspaceName, WorkspaceNameBuf};
 use jj_lib::repo::{ReadonlyRepo, Repo as _, RewriteRootCommit};
 use jj_lib::repo_path::RepoPathBuf;
@@ -1337,78 +1338,205 @@ struct Followed {
 /// Whether Reef moved workspace `name`'s working-copy commit from `from`
 /// to the commit `repo`'s view has for it, so that edits made on `from`
 /// belong on that commit (ADR 0039, ADR 0084). Read from the operation
-/// log, newest first, back to the operation whose view has `from`: every
+/// log, newest first, back to an operation whose view has `from`: every
 /// operation on the way that moved the commit must be one Reef wrote, and
 /// must have kept the workspace on its change, or put it on a new empty
 /// change on it (a landing, ADR 0071). These moves are not Reef's, and
 /// give `None`, ADR 0018's divergence:
 ///
-/// - another jj client's operation, or a merge of operations;
+/// - another jj client's operation;
 /// - another workspace's snapshot of the same change (ADR 0018);
 /// - this workspace's own snapshot, other than `unfinished`'s (a crash
 ///   between its commit and its row), or `unfinished`'s under a later undo;
 /// - a move further back than [`FOLLOW_LIMIT`] operations, or than the
 ///   operations the store still has.
+///
+/// A merge of two operations moves nothing itself. The walk goes on at the
+/// side the merge took the commit from ([`Walk::through_merge`]).
 async fn followed(
     repo: &ReadonlyRepo,
     name: &WorkspaceName,
     from: &CommitId,
     unfinished: Option<&Unfinished>,
 ) -> Result<Option<Followed>, SnapshotError> {
-    let Some(mut now) = repo.view().get_wc_commit_id(name).cloned() else {
-        return Ok(None);
+    let walk = Walk {
+        repo,
+        name,
+        from,
+        unfinished,
     };
-    let mut op = repo.operation().clone();
-    let mut base = None;
-    let mut undone = false;
-    for _ in 0..FOLLOW_LIMIT {
-        if now == *from {
+    let mut left = FOLLOW_LIMIT;
+    let mut paths = vec![(repo.operation().clone(), Trail::default())];
+    while let Some((op, trail)) = paths.pop() {
+        if let Some(base) = walk.path(op, trail, &mut paths, &mut left).await? {
             return Ok(Some(Followed { base }));
         }
-        let [parent] = op.parent_ids() else {
-            return Ok(None);
-        };
-        let parent = match repo.loader().load_operation(parent).await {
-            Ok(parent) => parent,
-            Err(OpStoreError::ObjectNotFound { .. }) => return Ok(None),
-            Err(error) => return Err(error.into()),
-        };
-        let Some(was) = parent.view().await?.get_wc_commit_id(name).cloned() else {
-            return Ok(None);
-        };
-        if was != now {
-            let class = super::oplog::classify(&super::oplog::entry(&op));
-            let mover = class
-                .workspace_id
-                .map(|id| format!("{}{id}", super::workspace::REEF_WORKSPACE_PREFIX));
-            let reefs = match class.kind {
-                None | Some(OpKind::External) => false,
-                Some(OpKind::Snapshot) if mover.as_deref() == Some(name.as_str()) => {
-                    let unfinished = unfinished.filter(|own| {
-                        base.is_none() && !undone && own.commit.as_str() == now.hex()
-                    });
-                    if let Some(own) = unfinished {
-                        base = Some(own.disk.clone());
-                    }
-                    base.is_some()
-                }
-                Some(OpKind::Snapshot) => match mover {
-                    Some(mover) => !same_change(repo, &op, &mover, &now).await?,
-                    None => false,
-                },
-                Some(kind) => {
-                    undone |= kind == OpKind::Undo;
-                    true
-                }
-            };
-            if !reefs || !kept_change(repo, &was, &now).await? {
-                return Ok(None);
-            }
-        }
-        now = was;
-        op = parent;
     }
     Ok(None)
+}
+
+/// What one path of [`followed`]'s walk has crossed.
+#[derive(Clone, Debug, Default)]
+struct Trail {
+    /// The tree the workspace's [`Unfinished`] snapshot scanned, once the
+    /// path crossed that snapshot.
+    base: Option<ScannedTree>,
+    /// The path crossed an undo.
+    undone: bool,
+}
+
+/// [`followed`]'s question.
+struct Walk<'a> {
+    repo: &'a ReadonlyRepo,
+    name: &'a WorkspaceName,
+    from: &'a CommitId,
+    unfinished: Option<&'a Unfinished>,
+}
+
+/// An operation the store no longer has reads as `None`.
+fn kept<T>(read: Result<T, OpStoreError>) -> Result<Option<T>, OpStoreError> {
+    match read {
+        Ok(read) => Ok(Some(read)),
+        Err(OpStoreError::ObjectNotFound { .. }) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+impl Walk<'_> {
+    /// The workspace's working-copy commit after `op`.
+    async fn commit_at(&self, op: &Operation) -> Result<Option<CommitId>, SnapshotError> {
+        Ok(op.view().await?.get_wc_commit_id(self.name).cloned())
+    }
+
+    /// Walks back from `op` to an operation whose view has `from`, reading
+    /// at most `left` operations. `Some(base)` when every move on the way
+    /// was Reef's; `None` when one was not. A merge that either side
+    /// explains adds the second side to `paths`, to walk if this path
+    /// fails.
+    async fn path(
+        &self,
+        mut op: Operation,
+        mut trail: Trail,
+        paths: &mut Vec<(Operation, Trail)>,
+        left: &mut usize,
+    ) -> Result<Option<Option<ScannedTree>>, SnapshotError> {
+        let Some(mut now) = self.commit_at(&op).await? else {
+            return Ok(None);
+        };
+        loop {
+            if now == *self.from {
+                return Ok(Some(trail.base));
+            }
+            if *left == 0 {
+                return Ok(None);
+            }
+            *left -= 1;
+            let Some(parents) = kept(op.parents().await)? else {
+                return Ok(None);
+            };
+            let parent = match parents.as_slice() {
+                [parent] => parent.clone(),
+                [first, second] => {
+                    let Some(sides) = self.through_merge(&now, first, second).await? else {
+                        return Ok(None);
+                    };
+                    let (next, other) = sides;
+                    paths.extend(other.map(|other| (other, trail.clone())));
+                    op = next;
+                    continue;
+                }
+                _ => return Ok(None),
+            };
+            let Some(was) = self.commit_at(&parent).await? else {
+                return Ok(None);
+            };
+            if was != now && !self.reefs_move(&op, (&was, &now), &mut trail).await? {
+                return Ok(None);
+            }
+            now = was;
+            op = parent;
+        }
+    }
+
+    /// Where the walk goes on from a merge of `first` and `second` whose
+    /// view has `now` for the workspace. jj merges the working-copy commit
+    /// of each side over the one at the sides' common ancestor, so:
+    ///
+    /// - one side moved it and the merge took that side's: that side;
+    /// - neither side moved it: either side, the second if the first does
+    ///   not reach `from`;
+    /// - both sides moved it, the merge made a commit neither side has (it
+    ///   rebased the commit), or the sides have more than one closest
+    ///   common ancestor: `None`. So is a merge of more than two
+    ///   operations, at the caller.
+    ///
+    /// A side that moved the commit is walked like any other operations, so
+    /// another client's move on it still gives `None`.
+    async fn through_merge(
+        &self,
+        now: &CommitId,
+        first: &Operation,
+        second: &Operation,
+    ) -> Result<Option<(Operation, Option<Operation>)>, SnapshotError> {
+        let ancestors =
+            jj_lib::op_walk::closest_common_ancestors([first.clone()], [second.clone()]);
+        let Some(ancestors) = kept(ancestors.await)? else {
+            return Ok(None);
+        };
+        let [ancestor] = ancestors.as_slice() else {
+            return Ok(None);
+        };
+        let Some(view) = kept(ancestor.view().await)? else {
+            return Ok(None);
+        };
+        let before = view.get_wc_commit_id(self.name);
+        let now = Some(now);
+        let firsts = self.commit_at(first).await?;
+        let seconds = self.commit_at(second).await?;
+        let moved = (firsts.as_ref() != before, seconds.as_ref() != before);
+        Ok(match moved {
+            (false, false) if now == before => Some((first.clone(), Some(second.clone()))),
+            (true, false) if now == firsts.as_ref() => Some((first.clone(), None)),
+            (false, true) if now == seconds.as_ref() => Some((second.clone(), None)),
+            _ => None,
+        })
+    }
+
+    /// Whether `op`, which moved the workspace's commit from `was` to
+    /// `now`, is a move of Reef's that kept the workspace's edits in their
+    /// change.
+    async fn reefs_move(
+        &self,
+        op: &Operation,
+        (was, now): (&CommitId, &CommitId),
+        trail: &mut Trail,
+    ) -> Result<bool, SnapshotError> {
+        let class = super::oplog::classify(&super::oplog::entry(op));
+        let mover = class
+            .workspace_id
+            .map(|id| format!("{}{id}", super::workspace::REEF_WORKSPACE_PREFIX));
+        let reefs = match class.kind {
+            None | Some(OpKind::External) => false,
+            Some(OpKind::Snapshot) if mover.as_deref() == Some(self.name.as_str()) => {
+                let unfinished = self.unfinished.filter(|own| {
+                    trail.base.is_none() && !trail.undone && own.commit.as_str() == now.hex()
+                });
+                if let Some(own) = unfinished {
+                    trail.base = Some(own.disk.clone());
+                }
+                trail.base.is_some()
+            }
+            Some(OpKind::Snapshot) => match mover {
+                Some(mover) => !same_change(self.repo, op, &mover, now).await?,
+                None => false,
+            },
+            Some(kind) => {
+                trail.undone |= kind == OpKind::Undo;
+                true
+            }
+        };
+        Ok(reefs && kept_change(self.repo, was, now).await?)
+    }
 }
 
 /// Whether Reef moved workspace `workspace`'s working-copy commit from
@@ -1434,7 +1562,7 @@ pub async fn moved_by_reef(
 /// another change's.
 async fn same_change(
     repo: &ReadonlyRepo,
-    op: &jj_lib::operation::Operation,
+    op: &Operation,
     mover: &str,
     commit: &CommitId,
 ) -> Result<bool, SnapshotError> {
