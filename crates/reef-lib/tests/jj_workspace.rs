@@ -1688,6 +1688,47 @@ async fn two_stale_clients_below_a_wrong_clock_carry() {
     assert_carries(&fx, &mut y, (&c, &c2)).await;
 }
 
+/// `count` operations of another client on the head, one after the other,
+/// with the head's view, stamped `ahead_ms` after it and a millisecond
+/// apart; `main` is left at the last. Written straight to the operation
+/// store, to keep thousands cheap.
+async fn operations_stamped_ahead(fx: &mut Fixture, count: usize, ahead_ms: i64) {
+    let head = Arc::clone(fx.main.head());
+    let mut data = head.operation().store_operation().clone();
+    "another client's operation".clone_into(&mut data.metadata.description);
+    data.metadata.attributes.clear();
+    let stamp = data.metadata.time.end.timestamp.0 + ahead_ms;
+    let mut last = head.op_id().clone();
+    for at in (stamp..).take(count) {
+        data.parents = vec![last];
+        data.metadata.time.start.timestamp.0 = at;
+        data.metadata.time.end.timestamp.0 = at;
+        last = head.op_store().write_operation(&data).await.unwrap();
+    }
+    let heads = head.loader().op_heads_store();
+    let replaced = std::slice::from_ref(head.op_id());
+    heads.update_op_heads(replaced, &last).await.unwrap();
+    fx.main.reload_at_head().await.unwrap();
+}
+
+// Tenth R3.11 review, R10-1: a clock that ran an hour fast stamped more
+// operations than the walk read views of (4,096 at the time), and a client
+// loaded the head at the last of them, before this workspace's last
+// snapshot. Each of them is read with its view before the operation that
+// shows it is before the snapshot: they cost reads, and the carry is the
+// same as with a right clock.
+#[tokio::test]
+async fn a_stretch_stamped_ahead_below_a_stale_client_carries() {
+    let mut fx = Fixture::new().await;
+    let (mut y, y_root, _) = busy_workspace(&mut fx, &[("a.txt", "a\n")]).await;
+    operations_stamped_ahead(&mut fx, 4200, 3_600_000).await;
+    let stale = Arc::clone(fx.main.head());
+    operations_on(&mut fx, &stale, 3).await;
+
+    let (c, c2) = beside_a_stale_client(&mut fx, (&mut y, &y_root), &stale).await;
+    assert_carries(&fx, &mut y, (&c, &c2)).await;
+}
+
 // Review 9, R9-2: every operation is written in the same millisecond, so
 // that jj orders them by id. Each round has other ids.
 #[tokio::test]

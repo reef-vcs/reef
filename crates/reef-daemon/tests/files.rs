@@ -2616,6 +2616,53 @@ async fn a_write_carries_beside_a_client_that_loaded_an_operation_stamped_ahead(
     daemon.stop().await;
 }
 
+/// `count` operations of another jj client on the registered root's head,
+/// one after the other, with the head's view, stamped `ahead_ms` after it
+/// and a millisecond apart. Written straight to the operation store, to
+/// keep thousands cheap.
+async fn operations_stamped_ahead(repo: &SyntheticRepo, count: usize, ahead_ms: i64) {
+    let root = repo.root.clone();
+    let write = move || {
+        use jj_lib::repo::Repo as _;
+        let head = other_clients_head(&root, &test_settings());
+        let mut data = head.operation().store_operation().clone();
+        "another client's operation".clone_into(&mut data.metadata.description);
+        data.metadata.attributes.clear();
+        let stamp = data.metadata.time.end.timestamp.0 + ahead_ms;
+        let mut last = head.op_id().clone();
+        for at in (stamp..).take(count) {
+            data.parents = vec![last];
+            data.metadata.time.start.timestamp.0 = at;
+            data.metadata.time.end.timestamp.0 = at;
+            last = pollster::block_on(head.op_store().write_operation(&data)).unwrap();
+        }
+        let heads = head.loader().op_heads_store();
+        let replaced = std::slice::from_ref(head.op_id());
+        pollster::block_on(heads.update_op_heads(replaced, &last)).unwrap();
+    };
+    tokio::task::spawn_blocking(write).await.unwrap();
+}
+
+// Tenth R3.11 review, R10-1: a clock that ran an hour fast stamped more
+// operations than the follow read views of (4,096 at the time), and
+// another jj client loaded the head at the last of them, before the
+// workspace's last snapshot. One commit, as with a right clock.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_write_carries_beside_a_client_that_loaded_a_stretch_stamped_ahead() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let w = create(client, &repo, "w@test", None).await;
+    write(&w, "one.txt", "one\n");
+    snapshot(client, &repo, &w).await;
+    operations_stamped_ahead(&repo, 4200, 3_600_000).await;
+    let other = OtherClient::load(&repo.root, "other-client");
+    write(&w, "two.txt", "two\n");
+    snapshot(client, &repo, &w).await;
+
+    write_carries_beside(&daemon, &repo, &w, other).await;
+    daemon.stop().await;
+}
+
 // ADR 0084: a restart between Reef's move of a workspace and the
 // workspace's follow costs nothing. X's snapshot rebases Y's commit, and
 // Y's follow fails before it scans; the daemon restarts; Y's next snapshot

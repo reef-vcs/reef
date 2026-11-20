@@ -1327,12 +1327,6 @@ async fn carried_tree(
 /// The most operations since a commit that [`followed`] judges.
 const FOLLOW_LIMIT: usize = 1024;
 
-/// The most views [`followed`] reads to find the operations since a commit.
-/// It reads the views of those operations and of one before them on each
-/// line of the log. Only clocks that were wrong make it read more: views of
-/// operations it then finds are before the commit.
-const VIEW_LIMIT: usize = 4 * FOLLOW_LIMIT;
-
 /// What [`followed`] found.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Followed {
@@ -1553,8 +1547,8 @@ impl Log {
     /// its history, in an order the graph alone decides. `head` is the one
     /// that is in no other's history: each of the others is a parent of
     /// one of them, since a parent of an operation before `from` is before
-    /// it too.
-    fn since_in_order(&self, head: &OperationId) -> Vec<&Operation> {
+    /// it too. `None` if one is left out all the same.
+    fn since_in_order(&self, head: &OperationId) -> Option<Vec<&Operation>> {
         let since: HashSet<&OperationId> = self.since().collect();
         let parents = |id: &OperationId| {
             let parents = self.ops[id].parent_ids().iter();
@@ -1576,8 +1570,7 @@ impl Log {
                 }
             }
         }
-        debug_assert_eq!(ordered.len(), since.len(), "one is in no other's history");
-        ordered
+        (ordered.len() == since.len()).then_some(ordered)
     }
 }
 
@@ -1592,8 +1585,9 @@ impl Walk<'_> {
     /// said when the operations were written does not change it. `None`
     /// when the workspace was added or forgotten since, and when the
     /// operations since `from` cannot be judged: there are more than
-    /// [`FOLLOW_LIMIT`] of them, or the log could not be read back far
-    /// enough to know them ([`Walk::read_back`]).
+    /// [`FOLLOW_LIMIT`] of them, the log could not be read back far enough
+    /// to know them ([`Walk::read_back`]), or they could not all be put in
+    /// order ([`Log::since_in_order`]).
     async fn moves(&self) -> Result<Option<Vec<Move>>, SnapshotError> {
         let mut commits = Commits {
             name: self.name,
@@ -1605,8 +1599,11 @@ impl Walk<'_> {
         if log.since().count() > FOLLOW_LIMIT {
             return Ok(None);
         }
+        let Some(since) = log.since_in_order(self.repo.op_id()) else {
+            return Ok(None);
+        };
         let mut moves = Vec::new();
-        for op in log.since_in_order(self.repo.op_id()) {
+        for op in since {
             // A merge of heads is no move: `followed` checks that the
             // moves lead to the commit it kept.
             let [parent] = op.parent_ids() else {
@@ -1632,16 +1629,18 @@ impl Walk<'_> {
     /// since `from` are known ([`Log::since`], once [`Log::settled`]): the
     /// operations before `from` are read as far as that takes, without
     /// their views. `None` when it cannot be known: the store no longer
-    /// has an operation it takes, or it takes more than [`VIEW_LIMIT`]
-    /// views.
+    /// has an operation it takes.
     ///
     /// The order of the reads changes what they cost, and not what they
-    /// find. The operation with the latest end time is read next, as jj
+    /// find, so nothing bounds them: a bound would make the answer depend
+    /// on the order. The operation with the latest end time is read next, as jj
     /// orders the log (`jj_lib::op_walk`): with right clocks, that reads an
     /// operation before `from` after the one that shows it is. A clock
     /// that was wrong can keep an operation since `from` waiting behind
     /// every operation before `from`, so after 1, 2, 4 and so on of those
-    /// in a row, the latest of the others is read.
+    /// in a row, the latest of the others is read. It can also put
+    /// operations before `from` ahead of the one that shows they are, and
+    /// each of those is then read with its view.
     async fn read_back(&self, commits: &mut Commits<'_>) -> Result<Option<Log>, SnapshotError> {
         let mut log = Log::default();
         let head = self.repo.operation();
@@ -1684,9 +1683,6 @@ impl Walk<'_> {
             log.read.insert(id.clone());
             if log.before.contains(&id) || commits.at(&op).await?.as_ref() == Some(self.from) {
                 log.is_before(&id);
-            }
-            if commits.read.len() > VIEW_LIMIT {
-                return Ok(None);
             }
         };
         Ok(settled.then_some(log))
