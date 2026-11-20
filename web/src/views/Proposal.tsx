@@ -475,7 +475,7 @@ export function Proposal({
 
   function onAccept() {
     run("accept", "requesting", (onStep) =>
-      accept(connection, { repo: repoId, ...pinned }, onStep),
+      accept(connection, { repo: repoId, changeId: entry.changeId, ...pinned }, onStep),
     );
   }
 

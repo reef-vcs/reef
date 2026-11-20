@@ -1015,6 +1015,7 @@ async fn evaluate_stack(
         agent,
         remote: None,
         automatic_key: None,
+        needs_touch: false,
     };
     let policy = (!request.policy.is_empty()).then(|| request.policy.clone());
     let decided = crate::landing::judge_stack(state, &land, &destination, policy)

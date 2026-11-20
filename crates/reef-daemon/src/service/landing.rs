@@ -92,6 +92,7 @@ impl LandingService for LandingHandler {
                 agent: agent.clone(),
                 remote,
                 automatic_key: None,
+                needs_touch: web,
             },
         )
         .await

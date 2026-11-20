@@ -12,7 +12,7 @@ import {
   type ProposalEntry,
   type TransitionChangeRequest,
 } from "../gen/reef/api/v1/changes_pb";
-import { CommentKind, InstructionState } from "../gen/reef/api/v1/comment_event_pb";
+import { CommentKind, HelpState, InstructionState } from "../gen/reef/api/v1/comment_event_pb";
 import {
   CommentSchema,
   CommentService,
@@ -157,6 +157,11 @@ export class ProposalDaemon extends IdentityDaemon {
         createComment: (request) => {
           if (this.failures.createComment) throw this.failures.createComment;
           this.written.push(request);
+          // A reply to a help request answered meanwhile waits for its
+          // Confirm, as the daemon writes it through the web.
+          const late = this.comments.some(
+            (c) => c.id === request.replyTo && c.help && c.help.state !== HelpState.OPEN,
+          );
           const comment = create(CommentSchema, {
             id: `cmt_${String(this.written.length).padStart(16, "0")}`,
             changeId: CHANGE,
@@ -166,7 +171,7 @@ export class ProposalDaemon extends IdentityDaemon {
             author: { identity: "arsood", web: { session: "0123456789abcdef" } },
             createdAt: timestampNow(),
             ...(request.anchor ? { anchor: request.anchor } : {}),
-            ...(request.kind === CommentKind.INSTRUCTION && !request.replyTo
+            ...(request.kind === CommentKind.INSTRUCTION && (!request.replyTo || late)
               ? {
                   instruction: {
                     state: InstructionState.AWAITING_CONFIRMATION,

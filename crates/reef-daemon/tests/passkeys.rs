@@ -2,7 +2,8 @@
 //! 9): registration from the web UI and its refusals, approvals requested
 //! on the socket and approved with a passkey's assertion through the web
 //! UI, the one-sign-off rules of `AddEvidence`, policy counting only pinned
-//! passkeys at a landing, and a reset. Ceremonies use
+//! passkeys at a landing, a reset, and the touch a web landing needs
+//! (R3.31). Ceremonies use
 //! `reef_evidence::webauthn::testing::Authenticator`, which writes the
 //! bytes a browser and a platform authenticator would.
 
@@ -22,14 +23,15 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
 use reef_api::v1::evidence_service_client::EvidenceServiceClient;
 use reef_api::v1::identity_service_client::IdentityServiceClient;
+use reef_api::v1::landing_service_client::LandingServiceClient;
 use reef_api::v1::{
     self, AddEvidenceRequest, ApprovalState, CreateIdentityRequest, CreateWebSessionResponse,
     EditFilesRequest, EvaluatePolicyRequest, FileEdit, GetApprovalRequest, GetChangeRequest,
     IdentityKind as Kind, LandChangeRequest, LandingOutcome, LandingReason, LifecycleState,
     ListPasskeysRequest, PasskeyAssertion, RegisterPasskeyRequest, RemoteScope,
     RemovePasskeyRequest, RequestApprovalRequest, ResetPasskeysRequest, ResolveApprovalRequest,
-    SessionPresence, StartPasskeyRegistrationRequest, TransitionChangeRequest, edit_files_request,
-    file_edit, resolve_approval_request,
+    SessionPresence, StartPasskeyRegistrationRequest, TransitionActor, TransitionChangeRequest,
+    edit_files_request, file_edit, resolve_approval_request,
 };
 use reef_daemon::client::remote::{RemoteTarget, RemoteUrl, Token};
 use reef_daemon::client::{Client, ClientError};
@@ -137,6 +139,11 @@ impl Ui {
     fn evidence(&self) -> EvidenceServiceClient<Web> {
         let (service, origin) = self.service();
         EvidenceServiceClient::with_origin(service, origin)
+    }
+
+    fn landing(&self) -> LandingServiceClient<Web> {
+        let (service, origin) = self.service();
+        LandingServiceClient::with_origin(service, origin)
     }
 }
 
@@ -2011,5 +2018,249 @@ async fn web_evidence_records_no_page_agent() {
         added.added_by_agent, "",
         "a reef-agent a page sends is not recorded"
     );
+    daemon.stop().await;
+}
+
+/// `change` proposed by an agent over the socket.
+async fn propose(client: &Client, repo: &str, change: &v1::Change) {
+    client
+        .transition_change(TransitionChangeRequest {
+            repo: repo.to_owned(),
+            revision: change.commit_id.clone(),
+            to: LifecycleState::Proposed.into(),
+            actor: TransitionActor::Agent.into(),
+            ..TransitionChangeRequest::default()
+        })
+        .await
+        .unwrap();
+}
+
+/// Accept's sign-off of `change`: approved with `authenticator` through
+/// `ui` and added through it, as the proposal page does.
+async fn accept_signoff(
+    client: &Client,
+    ui: &Ui,
+    repo: &str,
+    change: &v1::Change,
+    authenticator: &mut Authenticator,
+) {
+    let (key, statement, _) = signed_off(client, ui, repo, "alice", change, authenticator).await;
+    ui.evidence()
+        .add_evidence(add_request(
+            repo,
+            &change.commit_id,
+            sign(&statement, &key),
+            &key,
+        ))
+        .await
+        .unwrap();
+}
+
+/// Accept's landing request: the change by its id, at the commit the page
+/// showed.
+fn web_land(repo: &str, change: &v1::Change) -> LandChangeRequest {
+    LandChangeRequest {
+        repo: repo.to_owned(),
+        revision: change.change_id.clone(),
+        expected_commit_id: change.commit_id.clone(),
+        actor: TransitionActor::Human.into(),
+        skip_snapshot: true,
+        wait_ms: 60_000,
+        ..LandChangeRequest::default()
+    }
+}
+
+/// Asserts that `status` is the web landing's refusal for `change`, with a
+/// command that signs it off.
+fn assert_needs_touch(status: &Status, change: &v1::Change) {
+    let (code, reason, metadata) = refusal(status);
+    assert_eq!(
+        (code, reason.as_str()),
+        (Code::FailedPrecondition, "VERIFIED_SIGNOFF_REQUIRED"),
+        "{status:?}"
+    );
+    assert_eq!(metadata["tree_id"], change.tree_id);
+    assert_eq!(metadata["commit_id"], change.commit_id);
+    assert_eq!(metadata["change_id"], change.change_id);
+    let next = reef_daemon::error::detail_of(status).unwrap().next;
+    assert_eq!(next.first().map(String::as_str), Some("reef"));
+    assert!(next.contains(&"--verified".to_owned()), "{next:?}");
+}
+
+/// Rewrites `commit` with another file, as the agent amending it does.
+async fn amend(client: &Client, repo: &str, commit: &str) -> v1::Change {
+    client
+        .edit_files(EditFilesRequest {
+            repo: repo.to_owned(),
+            target: Some(edit_files_request::Target::Revision(commit.to_owned())),
+            edits: vec![FileEdit {
+                path: "amended.txt".to_owned(),
+                action: Some(file_edit::Action::Content(b"more\n".to_vec())),
+                executable: None,
+            }],
+            ..EditFilesRequest::default()
+        })
+        .await
+        .unwrap()
+        .change
+        .unwrap()
+}
+
+/// `main`'s policy: nothing but a proposal, no sign-off.
+const NO_SIGNOFF: &str = r#"
+version = 1
+
+[owners]
+identities = ["alice"]
+
+[landing]
+checks = "proposal"
+"#;
+
+// R3.31 (ADR 0086 decision 2): through the web UI a landing needs a person's
+// touch, under a policy that asks for none. The page's `LandChange` is refused until a
+// passkey-verified sign-off is on the tree of the commit it asks for: a
+// declared `human` sign-off does not count, nor a touch on the change below
+// it, nor one on the tree before an amend. Accept's touch on the head of a
+// stack lands the members below it. The socket and the remote listener
+// land without one.
+#[tokio::test(flavor = "multi_thread")]
+#[expect(clippy::too_many_lines, reason = "one scenario, in order")]
+async fn a_web_landing_needs_a_touch() {
+    let (daemon, repo) = fixture_with(remote_on).await;
+    let client = &daemon.client;
+    create_identity(client, "alice").await;
+    let page = ui(client).await;
+    let mut passkey = Authenticator::new(Algorithm::EdDsa);
+    register(&page, &mut passkey, "alice", None).await.unwrap();
+    let main = commit_on(
+        client,
+        &repo.id,
+        "root()",
+        &[("reef-policy.toml", NO_SIGNOFF)],
+    )
+    .await;
+    set_main(&repo, &main.commit_id).await;
+    let bottom = commit_on(client, &repo.id, &main.commit_id, &[("a.txt", "a\n")]).await;
+    let head = commit_on(client, &repo.id, &bottom.commit_id, &[("b.txt", "b\n")]).await;
+    propose(client, &repo.id, &bottom).await;
+    propose(client, &repo.id, &head).await;
+
+    let refused = page
+        .landing()
+        .land_change(web_land(&repo.id, &head))
+        .await
+        .unwrap_err();
+    assert_needs_touch(&refused, &head);
+
+    // A declared `human` sign-off, which any process of the uid can make.
+    let declared = client
+        .issue_session_key("alice", Actor::Human, None, "")
+        .await
+        .unwrap()
+        .signing_key;
+    client
+        .add_evidence(add_request(
+            &repo.id,
+            &head.commit_id,
+            sign(&payload(&signoff(None), &head.tree_id), &declared),
+            &declared,
+        ))
+        .await
+        .unwrap();
+    let refused = page
+        .landing()
+        .land_change(web_land(&repo.id, &head))
+        .await
+        .unwrap_err();
+    assert_needs_touch(&refused, &head);
+
+    // A touch on the member below does not cover the head's tree.
+    accept_signoff(client, &page, &repo.id, &bottom, &mut passkey).await;
+    let refused = page
+        .landing()
+        .land_change(web_land(&repo.id, &head))
+        .await
+        .unwrap_err();
+    assert_needs_touch(&refused, &head);
+
+    // Accept's touch on the head lands the stack.
+    accept_signoff(client, &page, &repo.id, &head, &mut passkey).await;
+    let response = page
+        .landing()
+        .land_change(web_land(&repo.id, &head))
+        .await
+        .unwrap()
+        .into_inner();
+    let landing = response.landing.unwrap();
+    assert_eq!(landing.outcome(), LandingOutcome::Landed, "{landing:#?}");
+    assert_eq!(landing.web.unwrap().session.len(), 16);
+    let below: Vec<_> = response
+        .stack
+        .iter()
+        .map(|member| (member.changes[0].change_id.as_str(), member.outcome()))
+        .collect();
+    assert_eq!(
+        below,
+        [(bottom.change_id.as_str(), LandingOutcome::Landed)],
+        "{:#?}",
+        response.stack
+    );
+
+    // The agent amends after the touch: the sign-off is on the old tree.
+    let shown = commit_on(client, &repo.id, "main", &[("c.txt", "c\n")]).await;
+    propose(client, &repo.id, &shown).await;
+    accept_signoff(client, &page, &repo.id, &shown, &mut passkey).await;
+    let amended = amend(client, &repo.id, &shown.commit_id).await;
+    assert_ne!(amended.tree_id, shown.tree_id);
+    // The page's request at the commit it showed names both commits.
+    let stale = page
+        .landing()
+        .land_change(web_land(&repo.id, &shown))
+        .await
+        .unwrap_err();
+    assert_eq!(reason(&stale), "EXPECTED_COMMIT_MISMATCH", "{stale:?}");
+    assert!(
+        stale.message().contains(&amended.commit_id) && stale.message().contains(&shown.commit_id),
+        "{stale:?}"
+    );
+    propose(client, &repo.id, &amended).await;
+    let refused = page
+        .landing()
+        .land_change(web_land(&repo.id, &amended))
+        .await
+        .unwrap_err();
+    assert_needs_touch(&refused, &amended);
+
+    // The socket lands it without a touch, as before R3.31.
+    let landed = client
+        .land_change(LandChangeRequest {
+            repo: repo.id.clone(),
+            revision: amended.commit_id.clone(),
+            wait_ms: 60_000,
+            ..LandChangeRequest::default()
+        })
+        .await
+        .unwrap()
+        .landing
+        .unwrap();
+    assert_eq!(landed.outcome(), LandingOutcome::Landed, "{landed:#?}");
+
+    // So does the remote listener.
+    let remote = remote_client(&daemon, "alice").await;
+    let last = commit_on(client, &repo.id, "main", &[("d.txt", "d\n")]).await;
+    propose(client, &repo.id, &last).await;
+    let landed = remote
+        .land_change(LandChangeRequest {
+            repo: repo.id.clone(),
+            revision: last.commit_id.clone(),
+            wait_ms: 60_000,
+            ..LandChangeRequest::default()
+        })
+        .await
+        .unwrap()
+        .landing
+        .unwrap();
+    assert_eq!(landed.outcome(), LandingOutcome::Landed, "{landed:#?}");
     daemon.stop().await;
 }

@@ -6,6 +6,7 @@
 // tab's list held in place.
 import { create } from "@bufbuild/protobuf";
 import { timestampFromMs } from "@bufbuild/protobuf/wkt";
+import { Code } from "@connectrpc/connect";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   AutomaticState,
@@ -29,12 +30,13 @@ import {
 } from "../gen/reef/api/v1/policy_pb";
 import { OperationStore } from "../live/operations";
 import type { Live } from "../live/share";
-import { immediateFrames, operation, operationsFrame, settle } from "../test/fakes";
+import { daemonError, immediateFrames, operation, operationsFrame, settle } from "../test/fakes";
 import { passkey } from "../test/identity-daemon";
 import { CHANGE, COMMIT, proposal, ProposalDaemon, REPO, TREE } from "../test/proposal-daemon";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "../test/testing-library";
 import { installAuthenticator, removeAuthenticator } from "../test/webauthn";
 import { Proposal } from "./Proposal";
+import { MOVED_AFTER_SIGNING } from "./proposal-actions";
 import { POLL_MS } from "./proposal-model";
 import { Proposals } from "./Proposals";
 
@@ -224,10 +226,26 @@ describe("the proposal page", () => {
     expect(statement.subject[0]?.digest.gitTree).toBe(TREE);
     expect(daemon.added).toHaveLength(1);
     expect(daemon.landed[0]).toMatchObject({
-      revision: COMMIT,
+      revision: reverseHex(CHANGE),
       expectedCommitId: COMMIT,
       actor: TransitionActor.HUMAN,
     });
+  });
+
+  it("says so when the agent amends between the sign-off and the landing", async () => {
+    installAuthenticator();
+    const daemon = daemonWithDiff();
+    daemon.failures.landChange = daemonError(Code.FailedPrecondition, {
+      reason: "EXPECTED_COMMIT_MISMATCH",
+    });
+    await open(daemon);
+    await act(() => {
+      button("Accept").click();
+    });
+    await waitFor(() => {
+      expect(screen.queryByText(MOVED_AFTER_SIGNING)).not.toBeNull();
+    });
+    expect(daemon.added).toHaveLength(1);
   });
 
   it("explains Accept without a passkey, and still declines and comments", async () => {
@@ -335,6 +353,32 @@ describe("the proposal page", () => {
     });
     expect(screen.getByRole("status").textContent).toBe(
       "Answer sent: the agent gets it as its next instruction.",
+    );
+  });
+
+  it("says a late reply waits for its Confirm when someone answered first", async () => {
+    installAuthenticator();
+    const daemon = daemonWithDiff();
+    const question = create(CommentSchema, {
+      id: "cmt_00000000000000h1",
+      changeId: CHANGE,
+      kind: CommentKind.HELP_REQUEST,
+      author: { agent: "claude@mac" },
+      help: { state: HelpState.OPEN, question: "Keep the old parser?" },
+    });
+    daemon.comments = [question];
+    await open(daemon);
+    // Answered elsewhere after the page read it.
+    if (question.help) question.help.state = HelpState.ANSWERED;
+    fireEvent.input(screen.getByRole("textbox", { name: "Your answer" }), {
+      target: { value: "Yes, keep it." },
+    });
+    await act(() => {
+      button("Answer").click();
+    });
+    await flush();
+    expect(screen.getByRole("status").textContent).toBe(
+      "This question was already answered: your reply waits for your Confirm below.",
     );
   });
 

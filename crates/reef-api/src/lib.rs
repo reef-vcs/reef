@@ -865,6 +865,11 @@ pub mod error {
     /// withdrawn at its current commit (R3.11). Metadata: `change_id`,
     /// `state`, `transition_id`.
     pub const DEPENDENCY_LEFT_REVIEW: &str = "DEPENDENCY_LEFT_REVIEW";
+    /// `LandChange` through the web UI of a commit whose tree has no
+    /// `signoff`/`pass` by a person's passkey-verified key (R3.31, ADR
+    /// 0086). Metadata: `change_id`, `commit_id`, `tree_id` (empty for a
+    /// conflicted tree).
+    pub const VERIFIED_SIGNOFF_REQUIRED: &str = "VERIFIED_SIGNOFF_REQUIRED";
     /// `GetLanding` naming no landing, or a change with none (R3.13).
     /// Metadata: `id` or `change_id`.
     pub const LANDING_NOT_FOUND: &str = "LANDING_NOT_FOUND";

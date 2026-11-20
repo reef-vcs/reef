@@ -191,8 +191,9 @@ async fn proposals(daemon: &TestDaemon, repo: &SyntheticRepo, count: usize) -> V
     proposed
 }
 
-// A page declines only, at the commit it showed; the decline, a comment, an
-// instruction's confirm and a landing each record the page's session.
+// A page declines only, at the commit it showed; the decline, a comment and
+// an instruction's confirm each record the page's session; a landing from
+// the page needs a person's touch.
 #[tokio::test(flavor = "multi_thread")]
 #[expect(clippy::too_many_lines, reason = "one scenario, in the page's order")]
 async fn web_decline_and_comment_audited() {
@@ -369,22 +370,29 @@ async fn web_decline_and_comment_audited() {
         .unwrap();
     assert_eq!(socket_note.comment.unwrap().author.unwrap().web, None);
 
-    // A landing asked for from the page.
-    let landing = page
-        .landing()
-        .land_change(v1::LandChangeRequest {
-            repo: repo.id.clone(),
-            revision: landed.commit_id.clone(),
-            expected_commit_id: landed.commit_id.clone(),
-            actor: TransitionActor::Human.into(),
-            ..v1::LandChangeRequest::default()
-        })
+    // A landing asked for from the page needs a person's touch on the
+    // tree, even with no policy (`passkeys::a_web_landing_needs_a_touch`
+    // lands one with Accept's sign-off); the socket's needs none.
+    let land = v1::LandChangeRequest {
+        repo: repo.id.clone(),
+        revision: landed.change_id.clone(),
+        expected_commit_id: landed.commit_id.clone(),
+        actor: TransitionActor::Human.into(),
+        ..v1::LandChangeRequest::default()
+    };
+    let untouched = page.landing().land_change(land.clone()).await.unwrap_err();
+    assert_eq!(
+        reason(&untouched),
+        "VERIFIED_SIGNOFF_REQUIRED",
+        "{untouched:?}"
+    );
+    let landing = client
+        .land_change(land)
         .await
         .unwrap()
-        .into_inner()
         .landing
-        .expect("no policy: the landing runs");
-    assert_eq!(landing.web.as_ref(), Some(&session));
+        .expect("the socket's request is judged");
+    assert_eq!(landing.web, None);
 }
 
 /// Rewrites `change`'s commit with another file, as the agent amending it

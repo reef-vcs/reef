@@ -85,8 +85,11 @@ service LandingService {
   // a member below the revision declined or withdrawn at its current
   // commit, R3.11), PROPOSAL_AMENDED (metadata `change_id`, `commit_id`,
   // `visible_commit_id`; a dependent whose own diff is unchanged is carried
-  // first, R3.11), STACK_DESTINATION_MISMATCH (metadata `change_id`,
-  // `destination`), STACK_TOO_LARGE (metadata `size`, `max`),
+  // first, R3.11), VERIFIED_SIGNOFF_REQUIRED (metadata `change_id`,
+  // `commit_id`, `tree_id`; through the web UI only, R3.31: no
+  // `signoff`/`pass` by a person's passkey-verified key is on the tree of
+  // the commit asked for), STACK_DESTINATION_MISMATCH (metadata
+  // `change_id`, `destination`), STACK_TOO_LARGE (metadata `size`, `max`),
   // DESTINATION_NOT_LOCAL, DESTINATION_NOT_FOUND or DESTINATION_CONFLICTED
   // (metadata `destination`); UNAVAILABLE with reason QUEUE_FULL (metadata
   // `max`); INVALID_ARGUMENT with reason INVALID_WAIT (metadata `max`); a

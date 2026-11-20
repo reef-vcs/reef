@@ -14,6 +14,7 @@ import {
 import { NO_SUPPORT, type Failure } from "../sign/passkey";
 import { signOff, type SignOffStep, type SignOffTarget } from "../sign/signoff";
 import { lifecycleState } from "../state/states";
+import { reverseHex } from "../ui/ids";
 import { automaticWords } from "./proposal-words";
 
 export type ActionName = "accept" | "decline" | "comment";
@@ -127,14 +128,27 @@ export function landingWords(response: LandChangeResponse): string {
   }
 }
 
+/** What Accept signs and lands: the tree shown, of the change's commit shown. */
+export interface AcceptTarget extends SignOffTarget {
+  changeId: string;
+}
+
+const EXPECTED_COMMIT_MISMATCH = "EXPECTED_COMMIT_MISMATCH";
+
+export const MOVED_AFTER_SIGNING =
+  "Signed off, but the agent changed the proposal before it could land: review the new version to accept it.";
+
 /**
  * Accept: signs off the tree the person reviewed with one passkey touch,
  * then asks to land that commit, which lands the stack below it too (R3.10).
- * With automatic landing the request returns the landing the service opened.
+ * Through the web UI the daemon lands only a tree a person's passkey signed
+ * off (ADR 0086). The change is named by its id with the commit shown, so
+ * an amend after the read refuses the landing as a mismatch. With automatic
+ * landing the request returns the landing the service opened.
  */
 export async function accept(
   connection: Connection,
-  target: SignOffTarget,
+  target: AcceptTarget,
   onStep: (step: Step) => void,
 ): Promise<string> {
   await signOff(connection, target, onStep);
@@ -142,7 +156,7 @@ export async function accept(
   try {
     const response = await client(connection, LandingService).landChange({
       repo: target.repo,
-      revision: target.commitId,
+      revision: reverseHex(target.changeId),
       expectedCommitId: target.commitId,
       actor: TransitionActor.HUMAN,
       skipSnapshot: true,
@@ -152,6 +166,7 @@ export async function accept(
     // The sign-off stands; only the request to land failed.
     const error = reefError(thrown);
     if (isSessionInvalid(error)) throw thrown;
+    if (error.reason === EXPECTED_COMMIT_MISMATCH) return MOVED_AFTER_SIGNING;
     return `Signed off, but the request to land failed: ${error.message}${error.hint ? ` ${error.hint}` : ""}`;
   }
 }
