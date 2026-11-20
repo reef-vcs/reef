@@ -3,6 +3,7 @@
 - Status: accepted
 - Date: 2026-11-19
 - Ticket: R3.11 ([brief](../dev-tickets/phase-3/R3.11-dependent-change-lifecycle.md)); fixes [#91](https://github.com/reef-vcs/reef/issues/91) and [#202](https://github.com/reef-vcs/reef/issues/202)
+- Amended by: [0087](0087-adopting-only-what-came-from-the-last-snapshot.md) (the walk's second condition also decides ADR 0018's adopt arm, for every clean, stale snapshot, with no operation limit)
 
 ## Context
 

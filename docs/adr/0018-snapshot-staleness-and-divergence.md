@@ -3,7 +3,7 @@
 - Status: accepted
 - Date: 2026-10-17
 - Ticket: R1.13
-- Amended by: [0039](0039-carrying-edits-through-a-write.md)
+- Amended by: [0039](0039-carrying-edits-through-a-write.md), [0087](0087-adopting-only-what-came-from-the-last-snapshot.md) (decision 3: a clean workspace adopts only a commit that came from its last snapshot)
 
 ## Context
 
