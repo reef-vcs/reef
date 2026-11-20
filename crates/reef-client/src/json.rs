@@ -2390,6 +2390,9 @@ pub struct ChangeTransition {
     /// what happened to it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dependency: Option<Box<TransitionDependency>>,
+    /// The web UI session the call came through (R3.31).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub web_session: Option<String>,
 }
 
 /// The change below a carried proposal (R3.11).
@@ -2529,6 +2532,7 @@ impl From<&v1::ChangeTransition> for ChangeTransition {
                 token_id: remote.token_id.clone(),
                 token_name: remote.token_name.clone(),
             }),
+            web_session: web_caller(transition.web.as_ref()),
             dependency: transition.dependency.as_deref().map(|dependency| {
                 Box::new(TransitionDependency {
                     change_id: dependency.change_id.clone(),
@@ -2872,6 +2876,10 @@ pub struct Operation {
     /// over the socket.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote: Option<RemoteCaller>,
+    /// The web UI session whose call caused it (R3.31); absent for any
+    /// other call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub web_session: Option<String>,
     /// The lifecycle transitions it recorded (R3.09); absent for none.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub transitions: Vec<ChangeTransition>,
@@ -2971,6 +2979,7 @@ impl From<&v1::Operation> for Operation {
                 token_id: remote.token_id.clone(),
                 token_name: remote.token_name.clone(),
             }),
+            web_session: web_caller(op.web.as_ref()),
             transitions: op.transitions.iter().map(ChangeTransition::from).collect(),
             comments: op.comments.iter().map(CommentEvent::from).collect(),
         }
@@ -5526,7 +5535,7 @@ impl From<&v1::SessionKey> for SessionKey {
 }
 
 /// A web UI session's id, if any (R3.43).
-fn web_caller(caller: Option<&v1::WebCaller>) -> Option<String> {
+pub fn web_caller(caller: Option<&v1::WebCaller>) -> Option<String> {
     caller.and_then(|caller| text(&caller.session))
 }
 

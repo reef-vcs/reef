@@ -36,7 +36,7 @@ use reef_lib::jj::lifecycle::{
     self as jj_lifecycle, DependencyEvent, LifecycleState, TransitionCause, TransitionRecord,
 };
 use reef_lib::jj::log::{ChangeInfo, Describer};
-use reef_lib::jj::oplog::{self, OpMeta, RemoteToken};
+use reef_lib::jj::oplog::{self, OpMeta};
 use reef_lib::jj::revset::{self, RevisionError, RevsetScope};
 use reef_lib::jj::rewrite::{self, RewriteError};
 use reef_lib::jj::undo::UndoError;
@@ -836,7 +836,7 @@ pub struct TransitionRequest {
     /// The declared actor, if any.
     pub actor: Option<Actor>,
     /// The call's agent, marked with its remote token
-    /// ([`RemoteToken::mark`]).
+    /// ([`oplog::RemoteToken::mark`]) or web UI session ([`oplog::mark_web`]).
     pub agent: Option<String>,
     /// The remote token, `(id, name)`.
     pub remote: Option<(String, String)>,
@@ -1337,13 +1337,7 @@ fn plan_member(
     } else {
         current.map_or(0, |row| row.round)
     };
-    let (agent, remote_name) = match request.agent.as_deref() {
-        Some(marked) => {
-            let (agent, token) = RemoteToken::unmark(marked);
-            (Some(agent.to_owned()), token.map(|token| token.name))
-        }
-        None => (None, None),
-    };
+    let (agent, remote_name, web_session) = caller_parts(request.agent.as_deref());
     let actor = if request.remote.is_some() {
         Actor::Agent
     } else {
@@ -1389,7 +1383,24 @@ fn plan_member(
         recorded_at: None,
         dependency_change_id: None,
         dependency_event: None,
+        web_session,
     }))
+}
+
+/// The parts of a call's marked agent (`oplog::unmark`) a row records: the
+/// agent, the remote token's name, and the web UI session.
+pub(crate) fn caller_parts(
+    marked: Option<&str>,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let Some(marked) = marked else {
+        return (None, None, None);
+    };
+    let oplog::Marked { agent, remote, web } = oplog::unmark(marked);
+    (
+        agent.map(str::to_owned),
+        remote.map(|token| token.name),
+        web.map(str::to_owned),
+    )
 }
 
 /// The changes of `head`'s stack below it onto `bookmark` (else
@@ -1635,13 +1646,7 @@ async fn undo_inner(
             "its lifecycle transitions are not in this daemon's records",
         ));
     }
-    let (unmarked, remote_name) = match agent.as_deref() {
-        Some(marked) => {
-            let (agent, token) = RemoteToken::unmark(marked);
-            (Some(agent.to_owned()), token.map(|token| token.name))
-        }
-        None => (None, None),
-    };
+    let (unmarked, remote_name, web) = caller_parts(agent.as_deref());
     let mut planned = Vec::with_capacity(rows.len());
     for row in &rows {
         if row.cause == TransitionCause::Observed.as_str() {
@@ -1743,6 +1748,7 @@ async fn undo_inner(
                 recorded_at: None,
                 dependency_change_id: None,
                 dependency_event: None,
+                web_session: web.clone(),
             },
         });
     }
@@ -1850,6 +1856,7 @@ pub(crate) async fn record_observed(
         recorded_at: None,
         dependency_change_id: None,
         dependency_event: None,
+        web_session: None,
     };
     let description = oplog::transition_description("land", change);
     if !workspaces.is_empty() {

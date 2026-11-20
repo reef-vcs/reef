@@ -46,7 +46,7 @@ pub use reef::daemon::v0;
 /// The revision of `reef.api.v1` this build serves. It increases by one with
 /// every change to the schema, and [`API_DIGEST`] changes with it; v1 only
 /// grows (ADR 0029). `GetDaemonStatus` reports it.
-pub const API_REVISION: u32 = 42;
+pub const API_REVISION: u32 = 43;
 
 /// blake3 of the v1 descriptors without comments, one per revision, oldest
 /// first: entry `n - 1` is revision `n`'s. A schema change appends one entry
@@ -200,6 +200,9 @@ pub const API_DIGESTS: &[&str] = &[
     // `CreateWebSessionRequest.path`, `PolicyEvaluation.verified` and
     // `PolicyVerifiedSigner`.
     "bbc35d527e6a852e3a50e1c864d085919001e56dfb609a816b921afa324cca93",
+    // R3.31: `web` on `ChangeTransition`, `CommentAuthor`, `Landing` and
+    // `Operation`.
+    "49512924a385f0570d163faf8061ed6da9284a5722e2c4821360764c231d1e5e",
 ];
 
 /// blake3 of the v1 descriptors without comments, as of [`API_REVISION`]:

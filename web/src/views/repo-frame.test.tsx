@@ -67,6 +67,7 @@ function setup() {
     const [, , repo = "", page = ""] = path.split("/");
     return (
       <RepoFrame
+        change=""
         key={repo}
         repo={repo}
         page={page as RepoPage}
@@ -89,8 +90,13 @@ describe("RepoFrame", () => {
     setup();
     await flush();
     const links = within(nav()).getAllByRole("link");
-    expect(links.map((l) => l.textContent)).toEqual(["Smartlog", "Workspaces", "Activity"]);
-    expect(links.map((l) => l.getAttribute("aria-current"))).toEqual([null, null, "page"]);
+    expect(links.map((l) => l.textContent)).toEqual([
+      "Smartlog",
+      "Workspaces",
+      "Activity",
+      "Proposals",
+    ]);
+    expect(links.map((l) => l.getAttribute("aria-current"))).toEqual([null, null, "page", null]);
     expect(screen.getByRole("slider")).toBeTruthy();
     expect(await screen.findByRole("table", { name: "Activity" })).toBeTruthy();
   });

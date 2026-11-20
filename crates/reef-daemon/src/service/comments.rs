@@ -168,7 +168,9 @@ impl CommentService for CommentHandler {
     ) -> Result<Response<CreateCommentResponse>, Status> {
         let arrived = Instant::now();
         let (agent, remote) = caller(&request)?;
+        let web = super::web_of(&request).is_some();
         let request = request.into_inner();
+        crate::web::rules::check_comment(web, &request).map_err(status)?;
         let state = &self.state;
         let target = target(state, &request.repo, &request.workspace)?;
         let mut snapshot = None;
@@ -213,6 +215,7 @@ impl CommentService for CommentHandler {
                 remote,
                 help: help_input_of(request.help.as_ref()),
                 client_session: request.client_session.clone(),
+                web,
             },
         )
         .await
@@ -371,7 +374,9 @@ impl CommentService for CommentHandler {
         request: Request<UpdateInstructionRequest>,
     ) -> Result<Response<UpdateInstructionResponse>, Status> {
         let (agent, remote) = caller(&request)?;
+        let web = super::web_of(&request).is_some();
         let request = request.into_inner();
+        crate::web::rules::check_confirm(web, &request).map_err(status)?;
         let state = &self.state;
         let target = target(state, &request.repo, &request.workspace)?;
         let outcome = crate::comments::update(
@@ -385,6 +390,7 @@ impl CommentService for CommentHandler {
                 workspace: target.workspace.clone(),
                 agent: agent.clone(),
                 remote,
+                web,
             },
         )
         .await

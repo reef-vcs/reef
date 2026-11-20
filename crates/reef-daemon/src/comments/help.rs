@@ -19,8 +19,7 @@ use reef_lib::jj::oplog::OpMeta;
 use tracing::Instrument as _;
 
 use super::{
-    CommentError, MAX_SUMMARY_BYTES, MoveOutcome, Planned, TargetFacts, agent_parts, record,
-    valid_text,
+    CommentError, MAX_SUMMARY_BYTES, MoveOutcome, Planned, TargetFacts, record, valid_text,
 };
 use crate::daemon::AppState;
 use crate::db::{CommentEventRow, CommentRow, HelpColumns};
@@ -510,7 +509,7 @@ async fn withdraw_inner(
     {
         return Err(CommentError::RemoteNotOwned { id });
     }
-    let (agent, _) = agent_parts(request.agent.as_deref());
+    let (agent, _, web_session) = crate::lifecycle::caller_parts(request.agent.as_deref());
     let actor = if request.remote.is_some() || agent.is_some() {
         Actor::Agent
     } else {
@@ -524,6 +523,7 @@ async fn withdraw_inner(
         identity_id,
         remote_token: request.remote.as_ref().map(|(id, _)| id.clone()),
         summary: Some(request.summary.clone()).filter(|summary| !summary.is_empty()),
+        web_session,
         ..CommentEventRow::blank(repo)
     };
     let mut meta = OpMeta::new(

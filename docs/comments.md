@@ -118,11 +118,11 @@ reef comment answer cmt_5d1e0a93c2b74f18 -m "Keep parse"              # the answ
 - Comment text is as readable as the repository: every `read` token, the web UI and backups see it (S-164).
 - Anyone on the socket may ask, answer or withdraw, as declared; an agent may answer another agent's help request, and the record says it was an agent (S-239). Through the remote listener any `write` token asks; an answer is an instruction and needs a linked token; only the asking token withdraws, and claims the answer without taking it.
 - A help request's text, what it tried and its question are the agent's words: a person reads them as data, never as commands to run (S-237).
+- A comment from the web UI's proposal page (R3.31) records the page's web UI session (`CommentAuthor.web`, `web_session` in JSON), as a remote one records its token; so does an instruction's confirm or cancel there. The page shows an instruction's estimate before its Confirm, and a note is its default. Through the web UI a comment is a person's: it never asks for help, never confirms in the same call, and never names a workspace or client session to write as; and an instruction is only confirmed or cancelled there, never released, started or finished (`WEB_ACCESS_DENIED`, rules `comment` and `confirm`).
 - Comments are not signed. A passkey verifies a person's sign-off since R3.43 ([identity.md](identity.md#passkeys-and-verified-presence)), but not a comment; a signature would travel once R4.07 publishes changes to a store.
 
 ## What later tickets add
 
 - **R3.46**: webhooks that push confirmed instructions to a runner the operator controls, and a runner's report of tokens and price into the estimate.
-- **R3.31**: comments in the proposal view, with anchors, `outdated`, and the confirm step with its estimate.
 - **R3.33**: unanswered help requests and instructions in flight in the triage inbox.
 - **R3.20**: compute budgets in policy, which may read stored estimates.

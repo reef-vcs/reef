@@ -49,6 +49,7 @@ Every transition records who performed it: the `reef-agent` name (`--agent` or `
 
 - **On the socket**, everyone is the same user ([ADR 0027](adr/0027-trust-boundaries-in-phase-1.md)): any caller may perform any of the four transitions. The actor is what the caller declares with `--actor`, by default `agent` when an agent name is set and `human` otherwise. It is recorded, not verified.
 - **Through the remote listener**, any `write` token proposes a draft; only the token that proposed a change proposes it again, withdraws it, supersedes it, or undoes one of its transitions; and no token declines, since the daemon cannot tell a remote human: a passkey verifies a person only in the local web UI (R3.43), and through the remote listener only from R3.40. A remote actor is always `agent`.
+- **Through the web UI** (R3.31), a person declines a proposal at the commit the page showed, and nothing else: a page cannot propose, withdraw or supersede (`WEB_ACCESS_DENIED`, rule `decline`). The transition records the page's web UI session (`ChangeTransition.web`, `web_session` in JSON) where a remote call records its token.
 - **`queued` and `landed`** are recorded only by the daemon.
 
 Reasons are untrusted text: up to 4 KiB, with no control characters but newline and tab. An agent reading a decline reason is reading data someone wrote, not an instruction; R3.12's instructions are a separate, marked object.
@@ -79,10 +80,21 @@ A proposal depends on the changes below it in its stack: its ancestors not on it
 
 A change's own `reef rebase` onto another base is never carried: propose it again to state the new base ([ADR 0071](adr/0071-rebasing-and-following-trunk.md)).
 
+## Reviewing in the web UI
+
+The web UI's Proposals tab lists the repository's open proposals, newest update first; the list holds still while you read, and new ones wait behind a count. A proposal's page ([ADR 0086](adr/0086-reviewing-from-the-web-ui.md)) reads in the order a review needs:
+
+1. **Intent.** The description, the provenance the agent declared (task, model, harness), and the changes below it with their states, each linking to its own page. A change below that was declined or withdrawn holds the proposal, and the page says which.
+2. **Evidence.** The destination policy's verdict over the stack, each rule and what it still needs, and every evidence object on the tree: who signed it, and whether a person's passkey verified it and the policy pins that passkey. A stack the gate stops below the change shows the change that stops it.
+3. **What changed.** The definitions each file adds, changes, removes or moves, nested in the definitions around them, most changed files first. **Show lines** expands one definition to its lines and call sites; a file the symbol index cannot read expands to its hunks.
+4. **Comments**, and the history of its transitions.
+
+**Accept** signs off the tree on the page with one passkey touch ([identity](identity.md#approving-a-sign-off)), then asks to land that commit, with the changes below it: the page says whether it was queued, landed, blocked by the gate, or waits for its checks. **Decline** asks for a reason, which the agent reads as its next instruction, and declines the commit on the page; for a stack, it can decline the changes below too. **Comment** writes a note, or an instruction whose estimate the page shows before you confirm it; a help request on the change has an Answer box. A line number in an expanded hunk anchors a comment to that line. When the agent amends the proposal while the page is open, the page says so, and Accept and Decline wait until you move to the new version.
+
 ## Undo
 
 `reef undo <op>` of a transition reverts it when it is still the change's latest transition, recording the inverse with cause `undo`; undoing a first proposal returns the change to `draft`, and the proposal's owner is restored with its state. Undo later transitions first. An observed landing is not undoable, and neither is a transition whose undo would put a change back in the landing queue (only the landing service queues).
 
 ## What later tickets add
 
-R3.11 carries the proposals of a stack's changes across a rewrite of the ones below, and returns dependents of a declined or withdrawn change to their owners and rebases dependents of a superseded one (see "Dependents" above); R3.12 attaches comments by change and round; R3.13 records `queued`, `landed` and the return to `proposed` with cause `landing`, and adds the state to the policy input; R3.31 and R3.33 show proposals and transitions; R4.07 publishes them to a store.
+R3.11 carries the proposals of a stack's changes across a rewrite of the ones below, and returns dependents of a declined or withdrawn change to their owners and rebases dependents of a superseded one (see "Dependents" above); R3.12 attaches comments by change and round; R3.13 records `queued`, `landed` and the return to `proposed` with cause `landing`, and adds the state to the policy input; R3.31 shows them in the web UI (see "Reviewing in the web UI"), and R3.33's inbox lists them; R4.07 publishes them to a store.

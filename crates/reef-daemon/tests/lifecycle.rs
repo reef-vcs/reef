@@ -613,6 +613,7 @@ async fn queued_is_reserved() {
         recorded_at: None,
         dependency_change_id: None,
         dependency_event: None,
+        web_session: None,
     };
     state.db.insert_pending_transition(&queued).unwrap();
     "queued".clone_into(&mut row.state);
@@ -699,6 +700,7 @@ async fn reads_wait_for_a_pending_transition() {
         recorded_at: None,
         dependency_change_id: None,
         dependency_event: None,
+        web_session: None,
     };
     let proposals = || async {
         client
@@ -917,6 +919,7 @@ async fn crash_between_row_and_operation() {
         recorded_at: None,
         dependency_change_id: None,
         dependency_event: None,
+        web_session: None,
     };
     let db = &daemon.handle.state().db;
     // One whose operation was written, one whose operation never was.

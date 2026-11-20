@@ -66,6 +66,14 @@ export function PulseIcon() {
   );
 }
 
+export function InboxIcon() {
+  return (
+    <Icon>
+      <path d="M2.5 9.5 4 3.5h8l1.5 6v3a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1zM2.5 9.5h3.5l.75 1.5h2.5l.75-1.5h3.5" />
+    </Icon>
+  );
+}
+
 export function CopyIcon() {
   return (
     <Icon>

@@ -263,6 +263,7 @@ pub fn comment_message(
                 token_id: token.clone(),
                 token_name: row.remote_token_name.clone().unwrap_or_default(),
             }),
+            web: crate::lifecycle::messages::web_caller(row.web_session.as_deref()),
         }),
         created_at: Some(timestamp(row.recorded_at.unwrap_or(row.created_at))),
         operation_id: row.operation_id.clone().unwrap_or_default(),

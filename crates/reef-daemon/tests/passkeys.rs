@@ -1958,3 +1958,58 @@ async fn a_decline_records_its_reason_and_decliner() {
     assert_eq!(declined.resolved_web_session, None);
     daemon.stop().await;
 }
+
+/// Sends a `reef-agent` beside the session token, as a page script could.
+#[derive(Clone)]
+struct AgentBearer(String);
+
+impl Interceptor for AgentBearer {
+    fn call(&mut self, mut request: Request<()>) -> Result<Request<()>, Status> {
+        request.metadata_mut().insert(
+            "authorization",
+            format!("Bearer {}", self.0).parse().unwrap(),
+        );
+        request
+            .metadata_mut()
+            .insert("reef-agent", "planner-1".parse().unwrap());
+        Ok(request)
+    }
+}
+
+// R3.31 (ADR 0086): a web write is a person's, so a `reef-agent` a page
+// sends is not recorded on the evidence it adds.
+#[tokio::test(flavor = "multi_thread")]
+async fn web_evidence_records_no_page_agent() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    create_identity(client, "alice").await;
+    let page = ui(client).await;
+    let mut passkey = Authenticator::new(Algorithm::EdDsa);
+    register(&page, &mut passkey, "alice", None).await.unwrap();
+    let change = commit_on(client, &repo.id, "root()", &[("a.txt", "a\n")]).await;
+    let (key, statement, _) =
+        signed_off(client, &page, &repo.id, "alice", &change, &mut passkey).await;
+    let http = HttpClient::builder(TokioExecutor::new()).build_http();
+    let service = InterceptedService::new(
+        GrpcWebClientLayer::new().layer(http),
+        AgentBearer(page.token.clone()),
+    );
+    let origin: Uri = page.session.url.parse().unwrap();
+    let added = EvidenceServiceClient::with_origin(service, origin)
+        .add_evidence(add_request(
+            &repo.id,
+            &change.commit_id,
+            sign(&statement, &key),
+            &key,
+        ))
+        .await
+        .unwrap()
+        .into_inner()
+        .evidence
+        .unwrap();
+    assert_eq!(
+        added.added_by_agent, "",
+        "a reef-agent a page sends is not recorded"
+    );
+    daemon.stop().await;
+}

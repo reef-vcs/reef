@@ -4,7 +4,7 @@
 // the challenge the real daemon derives, and wait as `GetApproval` does.
 import { create, type MessageInitShape } from "@bufbuild/protobuf";
 import { durationMs, timestampFromMs, timestampNow } from "@bufbuild/protobuf/wkt";
-import { createRouterTransport } from "@connectrpc/connect";
+import { createRouterTransport, type ConnectRouter } from "@connectrpc/connect";
 import type { Connection } from "../api/connection";
 import {
   EvaluatePolicyResponseSchema,
@@ -171,149 +171,161 @@ export class IdentityDaemon {
   }
 
   connection(): Connection {
-    const transport = createRouterTransport(({ service }) => {
-      service(IdentityService, {
-        getIdentity: () => ({ identity: this.identities.find((i) => i.isDefault) }),
-        listIdentities: () => ({ identities: this.identities }),
-        listPasskeys: (request) => ({
-          passkeys: this.passkeys.filter(
-            (p) => !request.identity || p.identityId === request.identity,
-          ),
-        }),
-        listAuthorities: () => ({
-          authorities: [create(AuthoritySchema, { keyId: AUTHORITY, current: true })],
-        }),
-        startPasskeyRegistration: (request) => {
-          const identity = this.identities.find((i) => i.id === request.identity) ?? this.arsood;
-          const live = this.passkeys.filter((p) => p.identityId === identity.id);
-          return {
-            challenge: new Uint8Array(32).fill(0x0c),
-            rpId: "localhost",
-            identityId: identity.id,
-            identity: identity.name,
-            userName: `Reef: ${identity.name}`,
-            algorithms: [-8, -7, -257],
-            credentialIds: live.map((p) => p.credentialId),
-            needsApproval: live.length > 0,
-            addChallenge: live.length > 0 ? new Uint8Array(32).fill(0xad) : new Uint8Array(),
-          };
-        },
-        registerPasskey: (request) => {
-          if (this.fail.registerPasskey) throw this.fail.registerPasskey;
-          this.registered.push(request);
-          const added = passkey(this.arsood, request.label, this.passkeys.length + 1);
-          this.passkeys.push(added);
-          return { passkey: added };
-        },
-        removePasskey: (request) => {
-          if (this.fail.removePasskey) throw this.fail.removePasskey;
-          this.removed.push(request);
-          const gone = this.passkeys.find((p) => p.id === request.id);
-          this.passkeys = this.passkeys.filter((p) => p.id !== request.id);
-          return { passkey: gone };
-        },
-        requestApproval: async (request) => {
-          if (this.fail.requestApproval) throw this.fail.requestApproval;
-          this.requested.push(request);
-          const approval = await this.pending({
-            id: `apr_${String(this.requested.length).padStart(16, "0")}`,
-            keyId: hex(await sha256(request.publicKey)),
-            approves: {
-              statementSha256: hex(await sha256(request.statement)),
-              changeId: CHANGE,
-            },
-            statement: request.statement,
-            commitId: request.revision,
-            requestedThrough: "web",
-            requestedByAgent: "",
-            requestedWorkspace: "",
-          });
-          return { approval };
-        },
-        getApproval: async (request, context) => {
-          if (this.fail.getApproval) throw this.fail.getApproval;
-          const approval = this.approvals.get(request.id);
-          if (!approval) throw new Error("no approval");
-          if (
-            request.wait &&
-            durationMs(request.wait) > 0 &&
-            approval.state === ApprovalState.PENDING
-          ) {
-            await new Promise<void>((resolve, reject) => {
-              this.waiters.push(resolve);
-              context.signal.addEventListener("abort", () => {
-                reject(new Error("aborted"));
-              });
+    const transport = createRouterTransport((router) => {
+      this.routes(router);
+    });
+    return { transport, label: "test" };
+  }
+
+  /** The services, for a fake daemon that adds its own in place of `changes` and `policy`. */
+  routes(
+    router: ConnectRouter,
+    { changes = true, policy = true }: { changes?: boolean; policy?: boolean } = {},
+  ) {
+    const service = router.service.bind(router);
+    service(IdentityService, {
+      getIdentity: () => ({ identity: this.identities.find((i) => i.isDefault) }),
+      listIdentities: () => ({ identities: this.identities }),
+      listPasskeys: (request) => ({
+        passkeys: this.passkeys.filter(
+          (p) => !request.identity || p.identityId === request.identity,
+        ),
+      }),
+      listAuthorities: () => ({
+        authorities: [create(AuthoritySchema, { keyId: AUTHORITY, current: true })],
+      }),
+      startPasskeyRegistration: (request) => {
+        const identity = this.identities.find((i) => i.id === request.identity) ?? this.arsood;
+        const live = this.passkeys.filter((p) => p.identityId === identity.id);
+        return {
+          challenge: new Uint8Array(32).fill(0x0c),
+          rpId: "localhost",
+          identityId: identity.id,
+          identity: identity.name,
+          userName: `Reef: ${identity.name}`,
+          algorithms: [-8, -7, -257],
+          credentialIds: live.map((p) => p.credentialId),
+          needsApproval: live.length > 0,
+          addChallenge: live.length > 0 ? new Uint8Array(32).fill(0xad) : new Uint8Array(),
+        };
+      },
+      registerPasskey: (request) => {
+        if (this.fail.registerPasskey) throw this.fail.registerPasskey;
+        this.registered.push(request);
+        const added = passkey(this.arsood, request.label, this.passkeys.length + 1);
+        this.passkeys.push(added);
+        return { passkey: added };
+      },
+      removePasskey: (request) => {
+        if (this.fail.removePasskey) throw this.fail.removePasskey;
+        this.removed.push(request);
+        const gone = this.passkeys.find((p) => p.id === request.id);
+        this.passkeys = this.passkeys.filter((p) => p.id !== request.id);
+        return { passkey: gone };
+      },
+      requestApproval: async (request) => {
+        if (this.fail.requestApproval) throw this.fail.requestApproval;
+        this.requested.push(request);
+        const approval = await this.pending({
+          id: `apr_${String(this.requested.length).padStart(16, "0")}`,
+          keyId: hex(await sha256(request.publicKey)),
+          approves: {
+            statementSha256: hex(await sha256(request.statement)),
+            changeId: CHANGE,
+          },
+          statement: request.statement,
+          commitId: request.revision,
+          requestedThrough: "web",
+          requestedByAgent: "",
+          requestedWorkspace: "",
+        });
+        return { approval };
+      },
+      getApproval: async (request, context) => {
+        if (this.fail.getApproval) throw this.fail.getApproval;
+        const approval = this.approvals.get(request.id);
+        if (!approval) throw new Error("no approval");
+        if (
+          request.wait &&
+          durationMs(request.wait) > 0 &&
+          approval.state === ApprovalState.PENDING
+        ) {
+          await new Promise<void>((resolve, reject) => {
+            this.waiters.push(resolve);
+            context.signal.addEventListener("abort", () => {
+              reject(new Error("aborted"));
             });
-          }
-          return { approval };
-        },
-        resolveApproval: (request) => {
-          if (this.fail.resolveApproval) throw this.fail.resolveApproval;
-          this.resolved.push(request);
-          const approval = this.approvals.get(request.id);
-          if (!approval) throw new Error("no approval");
-          if (request.resolution.case === "approve") {
-            approval.passkey = PASSKEY_REF;
-            this.settle(approval, ApprovalState.APPROVED);
-          } else {
-            approval.declinedReason = request.resolution.value ?? "";
-            this.settle(approval, ApprovalState.DECLINED);
-          }
-          return { approval };
-        },
-      });
-      service(EvidenceService, {
-        listEvidence: () => create(ListEvidenceResponseSchema, { evidence: this.evidence }),
-        addEvidence: (request) => {
-          if (this.fail.addEvidence) throw this.fail.addEvidence;
-          this.added.push(request);
-          const evidence = create(EvidenceSchema, {
-            evidenceId: "e".repeat(64),
-            kind: "signoff",
-            result: EvidenceResult.PASS,
-            current: true,
-            addedAt: timestampNow(),
-            identity: create(KeyIdentitySchema, {
-              status: IdentityStatus.BOUND,
-              key: create(SessionKeySchema, {
-                identity: "arsood",
-                presence: SessionPresence.USER_VERIFIED,
-                passkey: PASSKEY_REF,
-              }),
-            }),
           });
-          this.evidence = [evidence, ...this.evidence];
-          return create(AddEvidenceResponseSchema, { evidence, created: true });
-        },
-      });
+        }
+        return { approval };
+      },
+      resolveApproval: (request) => {
+        if (this.fail.resolveApproval) throw this.fail.resolveApproval;
+        this.resolved.push(request);
+        const approval = this.approvals.get(request.id);
+        if (!approval) throw new Error("no approval");
+        if (request.resolution.case === "approve") {
+          approval.passkey = PASSKEY_REF;
+          this.settle(approval, ApprovalState.APPROVED);
+        } else {
+          approval.declinedReason = request.resolution.value ?? "";
+          this.settle(approval, ApprovalState.DECLINED);
+        }
+        return { approval };
+      },
+    });
+    service(EvidenceService, {
+      listEvidence: () => create(ListEvidenceResponseSchema, { evidence: this.evidence }),
+      addEvidence: (request) => {
+        if (this.fail.addEvidence) throw this.fail.addEvidence;
+        this.added.push(request);
+        const evidence = create(EvidenceSchema, {
+          evidenceId: "e".repeat(64),
+          kind: "signoff",
+          result: EvidenceResult.PASS,
+          current: true,
+          addedAt: timestampNow(),
+          identity: create(KeyIdentitySchema, {
+            status: IdentityStatus.BOUND,
+            key: create(SessionKeySchema, {
+              identity: "arsood",
+              presence: SessionPresence.USER_VERIFIED,
+              passkey: PASSKEY_REF,
+            }),
+          }),
+        });
+        this.evidence = [evidence, ...this.evidence];
+        return create(AddEvidenceResponseSchema, { evidence, created: true });
+      },
+    });
+    if (policy) {
       service(PolicyService, {
         evaluatePolicy: () =>
           create(EvaluatePolicyResponseSchema, { evaluation: { verified: this.verified } }),
       });
-      service(ChangeService, {
-        listChanges: () =>
-          create(ListChangesResponseSchema, {
-            entries: this.below.map((description, n) => ({
-              change: {
-                changeId: String(n).repeat(32),
-                commitId: String(n).repeat(40),
-                description,
-              },
-            })),
+    }
+    if (!changes) return;
+    service(ChangeService, {
+      listChanges: () =>
+        create(ListChangesResponseSchema, {
+          entries: this.below.map((description, n) => ({
+            change: {
+              changeId: String(n).repeat(32),
+              commitId: String(n).repeat(40),
+              description,
+            },
+          })),
+        }),
+      getChange: () =>
+        create(GetChangeResponseSchema, {
+          change: create(ChangeSchema, {
+            changeId: CHANGE,
+            commitId: COMMIT,
+            treeId: TREE,
+            description: "Fix the lease renewal race\n\nLonger body.",
+            author: { name: "Ada Agent", email: "ada@example.com" },
           }),
-        getChange: () =>
-          create(GetChangeResponseSchema, {
-            change: create(ChangeSchema, {
-              changeId: CHANGE,
-              commitId: COMMIT,
-              treeId: TREE,
-              description: "Fix the lease renewal race\n\nLonger body.",
-              author: { name: "Ada Agent", email: "ada@example.com" },
-            }),
-          }),
-      });
+        }),
     });
-    return { transport, label: "test" };
   }
 }

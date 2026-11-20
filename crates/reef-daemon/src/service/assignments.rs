@@ -54,11 +54,10 @@ fn caller_of(
     let (identity_id, _, session_id) =
         crate::lifecycle::identity_for(state, workspace, remote.as_ref());
     let (person_identity_id, _, _) = crate::lifecycle::identity_for(state, None, remote.as_ref());
-    let plain = agent.as_deref().map(|marked| {
-        reef_lib::jj::oplog::RemoteToken::unmark(marked)
-            .0
-            .to_owned()
-    });
+    let plain = agent
+        .as_deref()
+        .and_then(|marked| reef_lib::jj::oplog::unmark(marked).agent)
+        .map(str::to_owned);
     let actor = if remote.is_some() {
         Actor::Agent
     } else {

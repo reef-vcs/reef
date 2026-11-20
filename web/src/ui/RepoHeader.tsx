@@ -16,6 +16,7 @@ const PAGE_TITLES: Record<RepoPage, string> = {
   smartlog: "Smartlog",
   workspaces: "Workspaces",
   activity: "Activity",
+  proposals: "Proposals",
 };
 
 /** A repository's name: the last component of its root. */

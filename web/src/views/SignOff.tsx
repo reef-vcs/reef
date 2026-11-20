@@ -21,7 +21,7 @@ import { reverseHex, shortId } from "../ui/ids";
 import { Link } from "../ui/router";
 import { Time } from "../ui/TimeLabel";
 
-type Signer =
+export type Signer =
   | { kind: "loading" }
   | { kind: "failed"; error: ReefError }
   | { kind: "loaded"; identity: Identity; passkeys: number };
@@ -51,7 +51,7 @@ const STATUS_WORDS: Partial<Record<IdentityStatus, string>> = {
 };
 
 /** The default identity, who Sign off signs as, and how many live passkeys it has. */
-function useSigner(connection: Connection, onSessionInvalid: () => void): Signer {
+export function useSigner(connection: Connection, onSessionInvalid: () => void): Signer {
   const [signer, setSigner] = useState<Signer>({ kind: "loading" });
   useEffect(() => {
     let current = true;
@@ -124,7 +124,7 @@ function useSignOffs(
   return state;
 }
 
-function presenceWords(evidence: Evidence): string {
+export function presenceWords(evidence: Evidence): string {
   const key = evidence.identity?.key;
   if (key?.presence !== SessionPresence.USER_VERIFIED) return "not verified";
   const passkey = key.passkey;

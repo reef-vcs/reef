@@ -507,7 +507,7 @@ impl Manager {
         let meta = OpMeta::new(OpKind::Snapshot, description)
             .snapshot_kind(kind.as_str())
             .workspace(id.as_hex())
-            .agent(agent.unwrap_or_else(|| record.owner.clone()));
+            .agent(reef_lib::jj::oplog::agent_or(agent, &record.owner));
         // The head first: a permit is a scan slot, not held while the
         // repository thread is busy. This snapshot does what a follow
         // queued before that head would (#202), so the mark is cleared in

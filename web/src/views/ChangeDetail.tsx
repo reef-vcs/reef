@@ -10,6 +10,7 @@ import { isSessionInvalid, reefError, type ReefError } from "../api/errors";
 import type { Change } from "../gen/reef/api/v1/changes_pb";
 import { DiffFormat, DiffService, type GetDiffResponse } from "../gen/reef/api/v1/diff_pb";
 import { FileChangeKind } from "../gen/reef/api/v1/files_pb";
+import { LifecycleState } from "../gen/reef/api/v1/lifecycle_pb";
 import { type HistoryChange, HistoryService } from "../gen/reef/api/v1/history_pb";
 import { PresenceKind, type Presence } from "../gen/reef/api/v1/presence_pb";
 import type { Workspace } from "../gen/reef/api/v1/workspaces_pb";
@@ -30,6 +31,7 @@ import { Time } from "../ui/TimeLabel";
 import { operationSentence } from "../ui/words";
 import { activityHref } from "./activity-route";
 import { fleetHref } from "./fleet-route";
+import { proposalHref } from "./proposal-route";
 import { SignOff } from "./SignOff";
 import { MIN_SPACING_MS, type SmartlogRow } from "./smartlog-model";
 
@@ -401,6 +403,16 @@ export function ChangeDetail({
           </h3>
           <p className="detail-id mono secondary">{shortId(reverseHex(change.changeId))}</p>
         </>
+      )}
+      {change.lifecycle?.recorded && (
+        <p>
+          <Link to={proposalHref({ repo, change: change.changeId })}>
+            {change.lifecycle.state === LifecycleState.PROPOSED ||
+            change.lifecycle.state === LifecycleState.QUEUED
+              ? "Review the proposal"
+              : "Open the proposal"}
+          </Link>
+        </p>
       )}
       {rows.length > 1 && (
         <section>

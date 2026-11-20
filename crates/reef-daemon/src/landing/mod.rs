@@ -36,7 +36,7 @@ use reef_lib::error::{Classify, ErrorChain, ErrorKind};
 use reef_lib::jj::land::{self, LandError, LandTarget, Preview};
 use reef_lib::jj::lifecycle::{LifecycleState, TransitionCause};
 use reef_lib::jj::log::{ChangeInfo, Describer};
-use reef_lib::jj::oplog::{self, OpMeta, RemoteToken};
+use reef_lib::jj::oplog::{self, OpMeta};
 use reef_lib::jj::revset::{self, RevisionError, RevsetScope};
 use reef_lib::jj::rewrite::{self, RewriteError};
 use reef_lib::jj::{ChangeIdHex, CommitIdHex, OpKind, OperationIdHex, files};
@@ -603,6 +603,8 @@ pub(crate) struct Requester {
     pub(crate) identity_name: Option<String>,
     pub(crate) session_id: Option<String>,
     pub(crate) remote: Option<(String, String)>,
+    /// The web UI session it came through (R3.31).
+    pub(crate) web: Option<String>,
     /// The agent as sent, still marked with its remote token, for
     /// `reef.agent`.
     pub(crate) marked: Option<String>,
@@ -1118,13 +1120,7 @@ pub(crate) fn decision_text(decision: Decision) -> &'static str {
 
 /// Who `request` is, as a landing records it.
 fn requester(state: &AppState, request: &LandRequest) -> Requester {
-    let (agent, remote_name) = match request.agent.as_deref() {
-        Some(marked) => {
-            let (agent, token) = RemoteToken::unmark(marked);
-            (Some(agent.to_owned()), token.map(|token| token.name))
-        }
-        None => (None, None),
-    };
+    let (agent, remote_name, web) = crate::lifecycle::caller_parts(request.agent.as_deref());
     let actor = if request.remote.is_some() {
         Actor::Agent
     } else {
@@ -1147,6 +1143,7 @@ fn requester(state: &AppState, request: &LandRequest) -> Requester {
         identity_name,
         session_id,
         remote,
+        web,
         marked: request.agent.clone().or_else(|| {
             request
                 .workspace
@@ -1179,6 +1176,7 @@ pub(crate) fn new_row(repo: RepoId, destination: &str, who: &Requester) -> Landi
         identity_name: who.identity_name.clone(),
         remote_token: who.remote.as_ref().map(|(id, _)| id.clone()),
         remote_token_name: who.remote.as_ref().map(|(_, name)| name.clone()),
+        web_session: who.web.clone(),
         created_at: Timestamp::now(),
         finished_at: None,
         batch_id: None,
@@ -1235,6 +1233,7 @@ pub(crate) fn transition_row(
         recorded_at: None,
         dependency_change_id: None,
         dependency_event: None,
+        web_session: who.web.clone(),
     }
 }
 

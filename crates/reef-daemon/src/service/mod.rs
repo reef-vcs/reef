@@ -94,10 +94,15 @@ pub(crate) fn agent_of(metadata: &MetadataMap) -> Result<Option<String>, Status>
 /// `reef-agent` ([`agent_of`]); through the remote listener (R2.08), that
 /// or the token's name, marked with the token
 /// ([`reef_lib::jj::oplog::RemoteToken::mark`]), so every operation the
-/// call records names the token. Every handler that may record an
+/// call records names the token; through the web listener (R3.31), that
+/// marked with the web UI session ([`reef_lib::jj::oplog::mark_web`]). Every handler that may record an
 /// operation reads it first.
 pub(crate) fn caller_of<T>(request: &tonic::Request<T>) -> Result<Option<String>, Status> {
     let agent = agent_of(request.metadata())?;
+    // A web call is a person's: a `reef-agent` it sends is not recorded.
+    if let Some(caller) = web_of(request) {
+        return Ok(Some(reef_lib::jj::oplog::mark_web("", &caller.session)));
+    }
     let Some(caller) = request.extensions().get::<crate::remote::Caller>() else {
         return Ok(agent);
     };

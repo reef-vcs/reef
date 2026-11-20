@@ -31,7 +31,7 @@ use reef_lib::error::{Classify, ErrorChain, ErrorKind};
 use reef_lib::jj::comments::{self as jj_comments, CommentEventRecord};
 use reef_lib::jj::lifecycle::LifecycleError as JjRecordError;
 use reef_lib::jj::log::{ChangeInfo, Describer};
-use reef_lib::jj::oplog::{self, OpMeta, RemoteToken};
+use reef_lib::jj::oplog::{self, OpMeta};
 use reef_lib::jj::revset::{self, RevisionError, RevsetScope};
 use reef_lib::jj::rewrite::{self, RewriteError};
 use reef_lib::jj::{CommitIdHex, OpKind, OperationIdHex};
@@ -44,7 +44,7 @@ use crate::db::{
     ClaimQuery, CommentEventRow, CommentRow, DbError, InstructionColumns, TransitionRow,
 };
 use crate::error::{Advice, Advise};
-use crate::lifecycle::Actor;
+use crate::lifecycle::{Actor, caller_parts};
 use crate::model::{RepoId, Timestamp, WorkspaceRecord};
 use crate::repo::RepoThreadError;
 use crate::workspace::ManagerError;
@@ -349,6 +349,10 @@ pub enum CommentError {
     /// A remote instruction or take from a token linked to no identity.
     #[error("through the remote listener, this needs a token linked to an operator identity")]
     RemoteIdentityRequired,
+    /// Through the web UI, a move that is not a confirm or a cancel (R3.31):
+    /// releasing, starting and finishing are the claiming session's.
+    #[error("through the web UI, an instruction is only confirmed or cancelled")]
+    WebConfirmOnly,
     /// A remote move or claim of another token's.
     #[error("comment {id} was not written or claimed through this remote token")]
     RemoteNotOwned {
@@ -499,7 +503,7 @@ impl Classify for CommentError {
             | Self::TooManyInstructions { .. }
             | Self::TooManyHelpRequests { .. } => ErrorKind::Unavailable,
             Self::Conflict(error) => error.kind(),
-            Self::RemoteIdentityRequired | Self::RemoteNotOwned { .. } => {
+            Self::RemoteIdentityRequired | Self::RemoteNotOwned { .. } | Self::WebConfirmOnly => {
                 ErrorKind::PermissionDenied
             }
             Self::Revision(error) => error.kind(),
@@ -559,6 +563,16 @@ impl CommentError {
             Self::RemoteNotOwned { id } => {
                 (reason::REMOTE_COMMENT_NOT_OWNED, vec![("id", id.clone())])
             }
+            Self::WebConfirmOnly => (
+                reason::WEB_ACCESS_DENIED,
+                vec![
+                    (
+                        "method",
+                        "/reef.api.v1.CommentService/UpdateInstruction".to_owned(),
+                    ),
+                    ("rule", "confirm".to_owned()),
+                ],
+            ),
             Self::HelpRequired => (reason::HELP_REQUIRED, Vec::new()),
             Self::InvalidConflict { conflict } => (
                 reason::INVALID_CONFLICT,
@@ -621,6 +635,9 @@ impl Advise for CommentError {
             )),
             Self::RemoteIdentityRequired => Some(Advice::hint(
                 "Use a remote token linked to an operator identity (`reef remote token create --identity`).",
+            )),
+            Self::WebConfirmOnly => Some(Advice::hint(
+                "The web UI confirms and cancels instructions; the session that claimed one moves it after.",
             )),
             Self::RemoteNotOwned { .. } => Some(Advice::hint(
                 "Through the remote listener, only the token that wrote an instruction confirms or cancels it, only the token that claimed it moves it after, only the token that proposed a change claims its instructions without taking them, and only the token that asked withdraws a help request.",
@@ -893,6 +910,8 @@ pub struct CreateRequest {
     /// The caller's client session: for a help request, the session an
     /// answer goes to; for an answer, who is answering. Empty for none.
     pub client_session: String,
+    /// The call came through the web UI's listener (R3.31).
+    pub web: bool,
 }
 
 /// What [`create`] wrote.
@@ -997,17 +1016,6 @@ async fn record(
         }
     }
     Ok((op_id, rows))
-}
-
-/// The agent a request carries, and its remote token's name.
-fn agent_parts(agent: Option<&str>) -> (Option<String>, Option<String>) {
-    match agent {
-        Some(marked) => {
-            let (agent, token) = RemoteToken::unmark(marked);
-            (Some(agent.to_owned()), token.map(|token| token.name))
-        }
-        None => (None, None),
-    }
 }
 
 /// Whether the remote token `token` is linked to an operator identity.
@@ -1224,10 +1232,16 @@ async fn create_inner(
             .ok_or_else(|| CommentError::InvalidReplyTo {
                 reply_to: request.reply_to.clone(),
             })?;
-        let live_help = parent
-            .help
-            .as_ref()
-            .is_some_and(|columns| columns.state != help::HelpState::Withdrawn.as_str());
+        // Through the web UI an answer skips the confirm only while its
+        // help request is open: a later reply is an instruction like any
+        // other, which waits for its estimate and Confirm (R3.31).
+        let live_help = parent.help.as_ref().is_some_and(|columns| {
+            if request.web {
+                columns.state == help::HelpState::Open.as_str()
+            } else {
+                columns.state != help::HelpState::Withdrawn.as_str()
+            }
+        });
         if kind == Kind::Instruction && live_help {
             answering = Some(parent);
         }
@@ -1327,7 +1341,7 @@ async fn create_inner(
         }
     }
     let round = lifecycle.as_ref().map_or(0, |row| row.round);
-    let (agent, remote_name) = agent_parts(request.agent.as_deref());
+    let (agent, remote_name, web_session) = caller_parts(request.agent.as_deref());
     let actor = if request.remote.is_some() {
         Actor::Agent
     } else {
@@ -1472,6 +1486,7 @@ async fn create_inner(
         instruction,
         help: help_columns,
         updated_at: now,
+        web_session: web_session.clone(),
     };
     let event = CommentEventRow {
         repo_id: repo,
@@ -1488,6 +1503,7 @@ async fn create_inner(
         remote_token: request.remote.as_ref().map(|(id, _)| id.clone()),
         help_to: (kind == Kind::HelpRequest).then(|| help::HelpState::Open.as_str().to_owned()),
         created_at: now,
+        web_session,
         ..CommentEventRow::blank(repo)
     };
     // The first answer moves its help request in the same operation, so no
@@ -1506,6 +1522,7 @@ async fn create_inner(
                 actor: event.actor.clone(),
                 identity_id: event.identity_id.clone(),
                 remote_token: event.remote_token.clone(),
+                web_session: event.web_session.clone(),
                 help_answer_id: Some(id.clone()),
                 ..CommentEventRow::blank(repo)
             };
@@ -1572,6 +1589,8 @@ pub struct UpdateRequest {
     pub agent: Option<String>,
     /// The remote token, `(id, name)`.
     pub remote: Option<(String, String)>,
+    /// The call came through the web UI's listener (R3.31).
+    pub web: bool,
 }
 
 /// What [`update`] or [`claim`] did.
@@ -1653,6 +1672,9 @@ async fn update_inner(
     {
         return Err(CommentError::NotAllowed { state: from, to });
     }
+    if request.web && !matches!(event_of(from, to), "confirm" | "cancel") {
+        return Err(CommentError::WebConfirmOnly);
+    }
     if let Some((token, _)) = &request.remote {
         // The writer confirms and cancels; the claimer moves it after.
         let owner = if matches!(event_of(from, to), "confirm" | "cancel") {
@@ -1664,7 +1686,7 @@ async fn update_inner(
             return Err(CommentError::RemoteNotOwned { id });
         }
     }
-    let (agent, _) = agent_parts(request.agent.as_deref());
+    let (agent, _, web_session) = caller_parts(request.agent.as_deref());
     let actor = if request.remote.is_some() || agent.is_some() {
         Actor::Agent
     } else {
@@ -1688,6 +1710,7 @@ async fn update_inner(
         remote_token: request.remote.as_ref().map(|(id, _)| id.clone()),
         summary: Some(request.summary.clone()).filter(|summary| !summary.is_empty()),
         created_at: Timestamp::now(),
+        web_session,
         ..CommentEventRow::blank(repo)
     };
     let mut meta = OpMeta::new(
@@ -1709,6 +1732,7 @@ async fn update_inner(
             actor: event.actor.clone(),
             identity_id: event.identity_id.clone(),
             remote_token: event.remote_token.clone(),
+            web_session: event.web_session.clone(),
             ..CommentEventRow::blank(repo)
         };
         help::reopen_on_cancel(state, &comment, &base)?
@@ -1917,7 +1941,7 @@ async fn claim_inner(state: &AppState, request: ClaimRequest) -> Result<MoveOutc
     } else {
         State::Delivered
     };
-    let (agent, _) = agent_parts(request.agent.as_deref());
+    let (agent, _, _) = caller_parts(request.agent.as_deref());
     let (identity_id, _, _) =
         crate::lifecycle::identity_for(state, request.workspace.as_ref(), request.remote.as_ref());
     let claimed_session = Some(client_session.clone())

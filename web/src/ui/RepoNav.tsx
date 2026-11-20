@@ -1,13 +1,15 @@
 // The repository pages' tabs (R2.20; in the app bar since the design pass):
-// Smartlog, Workspaces and Activity, the current one marked. A read at an
-// operation keeps its `at` across the three.
+// Smartlog, Workspaces, Activity and Proposals (R3.31), the current one
+// marked. A read at an operation keeps its `at` across the first three;
+// proposals are read live.
 import { activityHref } from "../views/activity-route";
 import { fleetHref } from "../views/fleet-route";
 import { smartlogHref } from "../views/smartlog-route";
-import { GraphIcon, LayersIcon, PulseIcon } from "./icons";
+import { proposalsHref } from "../views/proposal-route";
+import { GraphIcon, InboxIcon, LayersIcon, PulseIcon } from "./icons";
 import { Link } from "./router";
 
-export type RepoPage = "smartlog" | "workspaces" | "activity";
+export type RepoPage = "smartlog" | "workspaces" | "activity" | "proposals";
 
 export function RepoNav({
   repo,
@@ -41,6 +43,10 @@ export function RepoNav({
       >
         <PulseIcon />
         Activity
+      </Link>
+      <Link to={proposalsHref({ repo })} current={current === "proposals" ? "page" : undefined}>
+        <InboxIcon />
+        Proposals
       </Link>
     </nav>
   );

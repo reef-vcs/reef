@@ -851,9 +851,10 @@ impl EvidenceService for EvidenceHandler {
         &self,
         request: Request<AddEvidenceRequest>,
     ) -> Result<Response<AddEvidenceResponse>, Status> {
-        let agent = super::agent_of(request.metadata())?;
-        let remote_token_id = super::remote_of(&request).map(|caller| caller.token_id.clone());
         let web = super::web_of(&request).map(|caller| caller.session.clone());
+        // A web write is a person's: a `reef-agent` a page sends is not recorded (R3.31).
+        let agent = super::agent_of(request.metadata())?.filter(|_| web.is_none());
+        let remote_token_id = super::remote_of(&request).map(|caller| caller.token_id.clone());
         let request = request.into_inner();
         let state = &self.state;
         let target = target(state, &request.repo, &request.workspace)?;

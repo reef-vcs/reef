@@ -217,6 +217,9 @@ message CommentAuthor {
   string session_id = 5;
   // The remote token the call came through; unset over the socket.
   RemoteCaller remote = 6;
+  // The web UI session the call came through (R3.31); unset for any other
+  // call.
+  WebCaller web = 7;
 }
 
 // The session an instruction is for, resolved when it was written.

@@ -130,6 +130,7 @@ pub(super) fn who_of(landing: &StoredLanding) -> Requester {
                 landing.row.remote_token_name.clone().unwrap_or_default(),
             )
         }),
+        web: landing.row.web_session.clone(),
         marked: landing.row.agent.clone(),
     }
 }

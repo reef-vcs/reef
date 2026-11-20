@@ -291,6 +291,9 @@ pub const ATTR_AGENT: &str = "reef.agent";
 pub const ATTR_REMOTE_TOKEN: &str = "reef.remote-token";
 /// The name the remote token in [`ATTR_REMOTE_TOKEN`] had then (R2.08).
 pub const ATTR_REMOTE_TOKEN_NAME: &str = "reef.remote-token-name";
+/// The attribute naming the web UI session whose call caused an operation
+/// (R3.31): 16 hex digits of its token's digest, never the token.
+pub const ATTR_WEB_SESSION: &str = "reef.web-session";
 /// The attribute recording lifecycle transitions (R3.09): a
 /// [`LifecycleRecord`](super::lifecycle::LifecycleRecord) as compact JSON.
 pub const ATTR_LIFECYCLE: &str = "reef.lifecycle";
@@ -312,6 +315,72 @@ pub const ATTR_CONFLICT: &str = "reef.conflict";
 /// Separates an agent from the remote token it carries; see
 /// [`RemoteToken::mark`].
 const REMOTE_MARK: char = '\u{1}';
+/// Separates an agent from the web UI session it carries; see
+/// [`mark_web`].
+const WEB_MARK: char = '\u{2}';
+
+/// `agent` carrying the web UI session `session` (R3.31), as
+/// [`RemoteToken::mark`] carries a remote token: every operation a call
+/// through the web listener records names its session. `agent` may be
+/// empty: a browser sends no `reef-agent`.
+pub fn mark_web(agent: &str, session: &str) -> String {
+    format!("{agent}{WEB_MARK}{session}")
+}
+
+/// `marked`, with `fallback` as its agent when it names none: a web call
+/// names no agent, and an operation it causes in a workspace records the
+/// workspace's owner as `reef.agent` beside its web session, as a socket
+/// call naming no agent does.
+pub fn agent_or(marked: Option<String>, fallback: &str) -> String {
+    let Some(marked) = marked else {
+        return fallback.to_owned();
+    };
+    match unmark(&marked) {
+        Marked {
+            agent: None,
+            web: Some(session),
+            ..
+        } => mark_web(fallback, session),
+        _ => marked,
+    }
+}
+
+/// What an agent string carries: the agent, and the remote token or the
+/// web UI session its call came through.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Marked<'a> {
+    /// The agent; `None` when the call named none.
+    pub agent: Option<&'a str>,
+    /// The remote token, through the remote listener (R2.08).
+    pub remote: Option<RemoteToken>,
+    /// The web UI session, through the web listener (R3.31).
+    pub web: Option<&'a str>,
+}
+
+/// Splits `marked` ([`RemoteToken::mark`], [`mark_web`]) into its parts.
+pub fn unmark(marked: &str) -> Marked<'_> {
+    if let Some((agent, session)) = marked.split_once(WEB_MARK) {
+        return Marked {
+            agent: Some(agent).filter(|agent| !agent.is_empty()),
+            remote: None,
+            web: Some(session),
+        };
+    }
+    let mut parts = marked.splitn(3, REMOTE_MARK);
+    let agent = parts.next().filter(|agent| !agent.is_empty());
+    let remote = match (parts.next(), parts.next()) {
+        (Some(id), Some(name)) => Some(RemoteToken {
+            id: id.to_owned(),
+            name: name.to_owned(),
+        }),
+        _ => None,
+    };
+    Marked {
+        agent,
+        remote,
+        web: None,
+    }
+}
 
 /// The remote token a call through the daemon's remote listener presented
 /// (R2.08).
@@ -332,22 +401,6 @@ impl RemoteToken {
     /// can carry the mark: a client cannot forge a token this way.
     pub fn mark(&self, agent: &str) -> String {
         format!("{agent}{REMOTE_MARK}{}{REMOTE_MARK}{}", self.id, self.name)
-    }
-
-    /// The agent `marked` names, and the token it carries if any.
-    pub fn unmark(marked: &str) -> (&str, Option<RemoteToken>) {
-        let mut parts = marked.splitn(3, REMOTE_MARK);
-        let agent = parts.next().unwrap_or_default();
-        match (parts.next(), parts.next()) {
-            (Some(id), Some(name)) => (
-                agent,
-                Some(RemoteToken {
-                    id: id.to_owned(),
-                    name: name.to_owned(),
-                }),
-            ),
-            _ => (agent, None),
-        }
     }
 }
 
@@ -531,13 +584,14 @@ impl OpMeta {
         if self.kind != OpKind::External {
             tx.set_attribute(ATTR_KIND.to_owned(), self.kind.as_str().to_owned());
         }
-        let (agent, remote) = match self.agent.as_deref() {
-            Some(marked) => {
-                let (agent, remote) = RemoteToken::unmark(marked);
-                (Some(agent), remote)
-            }
-            None => (None, None),
-        };
+        let Marked { agent, remote, web } = self.agent.as_deref().map_or(
+            Marked {
+                agent: None,
+                remote: None,
+                web: None,
+            },
+            unmark,
+        );
         let optional = [
             (ATTR_SNAPSHOT_KIND, self.snapshot_kind.as_deref()),
             (ATTR_WORKSPACE, self.workspace.as_deref()),
@@ -549,6 +603,7 @@ impl OpMeta {
                 ATTR_REMOTE_TOKEN_NAME,
                 remote.as_ref().map(|r| r.name.as_str()),
             ),
+            (ATTR_WEB_SESSION, web),
         ];
         for (key, value) in optional {
             if let Some(value) = value.filter(|value| !value.is_empty()) {
@@ -1383,6 +1438,26 @@ mod tests {
     use super::*;
 
     const ID: &str = "0123456789abcdef";
+
+    #[test]
+    fn marks_split_back_and_a_web_call_takes_the_owner() {
+        let token = RemoteToken {
+            id: "tok".to_owned(),
+            name: "phone".to_owned(),
+        };
+        let remote = token.mark("claude");
+        assert_eq!(unmark(&remote).agent, Some("claude"));
+        assert_eq!(unmark(&remote).remote, Some(token));
+        let web = mark_web("", "0123456789abcdef");
+        assert_eq!(unmark(&web).agent, None);
+        assert_eq!(unmark(&web).web, Some("0123456789abcdef"));
+        assert_eq!(unmark("claude").agent, Some("claude"));
+        let owned = agent_or(Some(web), "owner@host");
+        assert_eq!(unmark(&owned).agent, Some("owner@host"));
+        assert_eq!(unmark(&owned).web, Some("0123456789abcdef"));
+        assert_eq!(agent_or(None, "owner@host"), "owner@host");
+        assert_eq!(agent_or(Some(remote.clone()), "owner@host"), remote);
+    }
 
     fn entry(description: &str, is_snapshot: bool) -> OpEntry {
         in_workspace(description, is_snapshot, "default")

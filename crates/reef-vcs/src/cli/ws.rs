@@ -301,7 +301,7 @@ pub(crate) async fn run(ctx: &Ctx, global: &Global, args: Args) -> Result<ExitCo
             workspace,
             no_snapshot,
         } => release(ctx, &workspace, no_snapshot).await,
-        WsCommand::Move(args) => ws_move::run(ctx, args).await,
+        WsCommand::Move(args) => Box::pin(ws_move::run(ctx, args)).await,
     };
     done.map(|()| ExitCode::SUCCESS)
 }

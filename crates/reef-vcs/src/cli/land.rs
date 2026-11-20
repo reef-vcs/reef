@@ -14,7 +14,7 @@ use reef_api::v1::{
     self, GetBatchRequest, GetLandingRequest, LandChangeRequest, ListBatchesRequest,
     ListLandingsRequest, PushLandedRequest,
 };
-use reef_client::json::{reverse_hex, rfc3339};
+use reef_client::json::{reverse_hex, rfc3339, web_caller};
 use reef_error::{Advice, ErrorKind};
 use reef_policy::{Decision, Evaluation, RuleKind, Status};
 use schemars::JsonSchema;
@@ -390,6 +390,9 @@ pub(crate) struct Landing {
     pub(crate) identity: Option<String>,
     /// The remote token that asked, by name.
     pub(crate) remote_token: Option<String>,
+    /// The web UI session that asked (R3.31).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) web_session: Option<String>,
     /// When it was asked for.
     pub(crate) created_at: Option<String>,
     /// When it finished.
@@ -551,6 +554,7 @@ pub(crate) fn landing_of(message: &v1::Landing) -> Landing {
             .remote
             .as_ref()
             .map(|remote| remote.token_name.clone()),
+        web_session: web_caller(message.web.as_ref()),
         created_at: message.created_at.as_ref().map(rfc3339),
         finished_at: message.finished_at.as_ref().map(rfc3339),
         policy: None,

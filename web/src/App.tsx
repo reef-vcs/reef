@@ -29,15 +29,17 @@ const REPO_PAGES: [string, RepoPage][] = [
   ["/repos/:repo/smartlog", "smartlog"],
   ["/repos/:repo/workspaces", "workspaces"],
   ["/repos/:repo/activity", "activity"],
+  ["/repos/:repo/proposals", "proposals"],
+  ["/repos/:repo/proposals/:change", "proposals"],
 ];
 
 const PAGE_TITLES: Record<string, string> = { "/states": "States", "/passkeys": "Passkeys" };
 
-/** The repository page `path` names, if any. */
-function repoRoute(path: string): { repo: string; page: RepoPage } | null {
+/** The repository page `path` names, if any, and the proposal it opens. */
+function repoRoute(path: string): { repo: string; page: RepoPage; change: string } | null {
   for (const [pattern, page] of REPO_PAGES) {
     const params = match(pattern, path);
-    if (params?.repo) return { repo: params.repo, page };
+    if (params?.repo) return { repo: params.repo, page, change: params.change ?? "" };
   }
   return null;
 }
@@ -119,6 +121,7 @@ function Shell({
               key={repo.repo}
               repo={repo.repo}
               page={repo.page}
+              change={repo.change}
               search={search}
               connection={connection}
               live={live}

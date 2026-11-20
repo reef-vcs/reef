@@ -102,8 +102,8 @@ pub use lifecycle::{
 /// `0021_landing_stacks` (R3.10), `0023_automatic_landing` (R3.45;
 /// `0022` is #262's), `0025_help_requests` (R3.32) and
 /// `0026_resolution_tiers` (R3.28, numbered after R3.32's, which merged
-/// first; `0024` is unused), `0027_dependent_lifecycle` (R3.11) and
-/// `0028_passkeys` (R3.43).
+/// first; `0024` is unused), `0027_dependent_lifecycle` (R3.11),
+/// `0028_passkeys` (R3.43) and `0029_web_audit` (R3.31).
 /// They are independent of each other, so a database may have a later one
 /// without an earlier one; see [`migrate`].
 const MIGRATIONS: &[(&str, &str)] = &[
@@ -195,6 +195,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0028_passkeys",
         include_str!("migrations/0028_passkeys.sql"),
+    ),
+    (
+        "0029_web_audit",
+        include_str!("migrations/0029_web_audit.sql"),
     ),
 ];
 
@@ -976,7 +980,8 @@ mod tests {
                 "0025_help_requests",
                 "0026_resolution_tiers",
                 "0027_dependent_lifecycle",
-                "0028_passkeys"
+                "0028_passkeys",
+                "0029_web_audit"
             ]
         );
         // A newer daemon applied a migration this binary does not have, without
@@ -1031,7 +1036,8 @@ mod tests {
                 "0025_help_requests",
                 "0026_resolution_tiers",
                 "0027_dependent_lifecycle",
-                "0028_passkeys"
+                "0028_passkeys",
+                "0029_web_audit"
             ]
         );
         let repo = "aaaa000000000001".parse().unwrap();

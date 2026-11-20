@@ -12,6 +12,7 @@ import {
   LeaseSchema,
   WorkspaceState,
 } from "../gen/reef/api/v1/workspaces_pb";
+import { LifecycleState, MissingDependencySchema } from "../gen/reef/api/v1/lifecycle_pb";
 import { OperationKind } from "../gen/reef/api/v1/operations_pb";
 import { PresenceEndReason, PresenceKind } from "../gen/reef/api/v1/presence_pb";
 import { OperationStore } from "../live/operations";
@@ -318,6 +319,40 @@ describe("Fleet", () => {
     expect(notice.textContent).toBe(
       "Disk nearly full: new workspaces are refused. 18 GiB free, floor 24 GiB. Releasing the idle w2000000 would free 5.0 GiB.",
     );
+  });
+
+  it("names the declined change below a workspace's change and how to move off it (#350)", async () => {
+    const daemon = withTwo();
+    const first = daemon.workspaces[0];
+    if (!first) throw new Error("no workspace");
+    first.missingDependency = create(MissingDependencySchema, {
+      changeId: "b".repeat(32),
+      state: LifecycleState.DECLINED,
+      transition: { reason: "wrong approach" },
+      moveChangeId: "c".repeat(32),
+      moveOnto: "main",
+    });
+    setup(daemon, { query: `workspace=${first.id}` });
+    await flush();
+    await flush();
+    const pane = screen.getByRole("complementary", { name: "Selection" });
+    expect(pane.textContent).toContain(", was declined: wrong approach. Move off it with");
+    expect(
+      within(pane)
+        .getByRole("link", { name: reverseHex("b".repeat(32)).slice(0, 8) })
+        .getAttribute("href"),
+    ).toBe(`/repos/${REPO}/proposals/${"b".repeat(32)}`);
+    expect(pane.textContent).toContain(
+      `reef rebase ${reverseHex("c".repeat(32)).slice(0, 8)} --source --onto main`,
+    );
+    cleanup();
+    first.missingDependency.moveOnto = "main$(touch${IFS}/tmp/pwned)";
+    setup(daemon, { query: `workspace=${first.id}` });
+    await flush();
+    await flush();
+    const unsafe = screen.getByRole("complementary", { name: "Selection" }).textContent;
+    expect(unsafe).toContain("--source --onto <destination>");
+    expect(unsafe).not.toContain("$(");
   });
 
   it("shows the workspace pane with Measure again, and a message for an unknown selection", async () => {

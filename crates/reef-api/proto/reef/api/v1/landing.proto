@@ -332,6 +332,8 @@ message Landing {
   // The landing id of the stack's head in the request that made this one
   // (R3.10); empty for a change landed alone.
   string stack = 23;
+  // The web UI session that asked (R3.31); unset for any other call.
+  WebCaller web = 24;
 }
 
 // Whether a destination's landed history is on its git remote (R3.17).
