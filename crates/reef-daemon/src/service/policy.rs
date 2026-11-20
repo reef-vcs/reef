@@ -500,6 +500,11 @@ fn key_of(identity: Option<&v1::KeyIdentity>, key_id: &str) -> input::Key {
                 .as_str_name(),
             "SESSION_PRESENCE_",
         ),
+        passkey: key
+            .passkey
+            .as_ref()
+            .map(|passkey| passkey.fingerprint.clone())
+            .unwrap_or_default(),
         custody: word(
             v1::KeyCustody::try_from(key.custody)
                 .unwrap_or_default()
@@ -944,6 +949,16 @@ pub(crate) fn evaluation_message(evaluation: &Evaluation) -> v1::PolicyEvaluatio
             resolutions: count(evaluation.input.resolutions),
         }),
         cost: evaluation.cost,
+        verified: evaluation
+            .verified
+            .iter()
+            .map(|signer| v1::PolicyVerifiedSigner {
+                evidence_id: signer.evidence_id.clone(),
+                identity: signer.identity.clone(),
+                passkey: signer.passkey.clone(),
+                pinned: signer.pinned,
+            })
+            .collect(),
         ..v1::PolicyEvaluation::default()
     }
 }

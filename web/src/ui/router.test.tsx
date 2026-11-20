@@ -1,6 +1,6 @@
 // R2.19 test 3: routes with parameters and a query string.
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { act, cleanup, fireEvent, render, screen } from "../test/testing-library";
 import { href, Link, match, navigate, usePath, useSearch } from "./router";
 
 beforeEach(() => {

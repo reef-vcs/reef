@@ -19,6 +19,11 @@
 //!               "issuer":{"kind":"reef-daemon","keyId":"<the authority's key id>","host":"mbp.local"}}}
 //! ```
 //!
+//! A `user_verified` certificate (R3.43, ADR 0085) also carries
+//! `presenceEvidence` after `presence`: a passkey's `WebAuthn` assertion over
+//! a challenge derived from the certificate's own fields, which
+//! [`crate::webauthn`] checks wherever the certificate is checked.
+//!
 //! Every function here is pure: no clock, no database, no I/O. The caller
 //! supplies the authorities it knows ([`check_certificate`]), the time the
 //! evidence was first witnessed, and the revocations that apply
@@ -37,7 +42,11 @@ use crate::envelope::{Envelope, decode_base64, encode_base64};
 use crate::keys::{KeyId, PublicKey, SigningKey};
 use crate::statement::{ResourceDescriptor, format_time, parse_time};
 use crate::verify::{Opened, predicate_error, statement_value};
-use crate::{Invalid, PAYLOAD_TYPE, STATEMENT_TYPE, pae};
+use crate::webauthn::{
+    Approves, Assertion, AssertionError, Check, EVIDENCE_TYPE, MAX_CREDENTIAL_ID_BYTES, PasskeyKey,
+    PresenceEvidence, is_rp_id,
+};
+use crate::{Invalid, MAX_ENVELOPE_BYTES, PAYLOAD_TYPE, STATEMENT_TYPE, pae};
 
 /// The certificate's predicate type.
 pub const SESSION_KEY_PREDICATE_TYPE: &str = "urn:reef-vcs:session-key:v1";
@@ -117,13 +126,16 @@ vocabulary! {
 }
 
 vocabulary! {
-    /// How a human's presence was established when the key was issued.
-    /// R3.03 issues only `none`; R3.43 adds `user_verified`. A value this
-    /// reader does not know makes the certificate invalid for it.
+    /// How a human's presence was established when the key was issued. A
+    /// value this reader does not know makes the certificate invalid for
+    /// it, so a reader before R3.43 refuses `user_verified`.
     Presence {
         /// Not established: the daemon's user, or anything running as that
         /// user, asked for the key.
         None = "none",
+        /// A person approved this key's one sign-off with a user-verified
+        /// passkey assertion, which the certificate carries (R3.43).
+        UserVerified = "user_verified",
     }
 }
 
@@ -219,6 +231,34 @@ pub struct Issuer {
     pub host: String,
 }
 
+/// A certificate's `presence`, with the evidence `user_verified` carries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PresenceProof {
+    /// `none`.
+    None,
+    /// `user_verified`, with the passkey's assertion, checked against the
+    /// certificate's authority, key, identity and session.
+    UserVerified(Box<PresenceEvidence>),
+}
+
+impl PresenceProof {
+    /// The predicate's `presence`.
+    pub fn kind(&self) -> Presence {
+        match self {
+            PresenceProof::None => Presence::None,
+            PresenceProof::UserVerified(_) => Presence::UserVerified,
+        }
+    }
+
+    /// The evidence, for `user_verified`.
+    pub fn evidence(&self) -> Option<&PresenceEvidence> {
+        match self {
+            PresenceProof::None => None,
+            PresenceProof::UserVerified(evidence) => Some(evidence),
+        }
+    }
+}
+
 /// What a certificate binds: everything its predicate says, as values.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Binding {
@@ -232,8 +272,8 @@ pub struct Binding {
     pub agent: Option<String>,
     /// The session, `ses_` and 16 hex digits.
     pub session: String,
-    /// How a human's presence was established.
-    pub presence: Presence,
+    /// How a human's presence was established, with its evidence.
+    pub presence: PresenceProof,
     /// Where the private key lives.
     pub custody: Custody,
     /// The start of the validity window, unix milliseconds.
@@ -289,10 +329,16 @@ pub struct SessionKeyPredicate {
     /// successive keys share it.
     #[schemars(regex(pattern = r"^ses_[0-9a-f]{16}$"))]
     pub session: String,
-    /// How a human's presence was established: `none` (not verified). A
-    /// value a reader does not know makes the certificate invalid for it.
-    #[schemars(extend("enum" = ["none"]))]
+    /// How a human's presence was established: `none` (not verified) or
+    /// `user_verified` (a passkey's assertion, in `presenceEvidence`, for
+    /// actor `human` only). A value a reader does not know makes the
+    /// certificate invalid for it.
+    #[schemars(extend("enum" = ["none", "user_verified"]))]
     pub presence: String,
+    /// The passkey assertion behind `user_verified`: present exactly when
+    /// `presence` is `user_verified`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presence_evidence: Option<CertificatePresenceEvidence>,
     /// Where the private key lives: `client` (the requesting process) or
     /// `daemon`.
     #[schemars(extend("enum" = ["client", "daemon"]))]
@@ -375,6 +421,77 @@ pub struct CertificateIdentity {
     pub kind: String,
 }
 
+/// A `user_verified` certificate's evidence (R3.43): one `WebAuthn`
+/// assertion by a passkey, over the challenge derived from the
+/// certificate's authority, key, identity id, session and `approves`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename = "evidence.PresenceEvidence")]
+pub struct CertificatePresenceEvidence {
+    /// `webauthn`.
+    #[serde(rename = "type")]
+    #[schemars(extend("enum" = ["webauthn"]))]
+    pub type_: String,
+    /// The passkey's fingerprint: SHA-256 of `publicKey`'s DER, lowercase
+    /// hex, which a policy's `[passkeys]` pins.
+    #[schemars(regex(pattern = r"^[0-9a-f]{64}$"))]
+    pub passkey: String,
+    /// The credential id, unpadded base64url.
+    pub credential_id: String,
+    /// The passkey's DER `SubjectPublicKeyInfo`, standard base64.
+    pub public_key: String,
+    /// Its COSE algorithm: ES256 (-7), `EdDSA` (-8) or RS256 (-257).
+    #[schemars(extend("enum" = [-7, -8, -257]))]
+    pub algorithm: i64,
+    /// The `WebAuthn` RP ID, the origin's host: `localhost`.
+    pub rp_id: String,
+    /// The one sign-off the assertion approves.
+    pub approves: CertificateApproves,
+    /// The assertion's `authenticatorData`, standard base64.
+    pub authenticator_data: String,
+    /// Its `clientDataJSON`, standard base64.
+    #[serde(rename = "clientDataJSON")]
+    pub client_data_json: String,
+    /// Its signature over `authenticatorData` and SHA-256 of
+    /// `clientDataJSON`, standard base64.
+    pub signature: String,
+}
+
+/// What a `user_verified` key's one assertion approves.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[schemars(rename = "evidence.PresenceApproves")]
+pub struct CertificateApproves {
+    /// SHA-256 of the evidence statement's payload, lowercase hex: the one
+    /// statement the key may sign.
+    #[schemars(regex(pattern = r"^[0-9a-f]{64}$"))]
+    pub statement: String,
+    /// The change the evidence is added for, a full change id in hex.
+    #[schemars(regex(pattern = r"^[0-9a-f]{32}$"))]
+    pub change: String,
+}
+
+impl From<&PresenceEvidence> for CertificatePresenceEvidence {
+    fn from(evidence: &PresenceEvidence) -> CertificatePresenceEvidence {
+        use base64::Engine as _;
+        CertificatePresenceEvidence {
+            type_: EVIDENCE_TYPE.to_owned(),
+            passkey: evidence.passkey.fingerprint().to_string(),
+            credential_id: base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(&evidence.credential_id),
+            public_key: encode_base64(evidence.passkey.spki()),
+            algorithm: evidence.passkey.algorithm().cose(),
+            rp_id: evidence.rp_id.clone(),
+            approves: CertificateApproves {
+                statement: evidence.approves.statement.clone(),
+                change: evidence.approves.change.clone(),
+            },
+            authenticator_data: encode_base64(&evidence.assertion.authenticator_data),
+            client_data_json: encode_base64(&evidence.assertion.client_data_json),
+            signature: encode_base64(&evidence.assertion.signature),
+        }
+    }
+}
+
 /// The issuer a certificate names.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -419,7 +536,11 @@ impl Binding {
                 actor: self.actor.as_str().to_owned(),
                 agent: self.agent.clone(),
                 session: self.session.clone(),
-                presence: self.presence.as_str().to_owned(),
+                presence: self.presence.kind().as_str().to_owned(),
+                presence_evidence: self
+                    .presence
+                    .evidence()
+                    .map(CertificatePresenceEvidence::from),
                 custody: self.custody.as_str().to_owned(),
                 not_before: time_text("notBefore", self.not_before_ms)?,
                 not_after: time_text("notAfter", self.not_after_ms)?,
@@ -443,7 +564,8 @@ impl Binding {
 
 /// Issues a certificate: `authority` signs `binding`, whose issuer must name
 /// it. A binding that [`check_certificate`] would refuse is refused here, so
-/// an authority never signs one.
+/// an authority never signs one: presence evidence whose assertion does not
+/// verify, or a certificate over [`MAX_ENVELOPE_BYTES`].
 pub fn certify(authority: &SigningKey, binding: &Binding) -> Result<Envelope, Invalid> {
     let key_id = authority.public_key().id();
     if &binding.issuer.key_id != key_id {
@@ -457,7 +579,11 @@ pub fn certify(authority: &SigningKey, binding: &Binding) -> Result<Envelope, In
     }
     let payload = binding.payload()?;
     parse_certificate(&payload, key_id)?;
-    Ok(authority.sign(PAYLOAD_TYPE, &payload))
+    let envelope = authority.sign(PAYLOAD_TYPE, &payload);
+    match envelope.to_bytes().len() {
+        size if size > MAX_ENVELOPE_BYTES => Err(Invalid::Size(size)),
+        _ => Ok(envelope),
+    }
 }
 
 /// A revocation: from when signatures stop counting, and when it was made.
@@ -542,7 +668,8 @@ impl Certified {
 
 /// Checks a certificate in ADR 0055's order: the size and the envelope; the
 /// authority found by `keyid` through `authorities`; the signature over the
-/// PAE; and only then the statement and the predicate.
+/// PAE; and only then the statement and the predicate, a `user_verified`
+/// certificate's passkey assertion included.
 pub fn check_certificate(
     envelope: &[u8],
     authorities: &dyn Fn(&KeyId) -> Option<Authority>,
@@ -869,6 +996,15 @@ fn binding_of(predicate: &Map<String, Value>) -> Result<Binding, Invalid> {
         return Err(predicate_error("notAfter", "not after notBefore"));
     }
     let issuer = issuer_of(predicate)?;
+    let presence = presence_proof(
+        presence,
+        predicate.get("presenceEvidence"),
+        actor,
+        &issuer.key_id,
+        public_key.id(),
+        &identity.id,
+        session,
+    )?;
     Ok(Binding {
         public_key,
         identity,
@@ -880,6 +1016,125 @@ fn binding_of(predicate: &Map<String, Value>) -> Result<Binding, Invalid> {
         not_before_ms,
         not_after_ms,
         issuer,
+    })
+}
+
+/// `presence` with its evidence, whose assertion is checked over the
+/// challenge derived from the certificate's authority, key, identity and
+/// session.
+fn presence_proof(
+    presence: Presence,
+    evidence: Option<&Value>,
+    actor: Actor,
+    authority: &KeyId,
+    key: &KeyId,
+    identity: &str,
+    session: &str,
+) -> Result<PresenceProof, Invalid> {
+    Ok(match (presence, evidence) {
+        (Presence::None, None) => PresenceProof::None,
+        (Presence::None, Some(_)) => {
+            return Err(predicate_error(
+                "presenceEvidence",
+                "only with presence user_verified",
+            ));
+        }
+        (Presence::UserVerified, None) => {
+            return Err(predicate_error(
+                "presenceEvidence",
+                "required with presence user_verified",
+            ));
+        }
+        (Presence::UserVerified, Some(_)) if actor != Actor::Human => {
+            return Err(predicate_error(
+                "presence",
+                "user_verified is certified for actor human only",
+            ));
+        }
+        (Presence::UserVerified, Some(value)) => {
+            let evidence = presence_evidence_of(value)?;
+            evidence
+                .check(authority, key, identity, session)
+                .map_err(|error| predicate_error("presenceEvidence", error.to_string()))?;
+            PresenceProof::UserVerified(Box::new(evidence))
+        }
+    })
+}
+
+/// The predicate's `presenceEvidence`, its fields decoded and its
+/// fingerprint the public key's; the assertion is checked by the caller.
+fn presence_evidence_of(value: &Value) -> Result<PresenceEvidence, Invalid> {
+    const FIELD: &str = "presenceEvidence";
+    let Value::Object(evidence) = value else {
+        return Err(predicate_error(FIELD, "not a JSON object"));
+    };
+    let bytes = |key: &str| -> Result<Vec<u8>, Invalid> {
+        decode_base64(string(evidence, key, FIELD)?)
+            .ok_or_else(|| predicate_error(FIELD, format!("{key} is not base64")))
+    };
+    match string(evidence, "type", FIELD)? {
+        EVIDENCE_TYPE => {}
+        other => {
+            return Err(predicate_error(
+                FIELD,
+                format!("type {other:?} is not one this reader knows: webauthn"),
+            ));
+        }
+    }
+    let algorithm = match evidence.get("algorithm") {
+        Some(Value::Number(number)) => number.as_i64(),
+        _ => None,
+    }
+    .ok_or_else(|| predicate_error(FIELD, "algorithm is not a COSE algorithm number"))?;
+    let refused = |error: AssertionError| predicate_error(FIELD, error.to_string());
+    let passkey = PasskeyKey::from_spki(&bytes("publicKey")?, algorithm).map_err(refused)?;
+    let fingerprint = string(evidence, "passkey", FIELD)?;
+    if fingerprint != passkey.fingerprint().as_str() {
+        return Err(refused(AssertionError {
+            check: Check::Passkey,
+            message: format!(
+                "passkey {fingerprint:?} is not SHA-256 of publicKey, {}",
+                passkey.fingerprint()
+            ),
+        }));
+    }
+    let credential_id = bytes("credentialId")?;
+    if credential_id.is_empty() || credential_id.len() > MAX_CREDENTIAL_ID_BYTES {
+        return Err(predicate_error(
+            FIELD,
+            format!("credentialId is 1 to {MAX_CREDENTIAL_ID_BYTES} bytes"),
+        ));
+    }
+    let rp_id = string(evidence, "rpId", FIELD)?;
+    if !is_rp_id(rp_id) {
+        return Err(predicate_error(
+            FIELD,
+            format!("rpId {rp_id:?} is not a domain"),
+        ));
+    }
+    let Some(Value::Object(approves)) = evidence.get("approves") else {
+        return Err(predicate_error(
+            FIELD,
+            "approves is missing or not a JSON object",
+        ));
+    };
+    let approves = Approves {
+        statement: string(approves, "statement", FIELD)?.to_owned(),
+        change: string(approves, "change", FIELD)?.to_owned(),
+    };
+    if let Some(problem) = approves.problem() {
+        return Err(predicate_error(FIELD, problem));
+    }
+    Ok(PresenceEvidence {
+        passkey,
+        credential_id,
+        rp_id: rp_id.to_owned(),
+        approves,
+        assertion: Assertion {
+            authenticator_data: bytes("authenticatorData")?,
+            client_data_json: bytes("clientDataJSON")?,
+            signature: bytes("signature")?,
+        },
     })
 }
 
@@ -977,7 +1232,7 @@ mod tests {
             actor: Actor::Agent,
             agent: Some("builder-3".into()),
             session: "ses_41c9e07ab2d35f18".into(),
-            presence: Presence::None,
+            presence: PresenceProof::None,
             custody: Custody::Client,
             not_before_ms: 1_793_959_200_000,
             not_after_ms: 1_793_962_800_000,
@@ -995,7 +1250,11 @@ mod tests {
             assert_eq!(Actor::parse(actor.as_str()), Some(*actor));
         }
         assert_eq!(IssuerKind::ReefDaemon.as_str(), "reef-daemon");
-        assert_eq!(Presence::parse("user_verified"), None);
+        assert_eq!(
+            Presence::parse("user_verified"),
+            Some(Presence::UserVerified)
+        );
+        assert_eq!(Presence::parse("user_present"), None);
         assert!(is_name("ci-main") && is_name("a") && !is_name("-a") && !is_name("A"));
         assert!(is_name(&"a".repeat(63)) && !is_name(&"a".repeat(64)));
         assert!(!is_name("idn_0123456789abcdef") && !is_name("ses_x") && is_name("idn-x"));

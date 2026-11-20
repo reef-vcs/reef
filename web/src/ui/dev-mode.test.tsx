@@ -1,7 +1,7 @@
 // The design pass: developer mode is off by default, stored per origin, safe
 // when storage throws, and followed across tabs.
-import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { act, cleanup, render, screen } from "../test/testing-library";
 import { DEV_MODE_KEY, Dev, devMode, Human, reloadDevMode, setDevMode } from "./dev-mode";
 
 afterEach(() => {

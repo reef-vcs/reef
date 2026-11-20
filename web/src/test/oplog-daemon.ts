@@ -7,7 +7,7 @@
 import { clone, create } from "@bufbuild/protobuf";
 import { timestampFromMs, timestampMs } from "@bufbuild/protobuf/wkt";
 import { Code, createRouterTransport } from "@connectrpc/connect";
-import { connectionOver, type Connection } from "../api/connection";
+import type { Connection } from "../api/connection";
 import {
   GetOperationResponseSchema,
   ListOperationsResponseSchema,
@@ -212,6 +212,6 @@ export class FakeOplog {
         },
       });
     });
-    return connectionOver(transport, "test");
+    return { transport, label: "test" };
   }
 }

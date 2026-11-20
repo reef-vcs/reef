@@ -20,24 +20,37 @@ use reef_api::v1::{
     AddOidcMatchRequest, AddOidcMatchResponse, RegisterSigstoreKeyRequest,
     RegisterSigstoreKeyResponse, RevokeOidcMatchRequest, RevokeOidcMatchResponse,
 };
+use reef_api::v1::{
+    GetApprovalRequest, GetApprovalResponse, ListPasskeysRequest, ListPasskeysResponse,
+    RegisterPasskeyRequest, RegisterPasskeyResponse, RemovePasskeyRequest, RemovePasskeyResponse,
+    RequestApprovalRequest, RequestApprovalResponse, ResetPasskeysRequest, ResetPasskeysResponse,
+    ResolveApprovalRequest, ResolveApprovalResponse, StartPasskeyRegistrationRequest,
+    StartPasskeyRegistrationResponse, resolve_approval_request,
+};
 use reef_evidence::session::{IdentityKind, is_name};
+use reef_evidence::webauthn::{self, PasskeyChange};
 use tonic::{Request, Response, Status};
 
 use super::convert::timestamp;
-use super::page::{PageRequest, newest_first};
+use super::page::{PageRequest, newest_first, oldest_first};
 use super::reading::bad_token;
 use crate::daemon::AppState;
 use crate::db::{
-    AuthorityRow, IdentityRow, InTheWay, OidcMatchRow, RemoteTokenRow, SessionKeyFilter,
+    AuthorityRow, IdentityRow, InTheWay, OidcMatchRow, PasskeyRow, RemoteTokenRow, SessionKeyFilter,
 };
 use crate::error::status;
+use crate::identity::approvals::{
+    Approval, ApprovalRequest, Requester, Resolution, Resolved, State,
+};
 use crate::identity::issue::Channel;
+use crate::identity::passkeys::{ALGORITHMS, RP_ID};
 use crate::identity::read::{
     issuer_kind_message, kind_message, revocation_row_message, session_key_message,
 };
 use crate::identity::sigstore::match_problem;
 use crate::identity::{IdentityError, audit, display_name_problem, email_problem};
 use crate::model::Timestamp;
+use crate::service::evidence::{EvidenceError, link_of};
 
 const LIST_SESSION_KEYS: &str = "/reef.api.v1.IdentityService/ListSessionKeys";
 
@@ -48,6 +61,30 @@ pub struct IdentityHandler {
 }
 
 impl IdentityHandler {
+    /// `approval` as a message, with its identity's live passkeys.
+    fn approval_message(&self, approval: &Approval) -> Result<v1::Approval, Status> {
+        Ok(approval_message(
+            approval,
+            self.credential_ids(&approval.identity.id)?,
+        ))
+    }
+
+    /// The credential ids of `identity_id`'s live passkeys.
+    fn credential_ids(&self, identity_id: &str) -> Result<Vec<Vec<u8>>, Status> {
+        let live = self
+            .state
+            .db
+            .passkeys(Some(identity_id), false)
+            .map_err(status)?;
+        Ok(live.into_iter().map(|row| row.credential_id).collect())
+    }
+
+    /// `row` as a message, with its identity's name.
+    fn passkey_message(&self, row: &PasskeyRow) -> Result<v1::Passkey, Status> {
+        let identity = self.state.db.identity(&row.identity_id).map_err(status)?;
+        Ok(passkey_message(row, identity.as_ref()))
+    }
+
     /// A service over `state`.
     pub fn new(state: Arc<AppState>) -> IdentityHandler {
         IdentityHandler { state }
@@ -146,6 +183,122 @@ fn oidc_message(row: &OidcMatchRow) -> v1::OidcMatch {
     }
 }
 
+/// A web UI session in the API.
+fn web_caller(session: Option<&str>) -> Option<v1::WebCaller> {
+    session.map(|session| v1::WebCaller {
+        session: session.to_owned(),
+    })
+}
+
+/// A passkey in the API (R3.43), with its identity's name when known.
+fn passkey_message(row: &PasskeyRow, identity: Option<&IdentityRow>) -> v1::Passkey {
+    v1::Passkey {
+        id: row.id.clone(),
+        identity_id: row.identity_id.clone(),
+        identity: identity
+            .map(|identity| identity.name.clone())
+            .unwrap_or_default(),
+        label: row.label.clone(),
+        fingerprint: row.fingerprint.clone(),
+        credential_id: row.credential_id.clone(),
+        public_key: row.public_key.clone(),
+        algorithm: i32::try_from(row.algorithm).unwrap_or_default(),
+        rp_id: row.rp_id.clone(),
+        aaguid: row.aaguid.clone(),
+        sign_count: row.sign_count,
+        created_at: Some(timestamp(row.created_at)),
+        created_web_session: web_caller(row.created_web_session.as_deref()),
+        last_used_at: row.last_used_at.map(timestamp),
+        removed_at: row.removed_at.map(timestamp),
+        removed_reason: row.removed_reason.clone().unwrap_or_default(),
+        removed_web_session: web_caller(row.removed_web_session.as_deref()),
+    }
+}
+
+/// An approval in the API (R3.43), with the credential ids of its
+/// identity's live passkeys.
+fn approval_message(approval: &Approval, credential_ids: Vec<Vec<u8>>) -> v1::Approval {
+    let (state, resolved_at, key, resolved_by, declined_reason) = match &approval.state {
+        State::Pending { .. } => (v1::ApprovalState::Pending, None, None, None, String::new()),
+        State::Approved {
+            at,
+            key,
+            web_session,
+        } => (
+            v1::ApprovalState::Approved,
+            Some(*at),
+            Some(key.as_ref().clone()),
+            Some(web_session.as_str()),
+            String::new(),
+        ),
+        State::Declined {
+            at,
+            reason,
+            web_session,
+        } => (
+            v1::ApprovalState::Declined,
+            Some(*at),
+            None,
+            web_session.as_deref(),
+            reason.clone(),
+        ),
+        State::Expired => (
+            v1::ApprovalState::Expired,
+            Some(approval.expires_at),
+            None,
+            None,
+            String::new(),
+        ),
+    };
+    let index = &approval.index;
+    v1::Approval {
+        id: approval.id.clone(),
+        state: state.into(),
+        identity_id: approval.identity.id.clone(),
+        identity: approval.identity.name.clone(),
+        key_id: approval.public_key.id().to_string(),
+        session_id: approval.session_id.clone(),
+        authority_key_id: approval.authority.clone(),
+        approves: Some(v1::Approves {
+            statement_sha256: approval.approves.statement.clone(),
+            change_id: approval.approves.change.clone(),
+        }),
+        challenge: approval.challenge().to_vec(),
+        rp_id: RP_ID.to_owned(),
+        credential_ids,
+        kind: index.kind.clone(),
+        result: index.result.as_str().to_owned(),
+        target: index.target.clone().unwrap_or_default(),
+        tree_id: index.tree_id.clone(),
+        repo_id: approval.resolved.repo_id.clone(),
+        commit_id: approval.resolved.commit_id.clone(),
+        change_id: approval.resolved.change_id.clone(),
+        statement: approval.statement.clone(),
+        requested_through: approval.requester.channel.name().to_owned(),
+        requested_by_agent: approval.requester.agent.clone().unwrap_or_default(),
+        requested_workspace: approval.requester.workspace.clone().unwrap_or_default(),
+        requested_web_session: web_caller(approval.requester.channel.web_session()),
+        created_at: Some(timestamp(approval.created_at)),
+        expires_at: Some(timestamp(approval.expires_at)),
+        resolved_at: resolved_at.map(timestamp),
+        passkey: key.as_ref().and_then(|key| key.passkey.clone()),
+        key,
+        resolved_web_session: web_caller(resolved_by),
+        declined_reason,
+    }
+}
+
+/// `wait` as a duration; a negative one is refused.
+fn wait_of(wait: Option<&prost_types::Duration>) -> Result<std::time::Duration, Status> {
+    let Some(wait) = wait else {
+        return Ok(std::time::Duration::ZERO);
+    };
+    let millis = i128::from(wait.seconds) * 1000 + i128::from(wait.nanos) / 1_000_000;
+    u64::try_from(millis)
+        .map(std::time::Duration::from_millis)
+        .map_err(|_| Status::invalid_argument("wait must not be negative"))
+}
+
 /// The `(issued_at, key_id)` cursor of a page token.
 fn parse_cursor(cursor: &str) -> Result<(Timestamp, String), Status> {
     let (at, id) = cursor.split_once(':').ok_or_else(bad_token)?;
@@ -155,9 +308,15 @@ fn parse_cursor(cursor: &str) -> Result<(Timestamp, String), Status> {
     ))
 }
 
-/// The channel of a request: the socket, or the remote listener with its
-/// token's linked identity.
+/// The channel of a request: the socket, the web UI's listener with its
+/// session (R3.43), or the remote listener with its token's linked
+/// identity.
 pub(crate) fn channel_of<T>(state: &AppState, request: &Request<T>) -> Channel {
+    if let Some(caller) = super::web_of(request) {
+        return Channel::Web {
+            session: caller.session.clone(),
+        };
+    }
     match super::remote_of(request) {
         None => Channel::Socket,
         Some(caller) => {
@@ -614,6 +773,272 @@ impl IdentityService for IdentityHandler {
         Ok(Response::new(RevokeOidcMatchResponse {
             r#match: Some(oidc_message(&row)),
             key_ids,
+        }))
+    }
+
+    async fn list_passkeys(
+        &self,
+        request: Request<ListPasskeysRequest>,
+    ) -> Result<Response<ListPasskeysResponse>, Status> {
+        let request = request.into_inner();
+        let page = PageRequest::new(
+            "/reef.api.v1.IdentityService/ListPasskeys",
+            request.page_size,
+            &request.page_token,
+            &ListPasskeysRequest {
+                page_size: 0,
+                page_token: String::new(),
+                ..request.clone()
+            },
+        )
+        .map_err(status)?;
+        let (rows, identities) = self
+            .state
+            .identity
+            .list_passkeys(&request.identity, request.include_removed)
+            .map_err(status)?;
+        let (rows, next_page_token) = page.page(rows, |row| {
+            format!(
+                "{}:{}",
+                row.identity_id,
+                oldest_first(row.created_at.0, &row.id)
+            )
+        });
+        Ok(Response::new(ListPasskeysResponse {
+            passkeys: rows
+                .iter()
+                .map(|row| passkey_message(row, identities.get(&row.identity_id)))
+                .collect(),
+            next_page_token,
+        }))
+    }
+
+    async fn start_passkey_registration(
+        &self,
+        request: Request<StartPasskeyRegistrationRequest>,
+    ) -> Result<Response<StartPasskeyRegistrationResponse>, Status> {
+        let channel = channel_of(&self.state, &request);
+        let started = self
+            .state
+            .identity
+            .start_registration(&channel, &request.into_inner().identity)
+            .map_err(status)?;
+        let needs_approval = !started.live.is_empty();
+        let add_challenge = if needs_approval {
+            webauthn::passkey_change_challenge(PasskeyChange::Add {
+                registration_challenge: &started.challenge,
+            })
+            .to_vec()
+        } else {
+            Vec::new()
+        };
+        Ok(Response::new(StartPasskeyRegistrationResponse {
+            challenge: started.challenge.to_vec(),
+            expires_at: Some(timestamp(started.expires_at)),
+            rp_id: RP_ID.to_owned(),
+            identity_id: started.identity.id.clone(),
+            identity: started.identity.name.clone(),
+            user_name: format!("Reef: {}", started.identity.name),
+            algorithms: ALGORITHMS
+                .iter()
+                .map(|algorithm| i32::try_from(algorithm.cose()).unwrap_or_default())
+                .collect(),
+            credential_ids: started
+                .live
+                .into_iter()
+                .map(|row| row.credential_id)
+                .collect(),
+            needs_approval,
+            add_challenge,
+        }))
+    }
+
+    #[tracing::instrument(skip_all)]
+    async fn register_passkey(
+        &self,
+        request: Request<RegisterPasskeyRequest>,
+    ) -> Result<Response<RegisterPasskeyResponse>, Status> {
+        let channel = channel_of(&self.state, &request);
+        let origin = self.state.web.origin().unwrap_or_default();
+        let row = self
+            .state
+            .identity
+            .register_passkey(&channel, origin, &request.into_inner())
+            .map_err(status)?;
+        Ok(Response::new(RegisterPasskeyResponse {
+            passkey: Some(self.passkey_message(&row)?),
+        }))
+    }
+
+    #[tracing::instrument(skip_all)]
+    async fn remove_passkey(
+        &self,
+        request: Request<RemovePasskeyRequest>,
+    ) -> Result<Response<RemovePasskeyResponse>, Status> {
+        let channel = channel_of(&self.state, &request);
+        let origin = self.state.web.origin().unwrap_or_default();
+        let row = self
+            .state
+            .identity
+            .remove_passkey(&channel, origin, &request.into_inner())
+            .map_err(status)?;
+        Ok(Response::new(RemovePasskeyResponse {
+            passkey: Some(self.passkey_message(&row)?),
+        }))
+    }
+
+    #[tracing::instrument(skip_all)]
+    async fn reset_passkeys(
+        &self,
+        request: Request<ResetPasskeysRequest>,
+    ) -> Result<Response<ResetPasskeysResponse>, Status> {
+        let request = request.into_inner();
+        // Nothing after the reset's commit can fail it: the identity is
+        // the one the reset found.
+        let reset = self
+            .state
+            .identity
+            .reset_passkeys(&request.identity, &request.reason)
+            .map_err(status)?;
+        Ok(Response::new(ResetPasskeysResponse {
+            removed: reset
+                .removed
+                .iter()
+                .map(|row| passkey_message(row, Some(&reset.identity)))
+                .collect(),
+            revoked_key_ids: reset.revoked_key_ids,
+        }))
+    }
+
+    #[tracing::instrument(skip_all)]
+    async fn request_approval(
+        &self,
+        request: Request<RequestApprovalRequest>,
+    ) -> Result<Response<RequestApprovalResponse>, Status> {
+        let agent = super::agent_of(request.metadata())?;
+        let channel = channel_of(&self.state, &request);
+        if matches!(channel, Channel::Remote { .. }) {
+            return Err(status(IdentityError::PasskeyOverRemote {
+                method: "RequestApproval",
+            }));
+        }
+        let request = request.into_inner();
+        let state = &self.state;
+        let size = request.statement.len();
+        if size > reef_evidence::MAX_ENVELOPE_BYTES {
+            return Err(status(EvidenceError::from(reef_evidence::Invalid::Size(
+                size,
+            ))));
+        }
+        let statement = request.statement.clone();
+        let (_, index) =
+            tokio::task::spawn_blocking(move || reef_evidence::verify::check_payload(&statement))
+                .await
+                .map_err(|error| status(IdentityError::Task(error.to_string())))?
+                .map_err(|invalid| status(EvidenceError::from(invalid)))?;
+        if request.revision.trim().is_empty() {
+            return Err(status(EvidenceError::Request(
+                "an approval is for one change: name its revision".into(),
+            )));
+        }
+        let target = super::reading::target(state, &request.repo, &request.workspace)?;
+        let (change_id, commit_id) = link_of(
+            state,
+            &target,
+            index.tree_id.clone(),
+            request.revision.clone(),
+        )
+        .await?
+        .unwrap_or_default();
+        let approval = state
+            .identity
+            .request_approval(
+                ApprovalRequest {
+                    identity: request.identity,
+                    statement: request.statement,
+                    index,
+                    resolved: Resolved {
+                        repo_id: target.repo.id.to_string(),
+                        commit_id,
+                        change_id,
+                    },
+                    public_key: request.public_key,
+                    proof: request.proof,
+                },
+                Requester {
+                    channel,
+                    agent,
+                    workspace: target.workspace.as_ref().map(|ws| ws.id.as_hex()),
+                },
+            )
+            .await
+            .map_err(status)?;
+        Ok(Response::new(RequestApprovalResponse {
+            approval: Some(self.approval_message(&approval)?),
+        }))
+    }
+
+    async fn get_approval(
+        &self,
+        request: Request<GetApprovalRequest>,
+    ) -> Result<Response<GetApprovalResponse>, Status> {
+        let request = request.into_inner();
+        let wait = wait_of(request.wait.as_ref())?;
+        let approval = self
+            .state
+            .identity
+            .get_approval(&request.id, wait)
+            .await
+            .map_err(status)?;
+        Ok(Response::new(GetApprovalResponse {
+            approval: Some(self.approval_message(&approval)?),
+        }))
+    }
+
+    #[tracing::instrument(skip_all)]
+    async fn resolve_approval(
+        &self,
+        request: Request<ResolveApprovalRequest>,
+    ) -> Result<Response<ResolveApprovalResponse>, Status> {
+        let channel = channel_of(&self.state, &request);
+        let request = request.into_inner();
+        let resolution = match request.resolution {
+            Some(resolve_approval_request::Resolution::Approve(assertion)) => {
+                Resolution::Approve(assertion)
+            }
+            Some(resolve_approval_request::Resolution::Decline(reason)) => {
+                Resolution::Decline(reason)
+            }
+            None => {
+                return Err(Status::invalid_argument(
+                    "resolve an approval with approve or decline",
+                ));
+            }
+        };
+        if matches!(channel, Channel::Remote { .. }) {
+            return Err(status(IdentityError::PasskeyOverRemote {
+                method: "ResolveApproval",
+            }));
+        }
+        // Read first: a read that failed after the resolution would report
+        // one that happened, a key certified, as failed.
+        let identity_id = self
+            .state
+            .identity
+            .get_approval(&request.id, std::time::Duration::ZERO)
+            .await
+            .map_err(status)?
+            .identity
+            .id;
+        let credential_ids = self.credential_ids(&identity_id)?;
+        let approval = self
+            .state
+            .identity
+            .resolve_approval(&channel, self.state.web.origin(), &request.id, resolution)
+            .await
+            .map_err(status)?;
+        Ok(Response::new(ResolveApprovalResponse {
+            approval: Some(approval_message(&approval, credential_ids)),
         }))
     }
 }

@@ -12,10 +12,14 @@
 // another tab, which resumes from the last cursor it saw and resubscribes to
 // presence. Without `navigator.locks`, every tab leads alone.
 import { fromBinary, toBinary } from "@bufbuild/protobuf";
-import type { Connection } from "../api/connection";
+import { client, type Connection } from "../api/connection";
 import { isSessionInvalid, reefError } from "../api/errors";
-import { SubscribeOperationsResponseSchema } from "../gen/reef/api/v1/operations_pb";
-import { SubscribePresenceResponseSchema } from "../gen/reef/api/v1/presence_pb";
+import { DaemonService } from "../gen/reef/api/v1/daemon_pb";
+import {
+  OperationService,
+  SubscribeOperationsResponseSchema,
+} from "../gen/reef/api/v1/operations_pb";
+import { PresenceService, SubscribePresenceResponseSchema } from "../gen/reef/api/v1/presence_pb";
 import { Backoff, sleep } from "./backoff";
 import { animationFrame, FrameNotifier, type FrameScheduler } from "./frame";
 import { OperationStore, positionFrame, runOperations } from "./operations";
@@ -147,7 +151,8 @@ export class Live {
   private lead() {
     this.leading = true;
     const { signal } = this.stop;
-    const { operations, presence } = this.connection.clients;
+    const operations = client(this.connection, OperationService);
+    const presence = client(this.connection, PresenceService);
     const shared = {
       signal,
       sleep: this.env.sleep,
@@ -261,7 +266,10 @@ export class Live {
 
   private async checkSession() {
     try {
-      await this.connection.clients.daemon.getDaemonStatus({}, { signal: this.stop.signal });
+      await client(this.connection, DaemonService).getDaemonStatus(
+        {},
+        { signal: this.stop.signal },
+      );
     } catch (thrown) {
       if (isSessionInvalid(reefError(thrown))) this.end();
     }

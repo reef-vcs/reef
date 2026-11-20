@@ -18,7 +18,7 @@ use reef_client::json::{
 };
 use reef_client::json::{Authority, AuthorityRotated, Identity, SessionKey, SessionKeyIssued};
 use reef_client::json::{Job, JobSubmitted, ProvenanceDeclared, ProvenanceRecord};
-use reef_client::json::{OidcMatch, OidcMatchRevoked};
+use reef_client::json::{OidcMatch, OidcMatchRevoked, Passkey, PasskeysReset};
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde_json::{Value, json};
 
@@ -458,7 +458,12 @@ pub(crate) const OUTPUTS: &[OutputRow] = &[
     },
     row(&["symbols", "upload"], object::<SymbolUpload>),
     row(&["symbols", "list"], list::<SymbolOccurrence>),
-    row(&["evidence", "add"], object::<EvidenceAdded>),
+    OutputRow {
+        note: Some(
+            "with --verified, waits for a passkey's approval in the browser first, saying so on stderr; a decline, expiry or --timeout (2m by default) exits 5 with the error document",
+        ),
+        ..row(&["evidence", "add"], object::<EvidenceAdded>)
+    },
     view(
         &["evidence", "list"],
         list::<Evidence>,
@@ -522,6 +527,17 @@ pub(crate) const OUTPUTS: &[OutputRow] = &[
     ),
     row(&["identity", "oidc", "add"], object::<OidcMatch>),
     row(&["identity", "oidc", "revoke"], object::<OidcMatchRevoked>),
+    OutputRow {
+        note: Some(
+            "in text, the table, then the `[passkeys]` lines that pin every live passkey listed",
+        ),
+        ..row(&["identity", "passkey", "list"], list::<Passkey>)
+    },
+    OutputRow {
+        note: Some("`session_url`, a credential, only with --print-url or when no browser opened"),
+        ..row(&["identity", "passkey", "add"], object::<WebSession>)
+    },
+    row(&["identity", "passkey", "reset"], object::<PasskeysReset>),
     OutputRow {
         note: Some(
             "`latest_of` is set when the commit has no record of its own and this is its change's newest; `statement` and `envelope` only with --envelope",

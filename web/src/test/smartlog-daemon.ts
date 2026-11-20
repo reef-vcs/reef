@@ -4,7 +4,7 @@
 import { create } from "@bufbuild/protobuf";
 import { timestampFromMs } from "@bufbuild/protobuf/wkt";
 import { createRouterTransport } from "@connectrpc/connect";
-import { connectionOver, type Connection } from "../api/connection";
+import type { Connection } from "../api/connection";
 import {
   ChangeSchema,
   ChangeService,
@@ -21,6 +21,7 @@ import {
   GetDiffResponseSchema,
   type GetDiffRequest,
 } from "../gen/reef/api/v1/diff_pb";
+import { EvidenceService, ListEvidenceResponseSchema } from "../gen/reef/api/v1/evidence_pb";
 import { FileChangeKind, FileChangeSchema } from "../gen/reef/api/v1/files_pb";
 import {
   ChangeActivitySchema,
@@ -30,6 +31,13 @@ import {
   QueryChangesResponseSchema,
   type QueryChangesRequest,
 } from "../gen/reef/api/v1/history_pb";
+import {
+  GetIdentityResponseSchema,
+  IdentityKind,
+  IdentitySchema,
+  IdentityService,
+  ListPasskeysResponseSchema,
+} from "../gen/reef/api/v1/identity_pb";
 import {
   GetOperationResponseSchema,
   OperationService,
@@ -198,6 +206,21 @@ export class FakeRepoDaemon {
           });
         },
       });
+      service(IdentityService, {
+        getIdentity: () =>
+          create(GetIdentityResponseSchema, {
+            identity: create(IdentitySchema, {
+              id: "idn_0000000000000001",
+              name: "arsood",
+              kind: IdentityKind.PERSON,
+              isDefault: true,
+            }),
+          }),
+        listPasskeys: () => create(ListPasskeysResponseSchema, {}),
+      });
+      service(EvidenceService, {
+        listEvidence: () => create(ListEvidenceResponseSchema, {}),
+      });
       service(OperationService, {
         getOperation: (request) => {
           this.operationCalls.push(request);
@@ -210,6 +233,6 @@ export class FakeRepoDaemon {
         },
       });
     });
-    return connectionOver(transport, "test");
+    return { transport, label: "test" };
   }
 }

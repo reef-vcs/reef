@@ -13,12 +13,17 @@
 // At an operation (`at`), the view is frozen: the operation is looked up
 // once, both reads are made at it, and the stream is not consulted.
 import { Code, ConnectError } from "@connectrpc/connect";
-import type { Connection } from "../api/connection";
+import { client, type Connection } from "../api/connection";
 import { isSessionInvalid, reefError, type ReefError } from "../api/errors";
-import type { Change, LogEntry } from "../gen/reef/api/v1/changes_pb";
-import { ChangeEffectKind, OperationKind, type Operation } from "../gen/reef/api/v1/operations_pb";
+import { type Change, ChangeService, type LogEntry } from "../gen/reef/api/v1/changes_pb";
+import {
+  ChangeEffectKind,
+  type Operation,
+  OperationKind,
+  OperationService,
+} from "../gen/reef/api/v1/operations_pb";
 import type { Repository } from "../gen/reef/api/v1/repositories_pb";
-import type { RepositoryStatus } from "../gen/reef/api/v1/status_pb";
+import { type RepositoryStatus, StatusService } from "../gen/reef/api/v1/status_pb";
 import { layout, type GraphRow, type Layout } from "../graph/layout";
 import { graphNode } from "../graph/node";
 import { order, type OrderState } from "../graph/order";
@@ -280,7 +285,7 @@ export class SmartlogModel {
   private async readAt() {
     const revset = this.revset;
     try {
-      const response = await this.connection.clients.operations.getOperation({
+      const response = await client(this.connection, OperationService).getOperation({
         repo: this.repo,
         operationId: this.at ?? "",
       });
@@ -302,7 +307,8 @@ export class SmartlogModel {
    * read once.
    */
   private async read(atOperation: string, revset: string, retried = false): Promise<Read> {
-    const { changes, status } = this.connection.clients;
+    const changes = client(this.connection, ChangeService);
+    const status = client(this.connection, StatusService);
     const limit = this.snapshot.limit;
     const entries: LogEntry[] = [];
     let pageToken = "";

@@ -118,7 +118,7 @@ reef comment answer cmt_5d1e0a93c2b74f18 -m "Keep parse"              # the answ
 - Comment text is as readable as the repository: every `read` token, the web UI and backups see it (S-164).
 - Anyone on the socket may ask, answer or withdraw, as declared; an agent may answer another agent's help request, and the record says it was an agent (S-239). Through the remote listener any `write` token asks; an answer is an instruction and needs a linked token; only the asking token withdraws, and claims the answer without taking it.
 - A help request's text, what it tried and its question are the agent's words: a person reads them as data, never as commands to run (S-237).
-- Comments are not signed. A person's signature means something once R3.43 verifies presence, and travels once R4.07 publishes changes to a store.
+- Comments are not signed. A passkey verifies a person's sign-off since R3.43 ([identity.md](identity.md#passkeys-and-verified-presence)), but not a comment; a signature would travel once R4.07 publishes changes to a store.
 
 ## What later tickets add
 

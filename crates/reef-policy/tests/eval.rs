@@ -31,6 +31,7 @@ fn key(identity: &str, id: &str, kind: &str, actor: &str) -> Key {
         agent: String::new(),
         session: format!("ses_{identity}"),
         presence: "none".to_owned(),
+        passkey: String::new(),
         custody: "client".to_owned(),
         authority: AUTHORITY.to_owned(),
         issuer_kind: "reef-daemon".to_owned(),
@@ -160,7 +161,14 @@ fn attestor_sets_select_by_identity_kind_actor_authority_and_presence() {
         ),
         pass(ci())
     ));
-    // No key has verified presence until R3.43.
+    // A verified key whose passkey the policy does not pin has none.
+    let mut verified = ci();
+    verified.presence = "user_verified".to_owned();
+    verified.passkey = "0".repeat(64);
+    assert!(!attests(
+        "identities = [\"ci-main\"]\npresence = \"user_verified\"",
+        pass(verified)
+    ));
     assert!(!attests(
         "identities = [\"ci-main\"]\npresence = \"user_verified\"",
         pass(ci())
@@ -655,6 +663,184 @@ fn changes_to_the_policy_files_need_the_owners() {
     }
     let other = policy.evaluate(&input(&["docs/reef-policy.toml"], Vec::new()));
     assert_eq!(rule(&other, "builtin:owners").status, Status::NotApplicable);
+}
+
+const PASSKEY: &str = "3c9e0d5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f";
+const BOB_ID: &str = "idn_0000000000000002";
+
+/// A policy whose attestor set, `[[signoff]]` and `[owners]` all ask for
+/// `user_verified`, with `pins` as its `[passkeys]` lines.
+fn verified_policy(pins: &str) -> Policy {
+    let text = format!(
+        r#"
+version = 1
+[groups]
+maintainers = ["alice", "{BOB_ID}"]
+[owners]
+groups = ["maintainers"]
+presence = "user_verified"
+[passkeys]
+{pins}
+[attestors.people]
+groups = ["maintainers"]
+actors = ["human"]
+presence = "user_verified"
+[[require]]
+name = "reviewed"
+kinds = ["review"]
+attestors = ["people"]
+[[signoff]]
+name = "area"
+groups = ["maintainers"]
+presence = "user_verified"
+"#
+    );
+    Policy::load(text.as_bytes()).unwrap_or_else(|errors| panic!("{text}\n{errors:#?}"))
+}
+
+/// The three rules' statuses when `who` reviews and signs off a change to
+/// the policy file with a key of `presence` and `passkey`.
+fn presence_statuses(
+    policy: &Policy,
+    who: (&str, &str),
+    presence: &str,
+    passkey: &str,
+) -> [Status; 3] {
+    let mut changed = input(&["reef-policy.toml"], Vec::new());
+    changed.proposed_policy = ProposedPolicy {
+        present: true,
+        ..ProposedPolicy::default()
+    };
+    let signer = Key {
+        presence: presence.to_owned(),
+        passkey: passkey.to_owned(),
+        ..key(who.0, who.1, "person", "human")
+    };
+    for (id, kind) in [("r1", "review"), ("s1", "signoff")] {
+        changed
+            .evidence
+            .push(evidence(id, kind, "pass", 1, signer.clone()));
+    }
+    let evaluation = policy.evaluate(&changed);
+    ["reviewed", "area", "builtin:owners"].map(|name| rule(&evaluation, name).status)
+}
+
+// R3.43's test 4: a `user_verified` key meets `presence = "user_verified"`
+// only when the policy pins its passkey for its identity, by name or id.
+#[test]
+fn verified_presence_counts_only_with_a_pinned_passkey() {
+    use Status::{Satisfied, Unsatisfied};
+    let alice = ("alice", ALICE_ID);
+    let bob = ("bob", BOB_ID);
+    let by_name = verified_policy(&format!("alice = [\"{PASSKEY}\"]"));
+    assert_eq!(by_name.warnings(), []);
+    assert_eq!(
+        presence_statuses(&by_name, alice, "user_verified", PASSKEY),
+        [Satisfied; 3]
+    );
+    // Pinned by id, for an identity a group lists by name, and the reverse.
+    let by_id = verified_policy(&format!("{ALICE_ID} = [\"{PASSKEY}\"]"));
+    assert_eq!(
+        presence_statuses(&by_id, alice, "user_verified", PASSKEY),
+        [Satisfied; 3]
+    );
+    let bob_by_name = verified_policy(&format!("bob = [\"{PASSKEY}\"]"));
+    assert_eq!(
+        presence_statuses(&bob_by_name, bob, "user_verified", PASSKEY),
+        [Satisfied; 3]
+    );
+    // A pin for bob does not count for alice, even for the same passkey.
+    assert_eq!(
+        presence_statuses(&bob_by_name, alice, "user_verified", PASSKEY),
+        [Unsatisfied; 3]
+    );
+    // A passkey alice has not pinned, a key with no passkey, and a pinned
+    // passkey on a certificate without verified presence.
+    let other = "0".repeat(64);
+    for (presence, passkey) in [
+        ("user_verified", other.as_str()),
+        ("user_verified", ""),
+        ("none", PASSKEY),
+    ] {
+        assert_eq!(
+            presence_statuses(&by_name, alice, presence, passkey),
+            [Unsatisfied; 3],
+            "{presence} {passkey}"
+        );
+    }
+    // The unpinned review is reported as rejected for its presence.
+    let mut unpinned = input(&["src/a.rs"], vec![signoff("r1", "alice", ALICE_ID, 1)]);
+    unpinned.evidence[0].kind = "review".to_owned();
+    unpinned.evidence[0].key.presence = "user_verified".to_owned();
+    unpinned.evidence[0].key.passkey = other;
+    let evaluation = by_name.evaluate(&unpinned);
+    let reviewed = rule(&evaluation, "reviewed");
+    assert_eq!(reviewed.missing[0].rejected[0].why, "presence");
+    // A requirement with no pin that could meet it is a warning, reported
+    // by every evaluation.
+    let unpinned_policy = verified_policy("");
+    assert_eq!(unpinned_policy.warnings().len(), 3);
+    assert!(
+        unpinned_policy.warnings()[0]
+            .message
+            .starts_with("no passkey pinned for alice, idn_0000000000000002: no key of theirs will meet presence user_verified"),
+        "{:#?}",
+        unpinned_policy.warnings()
+    );
+    assert_eq!(
+        unpinned_policy.evaluate(&unpinned).diagnostics,
+        unpinned_policy.warnings()
+    );
+}
+
+// R3.43: CEL reads a key's passkey.
+#[test]
+fn cel_reads_a_keys_passkey() {
+    let policy = policy(&format!(
+        "[[rule]]\nname = \"pinned\"\nexpr = 'evidence.exists(e, e.key.passkey == \"{PASSKEY}\")'\n"
+    ));
+    let mut e = signoff("s1", "alice", ALICE_ID, 1);
+    assert_eq!(
+        rule(&policy.evaluate(&input(&["a"], vec![e.clone()])), "pinned").status,
+        Status::Unsatisfied
+    );
+    e.key.passkey = PASSKEY.to_owned();
+    assert_eq!(
+        rule(&policy.evaluate(&input(&["a"], vec![e])), "pinned").status,
+        Status::Satisfied
+    );
+}
+
+// R3.43: CEL reads a key's effective presence, so a rule of its own cannot
+// count an unpinned passkey as a verified person.
+#[test]
+fn cel_reads_effective_presence() {
+    let rule_text = "[[rule]]\nname = \"verified\"\nexpr = 'evidence.exists(e, e.key.presence == \"user_verified\")'\n";
+    let unpinned = policy(rule_text);
+    let pinned = policy(&format!("{rule_text}[passkeys]\nalice = [\"{PASSKEY}\"]\n"));
+    let mut e = signoff("s1", "alice", ALICE_ID, 1);
+    e.key.presence = "user_verified".to_owned();
+    e.key.passkey = PASSKEY.to_owned();
+    let changed = input(&["a"], vec![e]);
+    assert_eq!(
+        rule(&unpinned.evaluate(&changed), "verified").status,
+        Status::Unsatisfied
+    );
+    assert_eq!(
+        rule(&pinned.evaluate(&changed), "verified").status,
+        Status::Satisfied
+    );
+    // Effective presence is a fixed point: a key already normalized reads
+    // the same.
+    for policy in [&unpinned, &pinned] {
+        let key = &changed.evidence[0].key;
+        let once = policy.presence(key).unwrap();
+        let normalized = Key {
+            presence: once.as_str().to_owned(),
+            ..key.clone()
+        };
+        assert_eq!(policy.presence(&normalized), Some(once));
+    }
 }
 
 fn resolved(tier: &str, approval: bool) -> Resolution {

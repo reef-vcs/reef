@@ -206,15 +206,17 @@ impl Provenance {
         let (identity, problem) = match channel {
             // Naming nothing is never refused: a default revoked behind the
             // configuration's back records unbound.
-            Channel::Socket if named.is_empty() => match self.identities.default_id() {
-                Some(id) => match self.db.identity(id)? {
-                    Some(row) if row.revocation.is_none() => (Some(row), None),
-                    Some(_) => (None, Some(IDENTITY_REVOKED)),
+            Channel::Socket | Channel::Web { .. } if named.is_empty() => {
+                match self.identities.default_id() {
+                    Some(id) => match self.db.identity(id)? {
+                        Some(row) if row.revocation.is_none() => (Some(row), None),
+                        Some(_) => (None, Some(IDENTITY_REVOKED)),
+                        None => (None, Some(NO_DEFAULT_IDENTITY)),
+                    },
                     None => (None, Some(NO_DEFAULT_IDENTITY)),
-                },
-                None => (None, Some(NO_DEFAULT_IDENTITY)),
-            },
-            Channel::Socket => (Some(self.identities.find(named)?), None),
+                }
+            }
+            Channel::Socket | Channel::Web { .. } => (Some(self.identities.find(named)?), None),
             Channel::Remote { linked: None, .. } => {
                 if actor == Actor::Human {
                     return Err(refused(Refusal::HumanOverRemote));

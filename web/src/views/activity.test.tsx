@@ -1,7 +1,6 @@
 // R2.21 test 7: the activity page over an in-memory log, with the route's
 // query driving it as the app's does.
 import { create } from "@bufbuild/protobuf";
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ChangeEffectKind,
@@ -16,6 +15,7 @@ import { OperationWindow } from "../log/window";
 import { Code } from "@connectrpc/connect";
 import { daemonError, immediateFrames, operationsFrame, settle } from "../test/fakes";
 import { FakeOplog, REPO, T } from "../test/oplog-daemon";
+import { act, cleanup, fireEvent, render, screen, within } from "../test/testing-library";
 import { useSearch } from "../ui/router";
 import { Activity } from "./Activity";
 import { activityParams } from "./activity-route";

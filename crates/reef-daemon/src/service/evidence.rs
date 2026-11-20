@@ -42,8 +42,8 @@ use super::page::PageRequest;
 use super::reading::{Target, bad_token, repo_at, snapshot_first, target, uses_working_copy};
 use crate::daemon::AppState;
 use crate::db::{
-    DbError, EVIDENCE_ID_LEN, EvidenceFilter, EvidenceKeyRow, EvidenceLinkRow, EvidenceRow,
-    MIN_PREFIX_LEN, StoredEvidence,
+    AddedEvidence, DbError, EVIDENCE_ID_LEN, EvidenceFilter, EvidenceKeyRow, EvidenceLinkRow,
+    EvidenceRow, MIN_PREFIX_LEN, StoredEvidence,
 };
 use crate::error::{Advice, Advise, status};
 use crate::identity::read::{ReadKey, key_identity, read_keys, unverified_identity};
@@ -138,6 +138,27 @@ pub enum EvidenceError {
         /// The id or prefix.
         evidence_id: String,
     },
+    /// Evidence signed by a passkey-approved key that is not the statement
+    /// or the change it approves, or through the web UI evidence signed by
+    /// any other key: `PRESENCE_STATEMENT_MISMATCH` (R3.43).
+    #[error("{}", match *field {
+        "statement" => "this key's passkey approved another statement: a passkey-approved key signs exactly the statement it was approved for",
+        "change" => "this key's passkey approved its sign-off for another change, or none was named: add it with the revision it was approved for",
+        _ => "through the web UI, evidence is added only with a key a passkey approved for it",
+    })]
+    PresenceMismatch {
+        /// `statement`, `change` or `presence`.
+        field: &'static str,
+    },
+    /// A second evidence object signed by a passkey-approved key:
+    /// `SESSION_KEY_SPENT` (R3.43).
+    #[error("key {key_id} signed its one evidence object already, {evidence_id}")]
+    KeySpent {
+        /// The key.
+        key_id: String,
+        /// The object it signed.
+        evidence_id: String,
+    },
     /// Fields of a listing that do not go together, or a value out of its
     /// enum.
     #[error("{0}")]
@@ -158,7 +179,13 @@ impl Classify for EvidenceError {
             | Self::Ambiguous { .. }
             | Self::Request(_) => ErrorKind::InvalidArgument,
             Self::TreeNotFound { .. } | Self::NotFound { .. } => ErrorKind::NotFound,
-            Self::TreeMismatch { .. } | Self::Conflicted { .. } => ErrorKind::Conflict,
+            Self::TreeMismatch { .. }
+            | Self::Conflicted { .. }
+            | Self::KeySpent { .. }
+            | Self::PresenceMismatch {
+                field: "statement" | "change",
+            } => ErrorKind::Conflict,
+            Self::PresenceMismatch { .. } => ErrorKind::PermissionDenied,
             Self::Task(_) => ErrorKind::Internal,
         }
     }
@@ -181,6 +208,17 @@ impl Advise for EvidenceError {
             Self::NotFound { .. } => Some(Advice::run(
                 "List the repository's evidence to find its id; evidence that is not on live work is deleted after [evidence] retention (`reef config show`).",
                 ["reef", "evidence", "list"],
+            )),
+            Self::PresenceMismatch { field } => Some(Advice::hint(match *field {
+                "statement" | "change" => {
+                    "Sign the approved statement and add it with the approved revision, or request a new approval for this one (`reef evidence add --verified`)."
+                }
+                _ => {
+                    "Request an approval for the sign-off and sign with the key it certifies; other evidence is added with the CLI."
+                }
+            })),
+            Self::KeySpent { .. } => Some(Advice::hint(
+                "A passkey-approved key signs one sign-off: request a new approval for another (`reef evidence add --verified`).",
             )),
             Self::InvalidKeyId { .. } => Some(Advice::hint(
                 "Filter by a full key id, 64 hex digits: `reef evidence show <id>` prints an object's key, and `reef evidence key generate` printed yours.",
@@ -248,6 +286,20 @@ impl EvidenceError {
                 reason::EVIDENCE_NOT_FOUND,
                 vec![("evidence_id", evidence_id.clone())],
             ),
+            Self::PresenceMismatch { field } => (
+                reason::PRESENCE_STATEMENT_MISMATCH,
+                vec![("field", (*field).to_owned())],
+            ),
+            Self::KeySpent {
+                key_id,
+                evidence_id,
+            } => (
+                reason::SESSION_KEY_SPENT,
+                vec![
+                    ("key_id", key_id.clone()),
+                    ("evidence_id", evidence_id.clone()),
+                ],
+            ),
             Self::Request(_) | Self::Task(_) | Self::InvalidKeyId { .. } => return None,
         })
     }
@@ -261,6 +313,7 @@ pub(crate) fn evidence_rows(
     repo_id: crate::model::RepoId,
     agent: Option<String>,
     remote_token_id: Option<String>,
+    web_session: Option<String>,
     now: Timestamp,
 ) -> (EvidenceKeyRow, EvidenceRow, Vec<String>) {
     let key = EvidenceKeyRow {
@@ -285,6 +338,7 @@ pub(crate) fn evidence_rows(
         added_at: now,
         added_by_agent: agent,
         remote_token_id,
+        web_session,
     };
     let digests = index
         .artifacts
@@ -339,6 +393,7 @@ fn unchecked_statement(envelope: &[u8]) -> Option<Statement> {
 /// `SIGNATURE_CHECK_VALID` only when its id, its envelope, its key and
 /// every index column agree with the verified payload, so a column changed
 /// behind the daemon reads as invalid, with the payload's own values.
+#[expect(clippy::too_many_lines, reason = "every field of the message")]
 fn evidence_message(
     stored: &StoredEvidence,
     change_ids: Vec<String>,
@@ -439,6 +494,10 @@ fn evidence_message(
         current: now,
         remote_token_id: row.remote_token_id.clone().unwrap_or_default(),
         identity: None,
+        web_session: row
+            .web_session
+            .clone()
+            .map(|session| v1::WebCaller { session }),
     };
     let verified_key = valid.then(|| key_id.clone());
     (message, index, key_id, verified_key)
@@ -527,6 +586,21 @@ pub(crate) async fn messages(
                         Some(_) => key_identity(key, stored.row.added_at),
                         None => unverified_identity(stored.row.added_at),
                     });
+                    if let Some(approves) = key.and_then(approves_of)
+                        && !approved_here(approves, &stored.row.envelope, &message.change_ids)
+                    {
+                        tracing::warn!(
+                            evidence_id = %message.evidence_id,
+                            "a passkey-approved key signed evidence it was not approved for; its presence reads none"
+                        );
+                        if let Some(key) = message
+                            .identity
+                            .as_mut()
+                            .and_then(|identity| identity.key.as_mut())
+                        {
+                            key.set_presence(v1::SessionPresence::None);
+                        }
+                    }
                     if let (Some(filter), Some(index)) = (&filter, &index)
                         && !payload_matches(filter, index, &key_id)
                     {
@@ -659,6 +733,117 @@ async fn revision_tree(
         .map_err(status)?
 }
 
+/// What `revision` names for evidence about `tree`, read at the head of
+/// `target` without a snapshot: `TREE_NOT_FOUND` when the repository holds
+/// no tree `tree`; with a revision, its change (hex) and commit, whose tree
+/// must be `tree`. `None` for an empty revision.
+pub(super) async fn link_of(
+    state: &AppState,
+    target: &Target,
+    tree: String,
+    revision: String,
+) -> Result<Option<(String, String)>, Status> {
+    let head = state.reads.current(&target.handle).await.map_err(status)?;
+    let read_target = target.clone();
+    state
+        .reads
+        .run(&target.handle, move || async move {
+            let target = read_target;
+            match files::tree_presence(&head, &tree).await.map_err(status)? {
+                TreePresence::Present => {}
+                presence => {
+                    return Err(status(EvidenceError::TreeNotFound {
+                        tree_id: tree,
+                        not_a_tree: presence == TreePresence::NotATree,
+                    }));
+                }
+            }
+            if revision.trim().is_empty() {
+                return Ok(None);
+            }
+            let resolved = revset::resolve_revision(&head, &revision, &target.scope())
+                .await
+                .map_err(status)?;
+            let commit_id = resolved.commit_id.to_string();
+            let (change, commit_tree) = files::commit_tree_id(&head, &resolved.commit_id)
+                .await
+                .map_err(status)?;
+            match commit_tree {
+                None => Err(status(EvidenceError::Conflicted { commit_id })),
+                Some(commit_tree_id) if commit_tree_id != tree => {
+                    Err(status(EvidenceError::TreeMismatch {
+                        tree_id: tree,
+                        commit_id,
+                        commit_tree_id,
+                    }))
+                }
+                Some(_) => Ok(Some((change.to_string(), commit_id))),
+            }
+        })
+        .await
+        .map_err(status)?
+}
+
+/// The approval of a `user_verified` key (R3.43): what its certificate
+/// says it approves, when the key's certificate is valid and says so.
+fn approves_of(read: &ReadKey) -> Option<&reef_evidence::webauthn::Approves> {
+    read.binding
+        .as_ref()
+        .and_then(|binding| binding.presence.evidence())
+        .map(|evidence| &evidence.approves)
+}
+
+/// Whether the evidence whose stored envelope is `envelope`, linked to
+/// `change_ids`, is the one sign-off `approves` approves: its payload's
+/// SHA-256 and its change. A read that finds otherwise (a row written
+/// behind the daemon) reports the key's presence as `none`.
+fn approved_here(
+    approves: &reef_evidence::webauthn::Approves,
+    envelope: &[u8],
+    change_ids: &[String],
+) -> bool {
+    let payload = serde_json::from_slice::<Envelope>(envelope)
+        .ok()
+        .and_then(|envelope| envelope.payload_bytes());
+    payload.is_some_and(|payload| reef_evidence::sha256_hex(&payload) == approves.statement)
+        && change_ids.contains(&approves.change)
+}
+
+/// The presence rules of an add (R3.43): a key a passkey approved signs
+/// only the statement it approves (its payload's SHA-256), for the change
+/// it approves (`link`'s), else `PRESENCE_STATEMENT_MISMATCH`; and through
+/// the web UI (`web`), only such a key signs at all. Whether the add spends
+/// the key: true for a `user_verified` key.
+async fn presence_key(
+    state: &AppState,
+    verified: &Verified,
+    link: Option<&(String, String)>,
+    web: bool,
+) -> Result<bool, Status> {
+    let rows = state
+        .db
+        .session_keys_by_id(&[verified.key_id().as_str()])
+        .map_err(status)?;
+    let read = state.identity.read(rows).await.map_err(status)?;
+    let Some(approves) = read.first().and_then(approves_of) else {
+        if web {
+            return Err(status(EvidenceError::PresenceMismatch {
+                field: "presence",
+            }));
+        }
+        return Ok(false);
+    };
+    if reef_evidence::sha256_hex(&verified.payload) != approves.statement {
+        return Err(status(EvidenceError::PresenceMismatch {
+            field: "statement",
+        }));
+    }
+    if link.is_none_or(|(change, _)| *change != approves.change) {
+        return Err(status(EvidenceError::PresenceMismatch { field: "change" }));
+    }
+    Ok(true)
+}
+
 #[tonic::async_trait]
 impl EvidenceService for EvidenceHandler {
     #[tracing::instrument(skip_all, fields(repo, workspace_id))]
@@ -668,6 +853,7 @@ impl EvidenceService for EvidenceHandler {
     ) -> Result<Response<AddEvidenceResponse>, Status> {
         let agent = super::agent_of(request.metadata())?;
         let remote_token_id = super::remote_of(&request).map(|caller| caller.token_id.clone());
+        let web = super::web_of(&request).map(|caller| caller.session.clone());
         let request = request.into_inner();
         let state = &self.state;
         let target = target(state, &request.repo, &request.workspace)?;
@@ -681,49 +867,12 @@ impl EvidenceService for EvidenceHandler {
             .await
             .map_err(|error| task(&error))?
             .map_err(|invalid| status(EvidenceError::from(invalid)))?;
-        let head = state.reads.current(&target.handle).await.map_err(status)?;
-        let tree = verified.index.tree_id.clone();
-        let read_target = target.clone();
-        let link = state
-            .reads
-            .run(&target.handle, move || async move {
-                let target = read_target;
-                match files::tree_presence(&head, &tree).await.map_err(status)? {
-                    TreePresence::Present => {}
-                    presence => {
-                        return Err(status(EvidenceError::TreeNotFound {
-                            tree_id: tree,
-                            not_a_tree: presence == TreePresence::NotATree,
-                        }));
-                    }
-                }
-                if revision.trim().is_empty() {
-                    return Ok(None);
-                }
-                let resolved = revset::resolve_revision(&head, &revision, &target.scope())
-                    .await
-                    .map_err(status)?;
-                let commit_id = resolved.commit_id.to_string();
-                let (change, commit_tree) = files::commit_tree_id(&head, &resolved.commit_id)
-                    .await
-                    .map_err(status)?;
-                match commit_tree {
-                    None => Err(status(EvidenceError::Conflicted { commit_id })),
-                    Some(commit_tree_id) if commit_tree_id != tree => {
-                        Err(status(EvidenceError::TreeMismatch {
-                            tree_id: tree,
-                            commit_id,
-                            commit_tree_id,
-                        }))
-                    }
-                    Some(_) => Ok(Some((change.to_string(), commit_id))),
-                }
-            })
-            .await
-            .map_err(status)??;
+        let link = link_of(state, &target, verified.index.tree_id.clone(), revision).await?;
+        let presence = presence_key(state, &verified, link.as_ref(), web.is_some()).await?;
         let now = Timestamp::now();
         let repo_id = target.repo.id;
-        let (key, row, digests) = evidence_rows(&verified, repo_id, agent, remote_token_id, now);
+        let (key, row, digests) =
+            evidence_rows(&verified, repo_id, agent, remote_token_id, web, now);
         let link = link.map(|(change_id, commit_id)| EvidenceLinkRow {
             change_id,
             evidence_id: verified.id.clone(),
@@ -732,10 +881,19 @@ impl EvidenceService for EvidenceHandler {
         });
         // One transaction writes and reads it back: a GC deleting old
         // evidence meanwhile either finds this row or never sees it.
-        let (inserted, stored) = state
+        let (inserted, stored) = match state
             .db
-            .add_evidence(&key, &row, link.as_ref(), &digests)
-            .map_err(status)?;
+            .add_evidence(&key, &row, link.as_ref(), &digests, presence)
+            .map_err(status)?
+        {
+            AddedEvidence::Added { inserted, stored } => (inserted, *stored),
+            AddedEvidence::Spent { evidence_id, .. } => {
+                return Err(status(EvidenceError::KeySpent {
+                    key_id: key.id,
+                    evidence_id,
+                }));
+            }
+        };
         // A proposal on this tree may land now, or need less (R3.45).
         state.automatic.wake(repo_id);
         tracing::info!(
@@ -743,6 +901,8 @@ impl EvidenceService for EvidenceHandler {
             key_id = %key.id,
             created = inserted.created,
             artifact_count = digests.len(),
+            presence_key = presence,
+            web_session = row.web_session.as_deref().unwrap_or_default(),
             "evidence added"
         );
         let mut evidence = messages(state, repo_id, vec![stored], false, None, None).await?;

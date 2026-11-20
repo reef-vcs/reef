@@ -2,7 +2,7 @@
 
 An evidence object says which key signed it. An **operator identity** says whom that key answers to: a person, or a CI pipeline. The daemon certifies short-lived **session keys** for identities, and every evidence read reports the identity its key is bound to. [ADR 0057](adr/0057-operator-identities-and-session-keys.md) records why; [docs/evidence.md](evidence.md) has the evidence format, and [docs/provenance.md](provenance.md) the provenance records the daemon signs with keys it holds for each workspace's session.
 
-A certificate says which identity a key is bound to and what the requester declared it for. It never says that the identity should be trusted: a repository's [policy](policy.md) decides that, with attestor sets of identities, actors and authorities.
+A certificate says which identity a key is bound to and what the requester declared it for. It never says that the identity should be trusted: a repository's [policy](policy.md) decides that, with attestor sets of identities, actors and authorities. A person's **passkey** can verify that the person, not an agent running as them, approved a sign-off ([Passkeys and verified presence](#passkeys-and-verified-presence)), and a policy counts that only for the passkeys it pins.
 
 ## Identities
 
@@ -32,6 +32,7 @@ Who gets a key for what:
 | Caller | A `person` identity | A `ci` identity | Declared `human` |
 | --- | --- | --- | --- |
 | The socket | any live one; none named is the default | never | yes, with `presence: none` |
+| The web UI, through an approval a passkey resolved (R3.43) | any live one | never | always, with `presence: user_verified` |
 | A remote token linked to identity X | X only | X only | never |
 | A remote token linked to none | none | none | never |
 | A keyless bundle (R3.42), through the socket or any `write` token | the identity whose OIDC match accepts the certificate | the same | person only |
@@ -41,6 +42,7 @@ Link a token when you create it: `reef remote token create ci --scope write --id
 ### Getting a key
 
 - `reef evidence add` issues one for five minutes, signs the one envelope, and drops it. `--identity` and `--actor` choose what it is certified for; `--key` signs with a key file instead.
+- `reef evidence add --actor human --verified` gets a `user_verified` key through an approval that you resolve with your passkey in the browser ([Approving a sign-off](#approving-a-sign-off)).
 - In Rust, `reef_client::Client::issue_session_key(identity, actor, lifetime, session)` returns a `SessionKey` whose `signing_key` signs with `reef_evidence::Claim::sign`.
 - From another language, `reef identity session issue -o json` prints `key`, `private_key` (PKCS#8 PEM) and `certificate`. The private key is a credential: it is printed once, only as JSON (the text form refuses before issuing), and Reef keeps it nowhere.
 
@@ -66,7 +68,7 @@ A certificate is an in-toto Statement v1 in the same DSSE envelope as evidence, 
               "issuer":{"kind":"reef-daemon","keyId":"<the authority's key id>","host":"mbp.local"}}}
 ```
 
-`reef schema evidence session_key_predicate` prints its JSON Schema. A verifier checks it as evidence is checked (the envelope, the authority found by `keyid`, the signature, then the statement) and refuses a `presence`, `custody`, `actor`, kind or issuer it does not know; `reef_evidence::session::check_certificate` does that in Rust.
+`reef schema evidence session_key_predicate` prints its JSON Schema. A verifier checks it as evidence is checked (the envelope, the authority found by `keyid`, the signature, then the statement) and refuses a `presence`, `custody`, `actor`, kind or issuer it does not know; `reef_evidence::session::check_certificate` does that in Rust. A `user_verified` certificate also carries `presenceEvidence`, which the verifier checks too ([The certificate's evidence](#the-certificates-evidence)).
 
 ## Keyless (Sigstore)
 
@@ -139,9 +141,108 @@ The Fulcio CA a keyless key came from is recorded as an authority of kind `sigst
 
 The certificate (the workflow and repository, or the email) and the binding statement's hashes are in Rekor and in Fulcio's certificate transparency log, for a private repository too. Use a private Sigstore deployment through `[sigstore] trusted_root` and the endpoint variables if that matters.
 
+## Passkeys and verified presence
+
+On one machine, an agent running as you can do anything you can on the socket, including getting a key declared `human` for your identity. A passkey is the one thing it cannot use alone: every assertion needs you at the authenticator, with a touch and a fingerprint, a face or a PIN (WebAuthn's user verification). Reef uses your passkey to approve one sign-off at a time, and a repository's policy counts the approval only for passkeys it pins. [ADR 0085](adr/0085-verified-human-presence.md) records why.
+
+Passkeys work in the local web UI only. WebAuthn needs a browser, and browsers refuse it at an IP-literal origin, so `reef ui` serves `http://localhost:<port>`, and the passkeys' RP ID is `localhost`. Passkeys through the remote listener are R3.40's.
+
+### Adding and removing passkeys
+
+```sh
+reef identity passkey add              # open the web UI's Passkeys page
+reef identity passkey add --print-url  # print the page's URL instead, for SSH
+reef identity passkey list             # each passkey, and the [passkeys] line to pin them
+reef identity passkey reset alice      # remove every passkey of alice's, on the socket only
+```
+
+The Passkeys page, linked from the web UI's Settings panel, lists each person identity with its passkeys: label, fingerprint, when it was added and when it was last used. **Add** registers a passkey on this browser's authenticator under a label you type, and **Remove** removes one.
+
+- **The first passkey is trusted on first use.** Any web UI session can add an identity's first passkey. The daemon's registration challenge is single use, valid for 5 minutes, and only for the web UI session that started it.
+- **Every later add, and every removal, needs an existing passkey.** The daemon refuses one without a user-verified assertion by one of the identity's live passkeys (`PASSKEY_REQUIRED`), so the page asks for a touch on an existing passkey first. Removing a passkey leaves the keys it certified as they are. An approval that is being checked when its passkey is removed or reset certifies no key: it is refused (`PASSKEY_ASSERTION_INVALID`, check `passkey`) and stays pending.
+- **A reset is the way back.** `reef identity passkey reset IDENTITY` removes every live passkey of the identity and revokes every unexpired key any of its passkeys certified, removed ones included, from now, in one step. Use it when a passkey is lost, or when one is listed that you did not add. It runs on the socket only, and the daemon logs it as a warning. The next passkey is the first again.
+- Registration and removal need a browser: on the socket they are `PASSKEY_NEEDS_WEB`, and through the remote listener `PASSKEY_OVER_REMOTE`.
+- An identity holds at most 32 live passkeys. A label is 1 to 64 bytes. A passkey is ES256, EdDSA or RS256; any other algorithm is `PASSKEY_ALGORITHM`.
+
+A passkey's **fingerprint** is the SHA-256 of its public key (DER `SubjectPublicKeyInfo`), in lowercase hex, as Reef's key ids are. `reef identity passkey list` prints each passkey's label, id, fingerprint, when and from which web UI session it was added, when it was last used and when it was removed, and then the `[passkeys]` line for the identity, with every live passkey. Every add, removal and reset is recorded with its time and web UI session, and logged under `reef_daemon::identity::audit`.
+
+### Pinning a passkey
+
+A passkey counts for nothing in a repository until that repository's policy pins it. Trust on first use alone is not enough: an agent running as you can open a `reef ui` session in a headless browser with a software authenticator and register its own passkey before you do. So pin yours in the destination's `reef-policy.toml`, by identity name or id:
+
+```toml
+[passkeys]
+alice = ["3c9e0d5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f"]
+```
+
+On the Passkeys page, **Confirm a passkey to pin** asks your authenticator for a touch, checks it against the key Reef holds, and **Copy policy snippet** copies the line for the passkeys it confirmed, with each fingerprint computed from the key the touch verified. This holds only on the daemon's own page: open it yourself, with `reef ui` or `reef identity passkey add` from your own terminal. A page on another `localhost` port can look the same and show an agent's fingerprint, and with the default `[ui] listen` port 0 the port changes at every start, so the address bar gives no cue (S-255). `reef identity passkey list` prints the line with every live passkey. A change to the policy file needs `[owners]`' sign-off; with `presence = "user_verified"` in `[owners]`, that takes an owner's pinned passkey, so an agent cannot change the pins. [docs/policy.md](policy.md#pinned-passkeys) has the rules.
+
+### Approving a sign-off
+
+Each verified sign-off is its own approval: one fresh key, one touch, one statement about one change.
+
+In the web UI, **Sign off** on a change's detail panel in the smartlog signs off the change as the page shows it: kind `signoff`, result `pass`, on its tree. It asks for your passkey, then adds the sign-off and lists it with `user_verified` and whether the repository's policy pins your passkey. It is disabled, with the reason, while your identity has no passkey.
+
+From the CLI:
+
+```sh
+reef evidence add --kind signoff --result pass --actor human --verified -r @-
+```
+
+`--verified` needs `--actor human` and takes any kind, result and target. The command builds the statement over the revision's tree and a fresh key, and asks the daemon for an approval. It then opens the approval page, `/approve/<id>`, in your browser through a new web UI session, as `reef ui` opens the app; `--print-url` prints the URL instead, for SSH. It waits up to `--timeout` (default 2 minutes) for you to approve or decline. When you approve, it signs the statement with the key the approval certified and adds the sign-off, whose presence is `user_verified`. A decline, the approval's expiry, an approval the daemon no longer holds (a restart drops pending ones) or the timeout ends the command with exit code 5 and the reason. It asks nothing on the terminal and runs no login: the approval happens in the browser.
+
+The approval page names, before its buttons, the identity you sign as, the kind, result and target, the change with its description and author, the repository, its tree (the sign-off covers the whole tree, changes below that have not landed included), who asked (a command, with the agent name and workspace it declares, or a web UI session), and the time left. **Approve** asks for your passkey; **Decline** ends the approval. The page approves nothing when it loads. Your platform's passkey prompt shows only "localhost", so the page is where you read what you approve.
+
+Over the API, the CLI's steps are:
+
+1. `IdentityService.RequestApproval`, on the socket or through the web UI, with the key's DER `SubjectPublicKeyInfo`, its proof of possession (as for `IssueSessionKey`, with actor `human` and an empty session), the in-toto statement it will sign, and the revision. The daemon parses the statement as `AddEvidence` does, checks that its subject is the revision's tree, and chooses a new session for the key. The approval waits 2 minutes in the daemon's memory. An identity has at most 8 pending and the daemon holds at most 256 (`TOO_MANY_APPROVALS`).
+2. `IdentityService.GetApproval` with `wait` returns when the approval is approved, with the key's certificate, or declined, or expired. An ended approval stays readable for 2 minutes after its expiry; after that, or after a restart, it is `APPROVAL_NOT_FOUND`.
+3. `IdentityService.ResolveApproval` approves with a passkey's assertion, through the web UI only (`APPROVAL_NEEDS_WEB` on the socket), or declines, through the web UI or the socket. While an approve is being checked, every other resolution of that approval is refused with `APPROVAL_BUSY`; retry it a moment later, once the approve ends approved or pending again.
+4. `EvidenceService.AddEvidence` with the envelope the key signed and the approved revision.
+
+The approved key is certified for 2 minutes with presence `user_verified`, and its session is never renewed. It signs exactly the approved statement, added with a revision of the approved change: any other statement or change is `PRESENCE_STATEMENT_MISMATCH`. Its first evidence object spends it, and adding that object again changes nothing. Through the web UI, `AddEvidence` accepts only evidence signed by such a key.
+
+The WebAuthn challenge is derived, not stored, so any verifier recomputes it from the certificate:
+
+```text
+SHA-256(PAE("application/vnd.reef-vcs.presence-approval",
+            "reef-presence-approval/v1\n<authority key id>\n<key id>\n<identity id>\nhuman\n<session>\n<statement SHA-256>\n<change id>\n"))
+```
+
+The touch therefore approves this key, this statement (its kind, result, target and tree) and this change, and nothing else.
+
+### The certificate's evidence
+
+A `user_verified` certificate's predicate carries the assertion beside `presence`:
+
+```json
+"presence": "user_verified",
+"presenceEvidence": {
+  "type": "webauthn",
+  "passkey": "<the passkey's fingerprint>",
+  "credentialId": "<base64url>",
+  "publicKey": "<base64 of the DER SubjectPublicKeyInfo>",
+  "algorithm": -7,
+  "rpId": "localhost",
+  "approves": {"statement": "<SHA-256 of the statement payload>", "change": "<the change id, 32 hex>"},
+  "authenticatorData": "<base64>",
+  "clientDataJSON": "<base64>",
+  "signature": "<base64>"
+}
+```
+
+`presenceEvidence` is required exactly when `presence` is `user_verified`, and refused otherwise; `user_verified` is certified for actor `human` only. After the authority's signature, a verifier derives the challenge from the certificate's own fields and checks the assertion:
+
+- `clientDataJSON`'s `type` is `webauthn.get`, its `challenge` is the derived one, and its `origin`'s host is `rpId` (over `http` for `localhost` only), not from a cross-origin frame;
+- `authenticatorData` starts with the SHA-256 of `rpId`, with the user-present and user-verified flags set;
+- `signature` verifies over `authenticatorData` and the SHA-256 of `clientDataJSON`, with `publicKey` by `algorithm`;
+- `passkey` is the SHA-256 of `publicKey`.
+
+`reef_evidence::session::check_certificate` does that in Rust, and `certify` runs the same check before the authority signs. A reader older than R3.43 does not know `user_verified` and refuses the certificate. At approval the daemon also checks what the certificate cannot show: the passkey is a live one of the identity, then and when the key is stored, the origin is exactly `http://localhost:<the listener's port>`, and the sign count went up (or both counts are 0, as synced passkeys report). With an EdDSA passkey a certificate is about 1 KB larger.
+
 ## What a verifier sees
 
-Every evidence read reports `identity` beside `signature`: the certified key (identity, kind, actor, agent, session, presence, issuer, window) and a status, judged at the time the daemon first witnessed the evidence (its `added_at`), never at a time the claim states:
+Every evidence read reports `identity` beside `signature`: the certified key (identity, kind, actor, agent, session, presence, issuer, window; for a `user_verified` key also its passkey, what it approved, the approval and the web UI session) and a status, judged at the time the daemon first witnessed the evidence (its `added_at`), never at a time the claim states:
 
 | Status | Meaning |
 | --- | --- |
@@ -152,6 +253,8 @@ Every evidence read reports `identity` beside `signature`: the certified key (id
 | `invalid` | The certificate does not verify: a stored row was changed, or its authority is unknown |
 
 A keyless key reports `issuer_kind: sigstore` and `sigstore` (the OIDC issuer and subject, the match, the log index, Fulcio's CI claims). A revocation made after the evidence was witnessed is still reported, beside `bound`. Evidence whose own signature does not verify reads `invalid` with no key: its key id is not believed. A key whose certificate does not verify reports only its id and the daemon's records of it, and never matches an identity filter. The same envelope added to a second repository after its key expired reads `expired` there: each repository's row has its own `added_at`.
+
+A `user_verified` key's presence is printed with its passkey's label. `reef evidence show` also says whether the policy at `trunk()` pins it: `presence user_verified (passkey "MacBook Touch ID", pinned here)`, or `(passkey "MacBook Touch ID", not pinned by this repository's policy)`. With no policy at `trunk()`, and in `reef identity session show`, the line names the passkey only. `EvaluatePolicy` reports the same per signer, and `reef policy eval` prints it. A read that finds the key on evidence other than the statement and change it approved, which only a database changed behind the daemon can hold, reports that object's presence as `none`.
 
 ## Revocation
 
@@ -165,6 +268,12 @@ reef identity revoke alice --since-created
 
 Revoking a session covers every key in it and ends its renewal; revoking an identity ends its issuance and covers all its keys; a remote token linked to it keeps working for reads and writes until it is revoked too (`reef identity revoke` prints the line). A later revocation can move `invalid_from` earlier, never later.
 
-## What `presence: none` does not prove
+## What presence proves
 
-On one machine, anything running as the daemon's user can do whatever the user can on the socket, including getting a key declared `human` for the user's identity, and can read the authority's key file. A `human` key today means the daemon's user, or something running as that user, asked for it, and every such key carries `presence: none`, which `reef evidence show` prints as "not verified". What an identity does tell apart now: other local users, remote callers (whose linked token decides the identity), and CI, whose keys need its token. Verified human presence, a passkey's user-verified assertion kept in the certificate, is R3.43.
+On one machine, anything running as the daemon's user can do whatever the user can on the socket, including getting a key declared `human` for the user's identity, and can read the authority's key file. What an identity tells apart on its own: other local users, remote callers (whose linked token decides the identity), and CI, whose keys need its token. Presence says more about a person:
+
+- **`presence: none`** means the daemon's user, or something running as that user, asked for the key. Its `human` is a declaration, and `reef evidence show` prints it as "not verified".
+- **`presence: user_verified` with a pinned passkey** means that a passkey the repository's policy pins for the identity verified a person (a touch with a fingerprint, a face or a PIN) for this one statement about this one change, within the 2 minutes the approval waited. The certificate carries the assertion and the passkey's public key, so the pin, not the daemon's database or the authority key, decides whose passkey it was. An agent cannot produce it alone: it would need the person's authenticator.
+- **`presence: user_verified` with a passkey the policy does not pin** counts as `none` for that policy. Only the authority says the passkey is the identity's, and anything that can read the authority's key file, or that registered the identity's first passkey before the person did, could have made that true.
+
+A pinned `user_verified` sign-off does not prove that the person read what they approved. An agent can start an approval when the person expects one and hope for a touch. The approval page names the identity, the change, its tree, the kind, the result and who asked; read it before you touch, and decline an approval you did not start.

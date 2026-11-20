@@ -1,6 +1,5 @@
 // The web UI's build (R2.18, ADR 0047). `npm run build` writes the app into
 // crates/reef-web/assets, which reef-web's build.rs embeds in reef-daemon.
-import react from "@vitejs/plugin-react";
 import { defineConfig } from "vitest/config";
 
 // `npm run dev` proxies API calls to a daemon's web listener: the `url` that
@@ -9,7 +8,12 @@ import { defineConfig } from "vitest/config";
 const daemon = process.env.REEF_UI_URL?.replace(/\/+$/, "");
 
 export default defineConfig({
-  plugins: [react()],
+  // Preact runs the app behind React's API, about 200 KB less JavaScript per
+  // page (#252). The source imports `react` and type-checks against React's
+  // types; each alias also covers its subpaths, as `react/jsx-runtime` to
+  // `preact/compat/jsx-runtime` and `react-dom/client` to
+  // `preact/compat/client`.
+  resolve: { alias: { react: "preact/compat", "react-dom": "preact/compat" } },
   base: "/",
   build: {
     outDir: "../crates/reef-web/assets",

@@ -705,7 +705,8 @@ impl ExecutorService for ExecutorHandler {
         let request = request.into_inner();
         let state = &self.state;
         let (token, identity_id) = match channel {
-            crate::identity::issue::Channel::Socket => (None, None),
+            crate::identity::issue::Channel::Socket
+            | crate::identity::issue::Channel::Web { .. } => (None, None),
             crate::identity::issue::Channel::Remote { linked: None, .. } => {
                 return Err(status(ExecutorError::TokenNotLinked));
             }

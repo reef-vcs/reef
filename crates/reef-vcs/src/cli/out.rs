@@ -358,7 +358,7 @@ fn lines_into<B: Serialize>(buffer: &mut Vec<u8>, values: impl IntoIterator<Item
 /// `rows` under `header`, each column padded to its widest cell with
 /// two-space gutters and no trailing spaces. Cells are ASCII (ids, states,
 /// paths are passed through as they are and only pad by `chars`).
-fn table(w: &mut Vec<u8>, header: &[&str], rows: &[Vec<String>]) {
+pub(crate) fn table(w: &mut Vec<u8>, header: &[&str], rows: &[Vec<String>]) {
     let mut widths: Vec<usize> = header.iter().map(|cell| cell.chars().count()).collect();
     for row in rows {
         for (width, cell) in widths.iter_mut().zip(row) {

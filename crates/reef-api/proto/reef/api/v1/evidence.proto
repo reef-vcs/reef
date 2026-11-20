@@ -25,6 +25,7 @@ import "google/protobuf/timestamp.proto";
 import "reef/api/v1/artifacts.proto";
 import "reef/api/v1/identity.proto";
 import "reef/api/v1/options.proto";
+import "reef/api/v1/remote.proto";
 
 // Storing evidence about trees, and reading it back.
 service EvidenceService {
@@ -55,6 +56,16 @@ service EvidenceService {
   // EVIDENCE_TREE_MISMATCH (metadata `tree_id`, `commit_id`,
   // `commit_tree_id`) when `revision`'s tree is not the subject, or
   // CONFLICTED_REVISION (metadata `commit_id`) when it is conflicted.
+  //
+  // A key a passkey approved (presence `user_verified`, R3.43) signs one
+  // sign-off: its envelope is accepted only when SHA-256 of its payload is
+  // the key's `approves.statement_sha256` and `revision` resolves to the
+  // change `approves.change_id`, or FAILED_PRECONDITION with reason
+  // PRESENCE_STATEMENT_MISMATCH (metadata `field`: `statement` or
+  // `change`); and once, or FAILED_PRECONDITION with reason
+  // SESSION_KEY_SPENT (metadata `key_id`, `evidence_id`). Through the web
+  // UI's listener, only such envelopes are accepted (PERMISSION_DENIED with
+  // reason PRESENCE_STATEMENT_MISMATCH, metadata `field` `presence`).
   rpc AddEvidence(AddEvidenceRequest) returns (AddEvidenceResponse) {
     option (reef.api.v1.access) = ACCESS_WRITE;
     option idempotency_level = IDEMPOTENT;
@@ -201,6 +212,9 @@ message Evidence {
   // each certificate checked again. Beside `signature`, never instead of
   // it, and never a trust decision: policy decides whom to trust (R3.07).
   KeyIdentity identity = 18;
+  // The web UI session that added it (R3.43); unset when it came through
+  // the socket or the remote listener.
+  WebCaller web_session = 19;
 }
 
 // Add evidence.

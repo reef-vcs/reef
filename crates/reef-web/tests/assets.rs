@@ -248,6 +248,8 @@ const PAGES: &[&str] = &[
     "src/views/Fleet.tsx",
     "src/views/Activity.tsx",
     "src/views/States.tsx",
+    "src/views/Passkeys.tsx",
+    "src/views/Approve.tsx",
 ];
 
 /// The chunks a route loads: the entry, each lazy chunk on its way (the
@@ -317,18 +319,18 @@ fn bundle_budget() {
     eprintln!("assets: {total} bytes, JavaScript: {js} bytes");
     // The licenses file is text the browser never loads; it is not app weight.
     let licenses = get("THIRD_PARTY_LICENSES.txt").map_or(0, |a| a.bytes.len());
-    // 650 KiB (and 550 KiB per page below): user, 2026-11-09, stopgap; see
-    // #252 (slim schema imports / code-split before R3.31). R3.42's identity
-    // schema, which the workspaces schema pulls in through provenance, took
-    // the workspaces page past 500 KiB.
+    // 600 KiB, and 500 KiB per page below, again since #252: each page
+    // imports only the services it calls, and Preact runs the app behind
+    // React's API. R3.42 had raised them to 650 and 550 KiB as a stopgap
+    // (user, 2026-11-09).
     assert!(
-        total - licenses <= 650 << 10,
-        "assets are {} bytes, over 650 KiB",
+        total - licenses <= 600 << 10,
+        "assets are {} bytes, over 600 KiB",
         total - licenses
     );
     // What a page loads, not what is embedded (R2.21, one chunk per page).
     // 500 KiB since R2.20; per page since R2.21, decided with the user; 550
-    // KiB since R3.42 (user, 2026-11-09, stopgap; see #252).
+    // KiB in R3.42 (user, 2026-11-09, stopgap); 500 KiB again since #252.
     let manifest = manifest();
     let routes: &[(&str, &[&str])] = &[
         ("/", &[]),
@@ -345,6 +347,8 @@ fn bundle_budget() {
             &["src/views/RepoFrame.tsx", "src/views/Activity.tsx"],
         ),
         ("/states", &["src/views/States.tsx"]),
+        ("/passkeys", &["src/views/Passkeys.tsx"]),
+        ("/approve/<id>", &["src/views/Approve.tsx"]),
     ];
     for (route, lazy) in routes {
         let bytes: usize = route_files(&manifest, lazy)
@@ -353,8 +357,8 @@ fn bundle_budget() {
             .sum();
         eprintln!("{route}: {bytes} bytes of JavaScript");
         assert!(
-            bytes <= 550 << 10,
-            "{route} loads {bytes} bytes of JavaScript, over 550 KiB"
+            bytes <= 500 << 10,
+            "{route} loads {bytes} bytes of JavaScript, over 500 KiB"
         );
     }
 }

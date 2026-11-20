@@ -175,6 +175,15 @@ impl Verified {
     }
 }
 
+/// An unsigned statement payload checked as [`Verified::check`] checks a
+/// signed one's, with its index: what the daemon checks of a statement a
+/// key will sign before it certifies the key for it (R3.43's approvals).
+pub fn check_payload(payload: &[u8]) -> Result<(Statement, Index), Invalid> {
+    let statement = parse_statement(payload)?;
+    let index = index_of(&statement)?;
+    Ok((statement, index))
+}
+
 /// The payload as a Statement, checked field by field.
 pub(crate) fn parse_statement(payload: &[u8]) -> Result<Statement, Invalid> {
     let value = statement_value(payload)?;

@@ -5,12 +5,12 @@
 // listbox options, which cannot hold links, so the links are here. All text
 // is plain text: nothing from the API is rendered as HTML.
 import { useEffect, useRef, useState } from "react";
-import type { Connection } from "../api/connection";
+import { client, type Connection } from "../api/connection";
 import { isSessionInvalid, reefError, type ReefError } from "../api/errors";
 import type { Change } from "../gen/reef/api/v1/changes_pb";
-import { DiffFormat, type GetDiffResponse } from "../gen/reef/api/v1/diff_pb";
+import { DiffFormat, DiffService, type GetDiffResponse } from "../gen/reef/api/v1/diff_pb";
 import { FileChangeKind } from "../gen/reef/api/v1/files_pb";
-import type { HistoryChange } from "../gen/reef/api/v1/history_pb";
+import { type HistoryChange, HistoryService } from "../gen/reef/api/v1/history_pb";
 import { PresenceKind, type Presence } from "../gen/reef/api/v1/presence_pb";
 import type { Workspace } from "../gen/reef/api/v1/workspaces_pb";
 import type { EdgeKind } from "../graph/node";
@@ -30,6 +30,7 @@ import { Time } from "../ui/TimeLabel";
 import { operationSentence } from "../ui/words";
 import { activityHref } from "./activity-route";
 import { fleetHref } from "./fleet-route";
+import { SignOff } from "./SignOff";
 import { MIN_SPACING_MS, type SmartlogRow } from "./smartlog-model";
 
 export const HISTORY_DISABLED = "HISTORY_DISABLED";
@@ -77,7 +78,7 @@ function useFiles(
   const [error, setError] = useState<{ commit: string; error: ReefError } | null>(null);
   useEffect(() => {
     let current = true;
-    connection.clients.diff
+    client(connection, DiffService)
       .getDiff({
         repo,
         toRevision: commit,
@@ -133,7 +134,7 @@ function useHistory(
       const done = () => {
         last.current.duration = Date.now() - started;
       };
-      connection.clients.history
+      client(connection, HistoryService)
         .queryChanges({ repo, changes: [changeId], includeEmpty: true, pageSize: 1 })
         .then(
           (response) => {
@@ -532,6 +533,15 @@ export function ChangeDetail({
         commit={commit}
         at={frozen ? at : undefined}
       />
+      {!frozen && (
+        <SignOff
+          key={change.commitId}
+          connection={connection}
+          repo={repo}
+          change={change}
+          onSessionInvalid={onSessionInvalid}
+        />
+      )}
       {!frozen && <History history={history} error={historyError} />}
       {!frozen && presence.length > 0 && (
         <section>

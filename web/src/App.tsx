@@ -4,9 +4,9 @@
 // is its own (R2.21), and the three repository pages share a frame keyed by
 // the repository.
 import { useEffect, useMemo, useState } from "react";
-import type { Connection } from "./api/connection";
+import { client, type Connection } from "./api/connection";
 import { isSessionInvalid, reefError, type ReefError } from "./api/errors";
-import type { GetDaemonStatusResponse } from "./gen/reef/api/v1/daemon_pb";
+import { DaemonService, type GetDaemonStatusResponse } from "./gen/reef/api/v1/daemon_pb";
 import { animationFrame, type FrameScheduler } from "./live/frame";
 import { Live, type LiveEnvironment } from "./live/share";
 import { endSession } from "./session";
@@ -22,12 +22,16 @@ import { Overview } from "./views/Overview";
 
 const RepoFrame = lazyRoute(() => import("./views/RepoFrame").then((m) => m.RepoFrame));
 const States = lazyRoute(() => import("./views/States").then((m) => m.States));
+const Passkeys = lazyRoute(() => import("./views/Passkeys").then((m) => m.Passkeys));
+const Approve = lazyRoute(() => import("./views/Approve").then((m) => m.Approve));
 
 const REPO_PAGES: [string, RepoPage][] = [
   ["/repos/:repo/smartlog", "smartlog"],
   ["/repos/:repo/workspaces", "workspaces"],
   ["/repos/:repo/activity", "activity"],
 ];
+
+const PAGE_TITLES: Record<string, string> = { "/states": "States", "/passkeys": "Passkeys" };
 
 /** The repository page `path` names, if any. */
 function repoRoute(path: string): { repo: string; page: RepoPage } | null {
@@ -43,17 +47,19 @@ function useDaemonStatus(connection: Connection, onSessionInvalid: () => void) {
   const [error, setError] = useState<ReefError | null>(null);
   useEffect(() => {
     let current = true;
-    connection.clients.daemon.getDaemonStatus({}).then(
-      (response) => {
-        if (current) setStatus(response);
-      },
-      (thrown: unknown) => {
-        if (!current) return;
-        const error = reefError(thrown);
-        if (isSessionInvalid(error)) onSessionInvalid();
-        else setError(error);
-      },
-    );
+    client(connection, DaemonService)
+      .getDaemonStatus({})
+      .then(
+        (response) => {
+          if (current) setStatus(response);
+        },
+        (thrown: unknown) => {
+          if (!current) return;
+          const error = reefError(thrown);
+          if (isSessionInvalid(error)) onSessionInvalid();
+          else setError(error);
+        },
+      );
     return () => {
       current = false;
     };
@@ -76,6 +82,7 @@ function Shell({
   const search = useSearch();
   const { status, error } = useDaemonStatus(connection, onSessionInvalid);
   const repo = repoRoute(path);
+  const approval = match("/approve/:id", path)?.id;
   // The app bar's slots, for the repository frame's portals (ui/header-slots).
   const [crumb, setCrumb] = useState<HTMLElement | null>(null);
   const [tabs, setTabs] = useState<HTMLElement | null>(null);
@@ -85,9 +92,9 @@ function Shell({
   const inRepo = repo !== null;
   useEffect(() => {
     if (inRepo) return;
-    document.title =
-      path === "/" ? "Reef" : path === "/states" ? "States — Reef" : "Not found — Reef";
-  }, [inRepo, path]);
+    const page = PAGE_TITLES[path] ?? (approval ? "Approve a sign-off" : "Not found");
+    document.title = path === "/" ? "Reef" : `${page} — Reef`;
+  }, [inRepo, path, approval]);
   return (
     <HeaderSlots.Provider value={slots}>
       <div className={repo ? "page repo-page" : "page"}>
@@ -120,6 +127,15 @@ function Shell({
             />
           ) : path === "/states" ? (
             <States />
+          ) : path === "/passkeys" ? (
+            <Passkeys connection={connection} onSessionInvalid={onSessionInvalid} />
+          ) : approval ? (
+            <Approve
+              key={approval}
+              connection={connection}
+              id={approval}
+              onSessionInvalid={onSessionInvalid}
+            />
           ) : (
             <NotFound />
           )}

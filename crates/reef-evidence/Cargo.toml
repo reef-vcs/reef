@@ -43,11 +43,14 @@ jiff = { workspace = true, optional = true }   # the times `sigstore-verify` rep
 
 [features]
 sigstore = ["dep:sigstore-verify", "dep:sigstore-trust-root", "dep:sigstore-crypto", "dep:sigstore-types", "dep:x509-cert", "dep:der", "dep:jiff"]
+# R3.43: `webauthn::testing`, a software authenticator for other crates' passkey tests.
+testing = []
 
 [dev-dependencies]
 jsonschema.workspace = true      # test 7: the schema against real payloads
 criterion.workspace = true
 reef-testing.workspace = true    # R3.42: the local Sigstore that builds keyless bundles
+reef-evidence = { path = ".", features = ["testing"] }   # R3.43: this crate's own tests use the test authenticator
 
 [[bench]]
 name = "evidence"

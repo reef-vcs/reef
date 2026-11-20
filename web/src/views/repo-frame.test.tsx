@@ -1,15 +1,18 @@
 // R2.21 test 8: the repository frame. Its header carries the nav and the
 // scrubber; its operation window survives moving between the three pages
 // and moving `at`, and is replaced with the repository.
-import { act, cleanup, render, screen, within } from "@testing-library/react";
+import type { DescMethod, DescService } from "@bufbuild/protobuf";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Connection } from "../api/connection";
+import { OperationService } from "../gen/reef/api/v1/operations_pb";
+import { RepositoryService } from "../gen/reef/api/v1/repositories_pb";
 import { OperationStore } from "../live/operations";
 import { PresenceStore } from "../live/presence";
 import type { Live } from "../live/share";
 import { immediateFrames, operationsFrame, presenceFrame, settle } from "../test/fakes";
 import { FakeFleetDaemon, workspace } from "../test/fleet-daemon";
 import { FakeOplog, REPO, T } from "../test/oplog-daemon";
+import { act, cleanup, render, screen, within } from "../test/testing-library";
 import { navigate, usePath, useSearch } from "../ui/router";
 import type { RepoPage } from "../ui/RepoNav";
 import { RepoFrame } from "./RepoFrame";
@@ -36,13 +39,16 @@ function setup() {
   const fleet = new FakeFleetDaemon();
   fleet.workspaces = [workspace("w1000000", "c1".padEnd(32, "0"))];
   // The workspaces page's reads from one fake, the log's from the other.
+  const fromOplog = [OperationService, RepositoryService] as DescService[];
+  const log = oplog.connection().transport;
+  const workspaces = fleet.connection().transport;
+  const pick = (method: DescMethod) => (fromOplog.includes(method.parent) ? log : workspaces);
   const connection: Connection = {
-    ...fleet.connection(),
-    clients: {
-      ...fleet.connection().clients,
-      operations: oplog.connection().clients.operations,
-      repositories: oplog.connection().clients.repositories,
+    transport: {
+      unary: (method, ...rest) => pick(method).unary(method, ...rest),
+      stream: (method, ...rest) => pick(method).stream(method, ...rest),
     },
+    label: "test",
   };
   const operations = new OperationStore(immediateFrames);
   operations.applyFrame(operationsFrame({ live: true, cursor: "c0" }));

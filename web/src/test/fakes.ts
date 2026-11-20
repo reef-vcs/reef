@@ -1,12 +1,14 @@
 // Test doubles for the stream layer: animation frames run by hand, streams
 // fed by hand, and Web Locks and BroadcastChannel in one process.
-import { create, type MessageInitShape } from "@bufbuild/protobuf";
+import { create, type DescMethod, type MessageInitShape } from "@bufbuild/protobuf";
 import { timestampFromMs } from "@bufbuild/protobuf/wkt";
-import { Code, ConnectError } from "@connectrpc/connect";
+import { Code, ConnectError, type Transport } from "@connectrpc/connect";
 import type { Connection } from "../api/connection";
+import { DaemonService } from "../gen/reef/api/v1/daemon_pb";
 import { ErrorDetailSchema } from "../gen/reef/api/v1/error_pb";
 import {
   OperationSchema,
+  OperationService,
   SubscribeOperationsResponseSchema,
   type OperationKind,
   type SnapshotKind,
@@ -18,6 +20,7 @@ import {
   PresenceEventSchema,
   PresenceSchema,
   type PresenceEndReason,
+  PresenceService,
   SubscribePresenceResponseSchema,
   type SubscribePresenceResponse,
 } from "../gen/reef/api/v1/presence_pb";
@@ -151,6 +154,46 @@ export function daemonError(
 export const sessionInvalid = () =>
   daemonError(Code.PermissionDenied, { reason: "WEB_SESSION_INVALID", next: ["reef ui"] });
 
+/** In-memory methods, by service type name and then method name. */
+export type FakeServices = Record<
+  string,
+  Record<string, (request: never, options: { signal: AbortSignal | undefined }) => unknown>
+>;
+
+/**
+ * A transport that calls `services` in this process, without serializing, so
+ * a stream the app reads is the very object the test feeds.
+ */
+export function fakeTransport(services: FakeServices): Transport {
+  const fake = (method: DescMethod) => {
+    const call = services[method.parent.typeName]?.[method.localName];
+    if (!call)
+      throw new ConnectError(`${method.parent.typeName}/${method.name}`, Code.Unimplemented);
+    return call;
+  };
+  const response = (method: DescMethod, message: unknown) => ({
+    service: method.parent,
+    method,
+    header: new Headers(),
+    trailer: new Headers(),
+    message,
+  });
+  return {
+    unary: async (method, signal, _timeoutMs, _header, input) =>
+      ({
+        stream: false,
+        ...response(method, await fake(method)(input as never, { signal })),
+      }) as never,
+    stream: async (method, signal, _timeoutMs, _header, input) => {
+      const first = await input[Symbol.asyncIterator]().next();
+      return {
+        stream: true,
+        ...response(method, fake(method)(first.value as never, { signal })),
+      } as never;
+    },
+  };
+}
+
 /** A daemon whose streams the test feeds: each subscribe opens a new Pushable. */
 export class FakeStreams {
   readonly operationCalls: {
@@ -159,38 +202,47 @@ export class FakeStreams {
   }[] = [];
   readonly presenceCalls: Pushable<SubscribePresenceResponse>[] = [];
 
+  subscribeOperations = (
+    request: Partial<SubscribeOperationsRequest>,
+    options: { signal: AbortSignal | undefined },
+  ): Pushable<SubscribeOperationsResponse> => {
+    const stream = new Pushable<SubscribeOperationsResponse>(options.signal);
+    this.operationCalls.push({ request, stream });
+    return stream;
+  };
+
+  subscribePresence = (
+    _request: unknown,
+    options: { signal: AbortSignal | undefined },
+  ): Pushable<SubscribePresenceResponse> => {
+    const stream = new Pushable<SubscribePresenceResponse>(options.signal);
+    this.presenceCalls.push(stream);
+    return stream;
+  };
+
   /**
-   * A connection with this daemon's streams. `refused` says whether the
-   * daemon refuses this connection's token, for `GetDaemonStatus`.
+   * A connection with this daemon's streams, and `services` beside or over
+   * them. `refused` says whether the daemon refuses this connection's token,
+   * for `GetDaemonStatus`.
    */
-  connection(refused: () => boolean = () => false): Connection {
-    const clients = {
-      daemon: {
+  connection({
+    refused = () => false,
+    services = {},
+  }: { refused?: () => boolean; services?: FakeServices } = {}): Connection {
+    const own: FakeServices = {
+      [DaemonService.typeName]: {
         getDaemonStatus: async () => {
           await settle(1);
           if (refused()) throw sessionInvalid();
           return {};
         },
       },
-      operations: {
-        subscribeOperations: (
-          request: Partial<SubscribeOperationsRequest>,
-          options: { signal: AbortSignal },
-        ) => {
-          const stream = new Pushable<SubscribeOperationsResponse>(options.signal);
-          this.operationCalls.push({ request, stream });
-          return stream;
-        },
-      },
-      presence: {
-        subscribePresence: (_request: unknown, options: { signal: AbortSignal }) => {
-          const stream = new Pushable<SubscribePresenceResponse>(options.signal);
-          this.presenceCalls.push(stream);
-          return stream;
-        },
-      },
+      [OperationService.typeName]: { subscribeOperations: this.subscribeOperations },
+      [PresenceService.typeName]: { subscribePresence: this.subscribePresence },
     };
-    return { clients, label: "fake", transport: undefined } as unknown as Connection;
+    for (const [name, methods] of Object.entries(services))
+      own[name] = { ...own[name], ...methods };
+    return { transport: fakeTransport(own), label: "fake" };
   }
 
   lastOperations(): Pushable<SubscribeOperationsResponse> {

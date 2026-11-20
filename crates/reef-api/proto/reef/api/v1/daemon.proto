@@ -27,6 +27,8 @@ service DaemonService {
   // = false`) or WEB_UI_NOT_BUILT (the daemon embeds the placeholder, not
   // the app); UNAVAILABLE with reason WEB_UI_UNAVAILABLE (metadata
   // `address`, `error`) when the listener cannot be bound.
+  // INVALID_ARGUMENT with reason INVALID_WEB_PATH (metadata `path`) for a
+  // `path` that is not one.
   rpc CreateWebSession(CreateWebSessionRequest) returns (CreateWebSessionResponse) {
     option (reef.api.v1.access) = ACCESS_ADMIN;
   }
@@ -39,13 +41,19 @@ message CreateWebSessionRequest {
   // command line. Deleted at the session's first request or after 60
   // seconds. False: `launch_path` is empty.
   bool launch_file = 1;
+  // The app's page `session_url` and the launch file open (R3.43), such as
+  // `/approve/apr_0123456789abcdef`: a path of at most 256 bytes starting
+  // with `/`, of letters, digits and `/._-`, with no `//` or `..`
+  // segment; empty for the app's start page.
+  string path = 2;
 }
 
 // A web UI session.
 message CreateWebSessionResponse {
-  // The web UI's address, such as `http://127.0.0.1:52817/`. No token.
+  // The web UI's address, such as `http://localhost:52817/`. No token.
   string url = 1;
-  // `url` with the session's token in its fragment (`#session=<token>`).
+  // `url`, then the request's `path` without its leading `/`, with the
+  // session's token in its fragment (`#session=<token>`).
   // A credential: whoever holds it can read every registered repository
   // through the web listener while the session lives.
   string session_url = 2;

@@ -18,6 +18,10 @@
 //!   (R3.42, ADR 0066): a key Fulcio certified against an OIDC identity,
 //!   whose binding statement Rekor logged, checked offline against a
 //!   trusted root.
+//! - [`webauthn`]: verified human presence (R3.43, ADR 0085): the passkey
+//!   assertion a `user_verified` certificate carries, its derived
+//!   challenge, and its checks; with the `testing` feature, an authenticator
+//!   that makes `WebAuthn`'s bytes for other crates' tests.
 //! - [`provenance`]: provenance records (R3.04, ADR 0058): a third
 //!   predicate type, by which a daemon signs, with a key it holds for a
 //!   workspace's session, that it recorded a commit and what context a
@@ -41,6 +45,7 @@ pub mod session;
 pub mod sigstore;
 pub mod statement;
 pub mod verify;
+pub mod webauthn;
 
 pub use envelope::{Envelope, Signature, pae};
 pub use keys::{KeyError, KeyId, PublicKey, SigningKey};

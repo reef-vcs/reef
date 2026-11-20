@@ -646,14 +646,19 @@ impl Client {
     }
 
     /// `DaemonService.CreateWebSession` (R2.18): a web UI session, and a
-    /// launch file for a browser if `launch_file`.
+    /// launch file for a browser if `launch_file`, opening the app at
+    /// `path` (R3.43; empty for its start page).
     pub async fn create_web_session(
         &self,
         launch_file: bool,
+        path: &str,
     ) -> Result<CreateWebSessionResponse, ClientError> {
         let mut client =
             DaemonServiceClient::with_interceptor(self.channel.clone(), self.agent.clone());
-        let request = CreateWebSessionRequest { launch_file };
+        let request = CreateWebSessionRequest {
+            launch_file,
+            path: path.to_owned(),
+        };
         self.call("CreateWebSession", client.create_web_session(request))
             .await
     }
@@ -2398,10 +2403,12 @@ impl Client {
             page_token: String::new(),
             ..request
         };
-        let mut whole = self.get_conflict_page(request.clone()).await?;
+        // Boxed: a page holds a whole `Conflict`, and a caller's future
+        // would hold two.
+        let mut whole = Box::pin(self.get_conflict_page(request.clone())).await?;
         while !whole.next_page_token.is_empty() {
             request.page_token = std::mem::take(&mut whole.next_page_token);
-            let next = self.get_conflict_page(request.clone()).await?;
+            let next = Box::pin(self.get_conflict_page(request.clone())).await?;
             if let (Some(conflict), Some(more)) = (whole.conflict.as_mut(), next.conflict) {
                 conflict.files.extend(more.files);
             }
@@ -2704,6 +2711,100 @@ impl Client {
             }
             request.page_token = page.next_page_token;
         }
+    }
+
+    /// `IdentityService.ListPasskeys` (R3.43): one identity's passkeys, or
+    /// every identity's.
+    pub async fn list_passkeys(
+        &self,
+        request: v1::ListPasskeysRequest,
+    ) -> Result<v1::ListPasskeysResponse, ClientError> {
+        self.call("ListPasskeys", self.identities().list_passkeys(request))
+            .await
+    }
+
+    /// `IdentityService.StartPasskeyRegistration` (R3.43): served only
+    /// through the web UI's listener, so the socket's and a remote
+    /// listener's answer is a refusal.
+    pub async fn start_passkey_registration(
+        &self,
+        request: v1::StartPasskeyRegistrationRequest,
+    ) -> Result<v1::StartPasskeyRegistrationResponse, ClientError> {
+        self.call(
+            "StartPasskeyRegistration",
+            self.identities().start_passkey_registration(request),
+        )
+        .await
+    }
+
+    /// `IdentityService.RegisterPasskey` (R3.43): served only through the
+    /// web UI's listener.
+    pub async fn register_passkey(
+        &self,
+        request: v1::RegisterPasskeyRequest,
+    ) -> Result<v1::RegisterPasskeyResponse, ClientError> {
+        self.call(
+            "RegisterPasskey",
+            self.identities().register_passkey(request),
+        )
+        .await
+    }
+
+    /// `IdentityService.RemovePasskey` (R3.43): served only through the web
+    /// UI's listener.
+    pub async fn remove_passkey(
+        &self,
+        request: v1::RemovePasskeyRequest,
+    ) -> Result<v1::RemovePasskeyResponse, ClientError> {
+        self.call("RemovePasskey", self.identities().remove_passkey(request))
+            .await
+    }
+
+    /// `IdentityService.ResetPasskeys` (R3.43): every live passkey of an
+    /// identity removed, and the unexpired keys any of its passkeys
+    /// certified, removed ones included, revoked.
+    pub async fn reset_passkeys(
+        &self,
+        request: v1::ResetPasskeysRequest,
+    ) -> Result<v1::ResetPasskeysResponse, ClientError> {
+        self.call("ResetPasskeys", self.identities().reset_passkeys(request))
+            .await
+    }
+
+    /// `IdentityService.RequestApproval` (R3.43): asks a person to approve
+    /// one sign-off with a passkey.
+    pub async fn request_approval(
+        &self,
+        request: v1::RequestApprovalRequest,
+    ) -> Result<v1::RequestApprovalResponse, ClientError> {
+        self.call(
+            "RequestApproval",
+            self.identities().request_approval(request),
+        )
+        .await
+    }
+
+    /// `IdentityService.GetApproval` (R3.43): an approval, waiting up to
+    /// `wait` while it is pending.
+    pub async fn get_approval(
+        &self,
+        request: v1::GetApprovalRequest,
+    ) -> Result<v1::GetApprovalResponse, ClientError> {
+        self.call("GetApproval", self.identities().get_approval(request))
+            .await
+    }
+
+    /// `IdentityService.ResolveApproval` (R3.43): on the socket, a decline
+    /// only.
+    pub async fn resolve_approval(
+        &self,
+        request: v1::ResolveApprovalRequest,
+    ) -> Result<v1::ResolveApprovalResponse, ClientError> {
+        self.call(
+            "ResolveApproval",
+            self.identities().resolve_approval(request),
+        )
+        .await
     }
 
     /// `IdentityService.RevokeSessionKeys` (R3.03): one key, or a session's.

@@ -19,13 +19,14 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 use reef_api::v1::{
-    self, CreateIdentityRequest, ListSessionKeysRequest, RevokeIdentityRequest,
-    RevokeSessionKeysRequest, RotateAuthorityRequest, revoke_session_keys_request,
+    self, CreateIdentityRequest, ListPasskeysRequest, ListSessionKeysRequest, ResetPasskeysRequest,
+    RevokeIdentityRequest, RevokeSessionKeysRequest, RotateAuthorityRequest,
+    revoke_session_keys_request,
 };
 use reef_client::evidence::session::Actor;
 use reef_client::json::{
-    self, Authority, AuthorityRotated, Identity, OidcMatch, OidcMatchRevoked, SessionKey,
-    SessionKeyIssued,
+    self, Authority, AuthorityRotated, Identity, OidcMatch, OidcMatchRevoked, Passkey,
+    PasskeysReset, SessionKey, SessionKeyIssued, WebSession,
 };
 use reef_client::keyless::{KeylessError, KeylessOptions};
 use reef_client::{IssueError, brief};
@@ -33,7 +34,7 @@ use reef_error::{Advice, ErrorKind};
 use serde::Serialize;
 
 use super::advice::AdviceCtx;
-use super::out::{TextRender, TextRow, block};
+use super::out::{Output, TextRender, TextRow, block};
 use super::{CliError, Ctx};
 
 /// Ids in text, by their first characters.
@@ -77,6 +78,43 @@ enum IdentityCommand {
     /// Add or revoke the OIDC issuers and subjects whose keyless (Sigstore) keys an identity accepts.
     #[command(subcommand)]
     Oidc(OidcCommand),
+    /// List passkeys and the policy line that pins them; add one in the web UI; or reset an identity's.
+    #[command(subcommand)]
+    Passkey(PasskeyCommand),
+}
+
+#[derive(Debug, clap::Subcommand)]
+enum PasskeyCommand {
+    /// List passkeys, and the `[passkeys]` lines that pin them in a reef-policy.toml.
+    #[command(
+        visible_alias = "ls",
+        after_help = "Example: reef identity passkey list alice"
+    )]
+    List {
+        /// Only this identity's, by name or id.
+        #[arg(value_name = "IDENTITY")]
+        identity: Option<String>,
+        /// Also removed passkeys.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Open the web UI's Passkeys page, where a browser registers a passkey.
+    #[command(after_help = "Example: reef identity passkey add --print-url")]
+    Add {
+        /// Print the page's URL (a credential) instead of opening a browser.
+        #[arg(long)]
+        print_url: bool,
+    },
+    /// Remove all of an identity's passkeys and revoke the unexpired keys any of its passkeys approved.
+    #[command(after_help = "Example: reef identity passkey reset alice --reason lost-laptop")]
+    Reset {
+        /// The identity's name or id.
+        #[arg(value_name = "IDENTITY")]
+        identity: String,
+        /// Why, recorded with each removal.
+        #[arg(long, value_name = "TEXT")]
+        reason: Option<String>,
+    },
 }
 
 #[derive(Debug, clap::Subcommand)]
@@ -305,6 +343,7 @@ impl Args {
                     AuthorityCommand::Rotate { .. } | AuthorityCommand::Revoke { .. }
                 )
                 | IdentityCommand::Oidc(_)
+                | IdentityCommand::Passkey(PasskeyCommand::Reset { .. })
         )
     }
 }
@@ -376,6 +415,29 @@ pub(crate) async fn keyless_key(
     }
 }
 
+/// A key's presence as text: `none (not verified)`, or for a passkey's
+/// approval `user_verified (passkey "<label>", pinned here)`, `(..., not
+/// pinned by this repository's policy)`, or without `pinned` known, the
+/// passkey alone.
+pub(crate) fn presence_text(key: &SessionKey, pinned: Option<bool>) -> String {
+    let presence = key.presence.as_deref().unwrap_or("-");
+    if presence != "user_verified" {
+        return format!("{presence} (not verified)");
+    }
+    let passkey = key.passkey.as_ref().map_or_else(String::new, |passkey| {
+        if passkey.label.is_empty() {
+            format!("passkey {}", short(&passkey.fingerprint))
+        } else {
+            format!("passkey {:?}", passkey.label)
+        }
+    });
+    match pinned {
+        Some(true) => format!("{presence} ({passkey}, pinned here)"),
+        Some(false) => format!("{presence} ({passkey}, not pinned by this repository's policy)"),
+        None => format!("{presence} ({passkey})"),
+    }
+}
+
 /// Runs `reef identity`.
 pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<(), CliError> {
     let advice = AdviceCtx::unscoped();
@@ -444,6 +506,78 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<(), CliError> {
         IdentityCommand::Session(command) => session(ctx, command, &advice).await,
         IdentityCommand::Authority(command) => authority(ctx, command, &advice).await,
         IdentityCommand::Oidc(command) => oidc(ctx, command, &advice).await,
+        IdentityCommand::Passkey(command) => passkey(ctx, command, &advice).await,
+    }
+}
+
+async fn passkey(ctx: &Ctx, command: PasskeyCommand, advice: &AdviceCtx) -> Result<(), CliError> {
+    let refine = |error: CliError| advice.refine(error);
+    match command {
+        PasskeyCommand::List { identity, all } => {
+            let mut request = ListPasskeysRequest {
+                identity: identity.unwrap_or_default(),
+                include_removed: all,
+                ..ListPasskeysRequest::default()
+            };
+            let mut listed = Vec::new();
+            loop {
+                let page = ctx
+                    .call(ctx.client.list_passkeys(request.clone()))
+                    .await
+                    .map_err(refine)?;
+                listed.extend(page.passkeys.iter().map(Passkey::from));
+                if page.next_page_token.is_empty() {
+                    break;
+                }
+                request.page_token = page.next_page_token;
+            }
+            if ctx.out.mode() == Output::Text {
+                ctx.out.object(&Passkeys(listed))
+            } else {
+                ctx.out.list(&listed)
+            }
+        }
+        PasskeyCommand::Add { print_url } => {
+            let print = print_url || super::ui::no_browser_here().is_some();
+            let response = ctx
+                .call(ctx.client.create_web_session(!print, "/passkeys"))
+                .await
+                .map_err(refine)?;
+            let launch = PathBuf::from(&response.launch_path);
+            let opened = !print
+                && tokio::task::spawn_blocking(move || super::ui::open(&launch))
+                    .await
+                    .unwrap_or(false);
+            if !opened {
+                ctx.out.note(
+                    "This URL is a credential: anyone with it can use the web UI until the daemon stops.",
+                );
+            }
+            let shown = WebSession {
+                url: format!("{}passkeys", response.url),
+                launch_path: (!response.launch_path.is_empty()).then_some(response.launch_path),
+                opened,
+                session_url: (!opened).then_some(response.session_url),
+            };
+            ctx.out.object(&OpenedPasskeys(shown))
+        }
+        PasskeyCommand::Reset { identity, reason } => {
+            let response = ctx
+                .call(ctx.client.reset_passkeys(ResetPasskeysRequest {
+                    identity,
+                    reason: reason.unwrap_or_default(),
+                }))
+                .await
+                .map_err(refine)?;
+            let reset = PasskeysReset {
+                removed: response.removed.iter().map(Passkey::from).collect(),
+                revoked_key_ids: response.revoked_key_ids,
+            };
+            if let Some(note) = reset_note(reset.removed.len(), reset.revoked_key_ids.len()) {
+                ctx.out.note(&note);
+            }
+            ctx.out.object(&Reset(reset))
+        }
     }
 }
 
@@ -884,10 +1018,7 @@ impl TextRender for ShownKey {
                 ("actor", or_dash(k.actor.as_deref())),
                 ("agent", or_dash(k.agent.as_deref())),
                 ("session", k.session_id.clone()),
-                (
-                    "presence",
-                    format!("{} (not verified)", k.presence.as_deref().unwrap_or("-")),
-                ),
+                ("presence", presence_text(k, None)),
                 ("custody", or_dash(k.custody.as_deref())),
                 ("valid from", or_dash(k.not_before.as_deref())),
                 ("valid until", or_dash(k.not_after.as_deref())),
@@ -1031,5 +1162,231 @@ impl TextRender for Rotated {
         }
         writeln!(w, "current authority {}", rotated.current.key_id)?;
         write!(w, "{}", rotated.current.public_key)
+    }
+}
+
+impl TextRow for Passkey {
+    const HEADER: &'static [&'static str] = &[
+        "IDENTITY",
+        "LABEL",
+        "FINGERPRINT",
+        "ADDED",
+        "LAST USED",
+        "STATE",
+        "ID",
+    ];
+
+    fn row(&self) -> Vec<String> {
+        let date = |at: &Option<String>| {
+            at.as_deref().map_or_else(
+                || "-".to_owned(),
+                |at| at.get(..16).unwrap_or(at).replace('T', " "),
+            )
+        };
+        let added = match &self.created_web_session {
+            Some(session) => format!("{} (web {})", date(&self.created_at), short(session)),
+            None => date(&self.created_at),
+        };
+        let state = match (&self.removed_at, &self.removed_reason) {
+            (None, _) => "live".to_owned(),
+            (Some(at), Some(reason)) => format!("{reason} {}", date(&Some(at.clone()))),
+            (Some(at), None) => format!("removed {}", date(&Some(at.clone()))),
+        };
+        vec![
+            self.identity.clone(),
+            self.label.clone(),
+            short(&self.fingerprint).to_owned(),
+            added,
+            date(&self.last_used_at),
+            state,
+            self.id.clone(),
+        ]
+    }
+}
+
+/// `passkey list` in text: the table, then the `[passkeys]` lines that
+/// pin every live passkey, by identity name.
+#[derive(Serialize)]
+#[serde(transparent)]
+struct Passkeys(Vec<Passkey>);
+
+impl TextRender for Passkeys {
+    fn render(&self, w: &mut dyn Write) -> io::Result<()> {
+        let rows: Vec<Vec<String>> = self.0.iter().map(TextRow::row).collect();
+        let mut table = Vec::new();
+        super::out::table(&mut table, Passkey::HEADER, &rows);
+        w.write_all(&table)?;
+        let snippet = passkeys_snippet(&self.0);
+        if !snippet.is_empty() {
+            writeln!(w)?;
+            writeln!(
+                w,
+                "To pin them, add to the destination's reef-policy.toml, after checking each is yours: anyone who can use the web UI can add a passkey, an agent included (the Passkeys page's snippet asks for a touch first):"
+            )?;
+            write!(w, "{snippet}")?;
+        }
+        Ok(())
+    }
+}
+
+/// The `[passkeys]` table pinning every live passkey of `passkeys`, by
+/// identity name; empty when none is live.
+fn passkeys_snippet(passkeys: &[Passkey]) -> String {
+    use std::fmt::Write as _;
+    let mut pinned: std::collections::BTreeMap<&str, Vec<&str>> = std::collections::BTreeMap::new();
+    for passkey in passkeys.iter().filter(|p| p.removed_at.is_none()) {
+        pinned
+            .entry(passkey.identity.as_str())
+            .or_default()
+            .push(&passkey.fingerprint);
+    }
+    if pinned.is_empty() {
+        return String::new();
+    }
+    let mut snippet = "[passkeys]\n".to_owned();
+    for (identity, fingerprints) in pinned {
+        let bare = identity
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-');
+        let key = if bare {
+            identity.to_owned()
+        } else {
+            format!("{identity:?}")
+        };
+        let list: Vec<String> = fingerprints.iter().map(|f| format!("{f:?}")).collect();
+        let _ = writeln!(snippet, "{key} = [{}]", list.join(", "));
+    }
+    snippet
+}
+
+/// `passkey add`: the page opened, or its URL.
+#[derive(Serialize)]
+struct OpenedPasskeys(WebSession);
+
+impl TextRender for OpenedPasskeys {
+    fn render(&self, w: &mut dyn Write) -> io::Result<()> {
+        match (&self.0.session_url, self.0.opened) {
+            (_, true) => writeln!(w, "Opened the Passkeys page in your browser."),
+            (Some(session_url), false) => writeln!(w, "{session_url}"),
+            (None, false) => writeln!(w, "{}", self.0.url),
+        }
+    }
+}
+
+/// The stderr note after `passkey reset`, naming only what it did: with
+/// no live passkeys, the keys it revoked were certified by passkeys removed
+/// earlier.
+fn reset_note(removed: usize, revoked: usize) -> Option<String> {
+    let passkeys = |n: usize| format!("{n} passkey{}", if n == 1 { "" } else { "s" });
+    let keys = |n: usize| format!("{n} key{}", if n == 1 { "" } else { "s" });
+    match (removed, revoked) {
+        (0, 0) => None,
+        (0, revoked) => Some(format!(
+            "reef: revoked {} from now, certified by passkeys removed earlier",
+            keys(revoked)
+        )),
+        (removed, 0) => Some(format!(
+            "reef: removed {}: no sign-off is verified with them again",
+            passkeys(removed)
+        )),
+        (removed, revoked) => Some(format!(
+            "reef: removed {} and revoked {} from now: no sign-off is verified with those passkeys again",
+            passkeys(removed),
+            keys(revoked)
+        )),
+    }
+}
+
+/// `passkey reset`: what it removed and revoked.
+#[derive(Serialize)]
+#[serde(transparent)]
+struct Reset(PasskeysReset);
+
+impl TextRender for Reset {
+    fn render(&self, w: &mut dyn Write) -> io::Result<()> {
+        if self.0.removed.is_empty() {
+            writeln!(w, "No live passkeys to remove.")?;
+        }
+        for passkey in &self.0.removed {
+            writeln!(
+                w,
+                "removed {} {:?} ({})",
+                passkey.id,
+                passkey.label,
+                short(&passkey.fingerprint)
+            )?;
+        }
+        if self.0.revoked_key_ids.is_empty() {
+            writeln!(w, "No unexpired keys to revoke.")?;
+        }
+        for key_id in &self.0.revoked_key_ids {
+            writeln!(w, "revoked key {}", short(key_id))?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod passkey_tests {
+    use super::*;
+
+    fn passkey(identity: &str, fingerprint: &str, removed: bool) -> Passkey {
+        Passkey {
+            id: "pk_0123456789abcdef".to_owned(),
+            identity_id: "idn_1".to_owned(),
+            identity: identity.to_owned(),
+            label: "Touch ID".to_owned(),
+            fingerprint: fingerprint.to_owned(),
+            algorithm: -8,
+            rp_id: "localhost".to_owned(),
+            sign_count: 0,
+            created_at: None,
+            created_web_session: None,
+            last_used_at: None,
+            removed_at: removed.then(|| "2026-11-19T00:00:00Z".to_owned()),
+            removed_reason: None,
+            removed_web_session: None,
+        }
+    }
+
+    #[test]
+    fn the_snippet_pins_live_passkeys_by_name() {
+        let a = "a".repeat(64);
+        let b = "b".repeat(64);
+        let snippet = passkeys_snippet(&[
+            passkey("alice", &a, false),
+            passkey("alice", &b, false),
+            passkey("bob", &b, true),
+            passkey("ci.main", &a, false),
+        ]);
+        assert_eq!(
+            snippet,
+            format!("[passkeys]\nalice = [\"{a}\", \"{b}\"]\n\"ci.main\" = [\"{a}\"]\n")
+        );
+        let policy = format!("version = 1\n[owners]\nidentities = [\"alice\"]\n{snippet}");
+        assert!(
+            reef_policy::Policy::load(policy.as_bytes()).is_ok(),
+            "the snippet loads as policy"
+        );
+        assert_eq!(passkeys_snippet(&[passkey("bob", &b, true)]), "");
+    }
+
+    #[test]
+    fn the_reset_note_names_only_what_happened() {
+        assert_eq!(reset_note(0, 0), None);
+        assert_eq!(
+            reset_note(0, 1).as_deref(),
+            Some("reef: revoked 1 key from now, certified by passkeys removed earlier")
+        );
+        assert_eq!(
+            reset_note(2, 0).as_deref(),
+            Some("reef: removed 2 passkeys: no sign-off is verified with them again")
+        );
+        assert_eq!(
+            reset_note(1, 3).as_deref(),
+            Some(
+                "reef: removed 1 passkey and revoked 3 keys from now: no sign-off is verified with those passkeys again"
+            )
+        );
     }
 }

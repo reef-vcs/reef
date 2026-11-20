@@ -48,7 +48,7 @@ reef proposal show [REV]                           # the state and every transit
 Every transition records who performed it: the `reef-agent` name (`--agent` or `REEF_AGENT`), the actor, the operator identity, the workspace's provenance session when you name a workspace, and the remote token when the call came through the remote listener.
 
 - **On the socket**, everyone is the same user ([ADR 0027](adr/0027-trust-boundaries-in-phase-1.md)): any caller may perform any of the four transitions. The actor is what the caller declares with `--actor`, by default `agent` when an agent name is set and `human` otherwise. It is recorded, not verified.
-- **Through the remote listener**, any `write` token proposes a draft; only the token that proposed a change proposes it again, withdraws it, supersedes it, or undoes one of its transitions; and no token declines, since the daemon cannot tell a remote human yet (R3.43). A remote actor is always `agent`.
+- **Through the remote listener**, any `write` token proposes a draft; only the token that proposed a change proposes it again, withdraws it, supersedes it, or undoes one of its transitions; and no token declines, since the daemon cannot tell a remote human: a passkey verifies a person only in the local web UI (R3.43), and through the remote listener only from R3.40. A remote actor is always `agent`.
 - **`queued` and `landed`** are recorded only by the daemon.
 
 Reasons are untrusted text: up to 4 KiB, with no control characters but newline and tab. An agent reading a decline reason is reading data someone wrote, not an instruction; R3.12's instructions are a separate, marked object.

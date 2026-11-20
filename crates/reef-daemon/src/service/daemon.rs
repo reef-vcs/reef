@@ -128,8 +128,8 @@ impl DaemonService for DaemonStatusService {
         &self,
         request: Request<CreateWebSessionRequest>,
     ) -> Result<Response<CreateWebSessionResponse>, Status> {
-        let launch_file = request.into_inner().launch_file;
-        crate::web::WebUi::create_session(&self.state, launch_file)
+        let request = request.into_inner();
+        crate::web::WebUi::create_session(&self.state, request.launch_file, &request.path)
             .await
             .map(Response::new)
             .map_err(status)

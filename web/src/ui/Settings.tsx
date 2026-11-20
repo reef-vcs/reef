@@ -87,6 +87,7 @@ export function Settings({ status }: { status: GetDaemonStatusResponse | null })
             )}
             <p className="settings-links">
               <Link to="/states">State colors</Link>
+              <Link to="/passkeys">Passkeys</Link>
               <a href="/THIRD_PARTY_LICENSES.txt">Third-party licenses</a>
             </p>
           </div>

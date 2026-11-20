@@ -61,6 +61,11 @@ pub(crate) enum Rule {
     /// the user's git credentials (S-180). The handler skips the fetch and
     /// says so in a note.
     NoFetch,
+    /// Refused to every remote caller (R3.43): passkeys and approvals work
+    /// only at the web UI's origin, which a remote caller is not at (R3.40
+    /// brings a remote one). The handler refuses with
+    /// `PASSKEY_OVER_REMOTE`.
+    WebOnly,
 }
 
 /// Every `ACCESS_WRITE` method and its rule.
@@ -150,6 +155,23 @@ pub(crate) const TABLE: &[(&str, Rule)] = &[
     // landing still pushes, where the signed policy says (R3.17, S-200).
     ("/reef.api.v1.LandingService/PushLanded", Rule::SocketOnly),
     ("/reef.api.v1.ChangeService/RebaseChange", Rule::NoFetch),
+    (
+        "/reef.api.v1.IdentityService/StartPasskeyRegistration",
+        Rule::WebOnly,
+    ),
+    (
+        "/reef.api.v1.IdentityService/RegisterPasskey",
+        Rule::WebOnly,
+    ),
+    ("/reef.api.v1.IdentityService/RemovePasskey", Rule::WebOnly),
+    (
+        "/reef.api.v1.IdentityService/RequestApproval",
+        Rule::WebOnly,
+    ),
+    (
+        "/reef.api.v1.IdentityService/ResolveApproval",
+        Rule::WebOnly,
+    ),
 ];
 
 /// `CreateWorkspace`'s rule: a remote caller cannot name the directory.

@@ -1359,7 +1359,7 @@ async fn socket_unaffected() {
     let (daemon, addr, fingerprint) = daemon_with(|_| {}).await;
     // The socket needs no token, and still mints web sessions.
     daemon.client.daemon_status(true).await.unwrap();
-    let session = daemon.client.create_web_session(false).await.unwrap();
+    let session = daemon.client.create_web_session(false, "").await.unwrap();
     let session_token = session.session_url.split_once("#session=").unwrap().1;
     // A web session's token is not a remote token.
     let error = connect(addr, &fingerprint, session_token)

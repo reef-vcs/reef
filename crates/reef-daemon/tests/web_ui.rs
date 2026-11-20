@@ -1,12 +1,17 @@
-//! The web UI's loopback listener (R2.18, tests 1 to 14): sessions, the
-//! gate's rules and headers, assets, gRPC-web streams, launch files, and
-//! the listener's limits. Test daemons serve the placeholder assets through
+//! The web UI's loopback listener (R2.18, tests 1 to 14; R3.43 test 11, its
+//! `localhost` origin on both loopback families, and test 10, its allowlist
+//! of writes): sessions, the gate's rules and headers, assets, gRPC-web
+//! streams, launch files, and the listener's limits. Test daemons serve the placeholder assets through
 //! the full gate (`web::Limits::assets_built`).
 
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
     reason = "test helpers outside #[test] fns; a panic is the failure report"
+)]
+#![allow(
+    clippy::print_stderr,
+    reason = "a skip note on a host without IPv6 loopback"
 )]
 
 use std::os::unix::fs::PermissionsExt as _;
@@ -53,7 +58,7 @@ const HEADERS: &[&str] = &[
 ];
 
 async fn session(client: &Client, launch_file: bool) -> CreateWebSessionResponse {
-    client.create_web_session(launch_file).await.unwrap()
+    client.create_web_session(launch_file, "").await.unwrap()
 }
 
 fn token_of(session: &CreateWebSessionResponse) -> String {
@@ -65,13 +70,44 @@ fn token_of(session: &CreateWebSessionResponse) -> String {
         .to_owned()
 }
 
-/// `127.0.0.1:<port>` of a session's URL.
+/// `localhost:<port>` of a session's URL.
 fn authority_of(session: &CreateWebSessionResponse) -> String {
     session
         .url
         .trim_start_matches("http://")
         .trim_end_matches('/')
         .to_owned()
+}
+
+/// The port of a session's URL.
+fn port_of(session: &CreateWebSessionResponse) -> u16 {
+    authority_of(session)
+        .strip_prefix("localhost:")
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+/// Whether this host has an IPv6 loopback; without one, the listener binds
+/// `127.0.0.1` only.
+fn has_ipv6_loopback() -> bool {
+    match std::net::TcpListener::bind("[::1]:0") {
+        Ok(_) => true,
+        Err(error) => {
+            eprintln!("no IPv6 loopback ({error}): its half is skipped");
+            false
+        }
+    }
+}
+
+/// The addresses the listener binds at `port`: `127.0.0.1`, and `[::1]`
+/// where the host has it.
+fn families(port: u16) -> Vec<String> {
+    let mut all = vec![format!("127.0.0.1:{port}")];
+    if has_ipv6_loopback() {
+        all.push(format!("[::1]:{port}"));
+    }
+    all
 }
 
 fn reason(status: &Status) -> String {
@@ -250,15 +286,8 @@ async fn session_binds_lazily() {
     assert!(!daemon.handle.state().web.is_bound());
     let first = session(&daemon.client, true).await;
     assert!(daemon.handle.state().web.is_bound());
-    let port: u16 = first
-        .url
-        .strip_prefix("http://127.0.0.1:")
-        .unwrap()
-        .strip_suffix('/')
-        .unwrap()
-        .parse()
-        .unwrap();
-    assert_ne!(port, 0);
+    assert!(first.url.starts_with("http://localhost:"), "{}", first.url);
+    assert_ne!(port_of(&first), 0);
     let token = token_of(&first);
     assert_eq!(first.session_url, format!("{}#session={token}", first.url));
     assert_eq!(token.len(), 43);
@@ -292,7 +321,11 @@ async fn session_binds_lazily() {
             config.web.assets_built = built;
         })
         .await;
-        let error = daemon.client.create_web_session(true).await.unwrap_err();
+        let error = daemon
+            .client
+            .create_web_session(true, "")
+            .await
+            .unwrap_err();
         let status = status_of(&error);
         assert_eq!(status.code(), Code::FailedPrecondition);
         assert_eq!(reason(status), expected);
@@ -350,12 +383,17 @@ async fn host_must_match() {
     let daemon = TestDaemon::start().await;
     let web = session(&daemon.client, false).await;
     let at = authority_of(&web);
-    let port: u16 = at.rsplit(':').next().unwrap().parse().unwrap();
-    let other = format!("127.0.0.1:{}", port.wrapping_add(1));
+    let port = port_of(&web);
+    // R3.43 11: `localhost` is the one origin, whichever family carries it.
+    for family in families(port) {
+        let response = send(&family, Method::GET, "/", &[("host", &at)], Vec::new()).await;
+        assert_eq!(response.status(), StatusCode::OK, "{family}");
+    }
     for host in [
-        format!("localhost:{port}"),
+        format!("127.0.0.1:{port}"),
+        format!("[::1]:{port}"),
+        format!("localhost:{}", port.wrapping_add(1)),
         format!("attacker.example:{port}"),
-        other,
     ] {
         for path in ["/", "/reef.api.v1.DaemonService/GetDaemonStatus"] {
             let response = send(&at, Method::GET, path, &[("host", &host)], Vec::new()).await;
@@ -399,14 +437,32 @@ async fn api_needs_a_session() {
     assert_eq!(status.version, env!("CARGO_PKG_VERSION"));
 }
 
+/// The writes the web listener passes (R3.43): passkeys, approvals, and
+/// evidence a passkey approved. Every other WRITE and every ADMIN method is
+/// refused.
+const WEB_WRITES: [&str; 6] = [
+    "/reef.api.v1.IdentityService/StartPasskeyRegistration",
+    "/reef.api.v1.IdentityService/RegisterPasskey",
+    "/reef.api.v1.IdentityService/RemovePasskey",
+    "/reef.api.v1.IdentityService/RequestApproval",
+    "/reef.api.v1.IdentityService/ResolveApproval",
+    "/reef.api.v1.EvidenceService/AddEvidence",
+];
+
+// R3.43 test 10 (R2.18 test 5's `only_read_rpcs` before it): every v1
+// method is passed or refused exactly as its access and the allowlist say.
 #[tokio::test(flavor = "multi_thread")]
-async fn only_read_rpcs() {
+async fn web_rpcs_follow_the_table() {
     let daemon = TestDaemon::start().await;
     let web = session(&daemon.client, false).await;
     let at = authority_of(&web);
     let token = token_of(&web);
     let bearer = format!("Bearer {token}");
     let mut paths: Vec<&str> = reef_api::methods().collect();
+    for write in WEB_WRITES {
+        assert!(paths.contains(&write), "{write} is a v1 method");
+        assert_eq!(reef_api::access(write), Some(v1::Access::Write), "{write}");
+    }
     paths.extend(["/reef.daemon.v0.Daemon/Status", "/reef.api.v1.Nope/Nope"]);
     for path in paths {
         // The head only: `SubscribeOperations` and `SubscribePresence` are
@@ -436,11 +492,11 @@ async fn only_read_rpcs() {
             let status = Status::with_details(Code::Unknown, "", bytes.into());
             reef_daemon::error::detail_of(&status)
         });
-        let read = reef_api::access(path) == Some(v1::Access::Read);
+        let passed = reef_api::access(path) == Some(v1::Access::Read) || WEB_WRITES.contains(&path);
         let refused = detail
             .as_ref()
             .is_some_and(|d| d.reason == "WEB_ACCESS_DENIED");
-        assert_eq!(refused, !read, "{path}");
+        assert_eq!(refused, !passed, "{path}");
         assert!(
             detail
                 .as_ref()
@@ -460,11 +516,86 @@ async fn only_read_rpcs() {
     }
     // Through tonic: a session cannot mint sessions.
     let status = daemon_service(&web, Some(&token))
-        .create_web_session(v1::CreateWebSessionRequest { launch_file: true })
+        .create_web_session(v1::CreateWebSessionRequest {
+            launch_file: true,
+            path: String::new(),
+        })
         .await
         .unwrap_err();
     assert_eq!(reason(&status), "WEB_ACCESS_DENIED");
     assert_eq!(metadata(&status, "access"), "admin");
+}
+
+// R3.43: a session can open a page of the app, such as an approval; a path
+// that is not one is refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn session_urls_open_a_path() {
+    let daemon = TestDaemon::start().await;
+    let page = daemon
+        .client
+        .create_web_session(false, "/approve/apr_0123456789abcdef")
+        .await
+        .unwrap();
+    let (before, token) = page.session_url.split_once("#session=").unwrap();
+    assert_eq!(before, format!("{}approve/apr_0123456789abcdef", page.url));
+    assert_eq!(token.len(), 43);
+    for bad in ["approve", "//evil.example", "/a/../b", "/a?x"] {
+        let error = daemon
+            .client
+            .create_web_session(false, bad)
+            .await
+            .unwrap_err();
+        let status = status_of(&error);
+        assert_eq!(status.code(), Code::InvalidArgument, "{bad}");
+        assert_eq!(reason(status), "INVALID_WEB_PATH", "{bad}");
+    }
+}
+
+// R3.43 test 10: what runs the user's git credentials or tools, or issues a
+// key bound to nothing, stays off the web listener.
+#[tokio::test(flavor = "multi_thread")]
+async fn web_cannot_publish() {
+    use reef_api::v1::git_service_client::GitServiceClient;
+    use reef_api::v1::identity_service_client::IdentityServiceClient;
+    use reef_api::v1::landing_service_client::LandingServiceClient;
+    use reef_api::v1::workspace_service_client::WorkspaceServiceClient;
+    let daemon = TestDaemon::start().await;
+    let page = session(&daemon.client, false).await;
+    let token = token_of(&page);
+    let denied = |status: Status| {
+        assert_eq!(reason(&status), "WEB_ACCESS_DENIED", "{status:?}");
+        metadata(&status, "method")
+    };
+    let (service, origin) = web(&page, Some(&token));
+    let publish = GitServiceClient::with_origin(service, origin)
+        .publish_change(v1::PublishChangeRequest::default())
+        .await
+        .unwrap_err();
+    assert_eq!(denied(publish), "/reef.api.v1.GitService/PublishChange");
+    let (service, origin) = web(&page, Some(&token));
+    let push = LandingServiceClient::with_origin(service, origin)
+        .push_landed(v1::PushLandedRequest::default())
+        .await
+        .unwrap_err();
+    assert_eq!(denied(push), "/reef.api.v1.LandingService/PushLanded");
+    let (service, origin) = web(&page, Some(&token));
+    let create = WorkspaceServiceClient::with_origin(service, origin)
+        .create_workspace(CreateWorkspaceRequest::default())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        denied(create),
+        "/reef.api.v1.WorkspaceService/CreateWorkspace"
+    );
+    let (service, origin) = web(&page, Some(&token));
+    let issue = IdentityServiceClient::with_origin(service, origin)
+        .issue_session_key(v1::IssueSessionKeyRequest::default())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        denied(issue),
+        "/reef.api.v1.IdentityService/IssueSessionKey"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -474,9 +605,15 @@ async fn browser_origins_are_refused() {
     let at = authority_of(&web);
     let bearer = format!("Bearer {}", token_of(&web));
     let own = format!("http://{at}");
+    assert!(own.starts_with("http://localhost:"), "{own}");
+    let port = port_of(&web);
+    let v4 = format!("http://127.0.0.1:{port}");
+    let v6 = format!("http://[::1]:{port}");
     for (name, value) in [
         ("origin", "http://attacker.example"),
         ("origin", "null"),
+        ("origin", v4.as_str()),
+        ("origin", v6.as_str()),
         ("sec-fetch-site", "cross-site"),
         ("sec-fetch-site", "same-site"),
     ] {
@@ -861,7 +998,11 @@ async fn bind_failure_is_reported() {
         config.file.ui.listen = listen;
     })
     .await;
-    let error = daemon.client.create_web_session(false).await.unwrap_err();
+    let error = daemon
+        .client
+        .create_web_session(false, "")
+        .await
+        .unwrap_err();
     let status = status_of(&error);
     assert_eq!(status.code(), Code::Unavailable);
     assert_eq!(reason(status), "WEB_UI_UNAVAILABLE");
@@ -871,24 +1012,66 @@ async fn bind_failure_is_reported() {
     daemon.client.daemon_status(true).await.unwrap();
     drop(held);
     let web = session(&daemon.client, false).await;
-    assert_eq!(web.url, format!("http://{address}/"));
+    let port = address.rsplit(':').next().unwrap();
+    assert_eq!(web.url, format!("http://localhost:{port}/"));
 }
 
+// R3.43 11: a fixed port someone holds on `::1` fails the start: serving
+// `127.0.0.1` alone would leave `localhost` to the holder.
 #[tokio::test(flavor = "multi_thread")]
-async fn ipv6_loopback_serves_with_its_host() {
-    if std::net::TcpListener::bind("[::1]:0").is_err() {
-        eprintln!("skipped: no IPv6 loopback");
+async fn a_fixed_port_held_on_ipv6_fails() {
+    if !has_ipv6_loopback() {
         return;
     }
-    let daemon = TestDaemon::start_with(|config: &mut Config| {
-        config.file.ui.listen = "[::1]:0".to_owned();
+    let held = std::net::TcpListener::bind("[::1]:0").unwrap();
+    let address = held.local_addr().unwrap().to_string();
+    let port = held.local_addr().unwrap().port();
+    let daemon = TestDaemon::start_with(move |config: &mut Config| {
+        config.file.ui.listen = format!("127.0.0.1:{port}");
     })
     .await;
+    let error = daemon
+        .client
+        .create_web_session(false, "")
+        .await
+        .unwrap_err();
+    let status = status_of(&error);
+    assert_eq!(reason(status), "WEB_UI_UNAVAILABLE");
+    assert_eq!(metadata(status, "address"), address);
+    assert!(!daemon.handle.state().web.is_bound());
+    // Nothing is left bound on IPv4 either: the next try succeeds.
+    drop(held);
     let web = session(&daemon.client, false).await;
-    assert!(web.url.starts_with("http://[::1]:"), "{}", web.url);
-    let at = authority_of(&web);
-    assert_eq!(get(&at, "/").await.status(), StatusCode::OK);
-    status_over_web(&web, Some(&token_of(&web))).await.unwrap();
+    assert_eq!(web.url, format!("http://localhost:{port}/"));
+}
+
+// R3.43 11: both loopback families on one port, whichever `[ui] listen`
+// names.
+#[tokio::test(flavor = "multi_thread")]
+async fn both_families_serve_one_port() {
+    for listen in ["127.0.0.1:0", "[::1]:0"] {
+        let daemon = TestDaemon::start_with(|config: &mut Config| {
+            config.file.ui.listen = listen.to_owned();
+        })
+        .await;
+        let web = session(&daemon.client, false).await;
+        assert!(web.url.starts_with("http://localhost:"), "{}", web.url);
+        let at = authority_of(&web);
+        let bearer = format!("Bearer {}", token_of(&web));
+        for family in families(port_of(&web)) {
+            let response = send(&family, Method::GET, "/", &[("host", &at)], Vec::new()).await;
+            assert_eq!(response.status(), StatusCode::OK, "{listen} {family}");
+            let response =
+                raw_status_call(&family, &[("host", &at), ("authorization", &bearer)]).await;
+            assert!(
+                trailers(response.body())
+                    .lines()
+                    .any(|line| line.trim_end() == "grpc-status:0"),
+                "{listen} {family}"
+            );
+        }
+        status_over_web(&web, Some(&token_of(&web))).await.unwrap();
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -901,11 +1084,15 @@ async fn connection_cap() {
     .await;
     let web = session(&daemon.client, false).await;
     let at = authority_of(&web);
+    // One cap over both families: alternate between them where both exist.
+    let addresses = families(port_of(&web));
     let request = format!("GET / HTTP/1.1\r\nhost: {at}\r\n\r\n");
-    let open = |request: String| {
-        let at = at.clone();
+    let mut opened = 0;
+    let mut open = |request: String| {
+        let to = addresses[opened % addresses.len()].clone();
+        opened += 1;
         async move {
-            let mut stream = tokio::net::TcpStream::connect(&at).await.unwrap();
+            let mut stream = tokio::net::TcpStream::connect(&to).await.unwrap();
             stream.write_all(request.as_bytes()).await.unwrap();
             let mut buffer = vec![0; 16];
             let read = tokio::time::timeout(SECOND, stream.read(&mut buffer)).await;

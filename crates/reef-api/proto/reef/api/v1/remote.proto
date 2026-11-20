@@ -164,6 +164,14 @@ message RemoteCaller {
   string token_name = 2;
 }
 
+// Who called through the web UI's listener (R3.43): its session, by the
+// first 16 hex digits of the digest of the session's token, never the
+// token.
+message WebCaller {
+  // 16 lowercase hex digits.
+  string session = 1;
+}
+
 // The remote listener (R2.08), as GetDaemonStatus reports it.
 message RemoteListener {
   // Whether it serves.

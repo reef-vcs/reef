@@ -26,6 +26,12 @@ struct File {
     /// Named sets of identities, by name or by id (`idn_…`).
     #[serde(default)]
     groups: BTreeMap<String, Vec<String>>,
+    /// Pinned passkeys (R3.43): each identity, by name or by id (`idn_…`),
+    /// and the fingerprints (SHA-256 of the public key, 64 lowercase hex)
+    /// of the passkeys whose verification meets `presence =
+    /// "user_verified"` for it.
+    #[serde(default)]
+    passkeys: BTreeMap<String, Vec<String>>,
     /// Named sets of signers whose evidence counts.
     #[serde(default)]
     attestors: BTreeMap<String, Attestor>,

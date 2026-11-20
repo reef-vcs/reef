@@ -1,32 +1,40 @@
 //! The web UI's loopback listener (R2.18, ADR 0047).
 //!
-//! The first `CreateWebSession` binds `[ui] listen` (loopback only, a
-//! kernel-chosen port by default) and serves the embedded app and the read
-//! side of the API over gRPC-web, behind `gate::WebGateLayer`. A daemon
-//! whose user never runs `reef ui` opens no TCP port. Once bound, the
-//! listener stays until the daemon stops: a tab's origin is its port.
+//! The first `CreateWebSession` binds `127.0.0.1` and `[::1]` on one port
+//! (`[ui] listen`'s, kernel-chosen by default) and serves the embedded app
+//! and the read side of the API over gRPC-web as `http://localhost:<port>`,
+//! behind `gate::WebGateLayer`. A daemon whose user never runs `reef ui`
+//! opens no TCP port. Once bound, the listener stays until the daemon
+//! stops: a tab's origin is its port.
 //!
 //! Sessions (`session`) are bearer tokens minted by `CreateWebSession`
 //! over the socket, kept as digests, never persisted, so a daemon restart
 //! ends them all. Launch files (`launch`) hand a token to a browser
 //! without a command line.
+//!
+//! The listener serves READ methods and a short allowlist of writes
+//! (`rules`, R3.43): passkeys, approvals, and evidence a passkey approved.
+//! A request that passes carries a [`Caller`] naming its session.
 
 pub(crate) mod assets;
 pub(crate) mod body;
 pub(crate) mod gate;
 mod launch;
+pub(crate) mod rules;
 pub(crate) mod session;
 
 use std::io;
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll, ready};
 use std::time::{Duration, Instant};
 
 use futures::Stream;
+use futures::stream::SelectAll;
+use nix::errno::Errno;
 use reef_api::v1::CreateWebSessionResponse;
 use reef_lib::error::{Classify, ErrorKind};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -84,7 +92,8 @@ pub enum WebError {
     /// The listener could not be bound.
     #[error("cannot listen on {address} for the web UI")]
     Unavailable {
-        /// `[ui] listen`.
+        /// The address that could not be bound, `127.0.0.1:<port>` or
+        /// `[::1]:<port>`, or `[ui] listen` when it is not loopback.
         address: String,
         /// The bind error.
         #[source]
@@ -102,13 +111,20 @@ pub enum WebError {
     /// A web listener request without a live session.
     #[error("no live web UI session")]
     SessionInvalid,
-    /// A web listener request for a method that is not `ACCESS_READ`.
-    #[error("the web UI serves read RPCs only; {method} is {access}")]
+    /// A web listener request for a method that is neither `ACCESS_READ`
+    /// nor on the allowlist (`rules::TABLE`).
+    #[error("the web UI serves read RPCs and its allowlist of writes; {method} is {access}")]
     AccessDenied {
         /// The method's path.
         method: String,
         /// `write`, `admin` or `unknown`.
         access: &'static str,
+    },
+    /// A `CreateWebSession` path that is not one (R3.43).
+    #[error("{path:?} is not a path of the web UI")]
+    InvalidPath {
+        /// The path.
+        path: String,
     },
 }
 
@@ -119,6 +135,7 @@ impl Classify for WebError {
             Self::Unavailable { .. } => ErrorKind::Unavailable,
             Self::LaunchFile { .. } => ErrorKind::Internal,
             Self::SessionInvalid | Self::AccessDenied { .. } => ErrorKind::PermissionDenied,
+            Self::InvalidPath { .. } => ErrorKind::InvalidArgument,
         }
     }
 }
@@ -140,7 +157,10 @@ impl Advise for WebError {
                 ["reef", "ui"],
             )),
             Self::AccessDenied { .. } => Some(Advice::hint(
-                "The web UI serves read RPCs only; use the CLI for this.",
+                "The web UI serves read RPCs and an allowlist of writes (passkeys, approvals, and evidence a passkey approved); use the CLI for this.",
+            )),
+            Self::InvalidPath { .. } => Some(Advice::hint(
+                "Give a path of the web UI starting with /, of letters, digits and /._-, such as /approve/apr_0123456789abcdef, or none.",
             )),
             Self::LaunchFile { .. } => None,
         }
@@ -154,11 +174,45 @@ struct Bound {
     url: String,
 }
 
+/// Who called through the web listener (R3.43): the gate puts it in every
+/// request it passes, where a client cannot set it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Caller {
+    /// The session: the first 16 hex digits of its token's digest.
+    pub session: String,
+}
+
 /// The web UI: its sessions, and its listener once bound.
 #[derive(Debug)]
 pub struct WebUi {
     bound: tokio::sync::Mutex<Option<Bound>>,
     sessions: Arc<Sessions>,
+    /// `http://localhost:<port>`, once bound: the one origin a passkey
+    /// ceremony is accepted from.
+    origin: OnceLock<String>,
+}
+
+/// The longest path `CreateWebSession` opens.
+const MAX_PATH_BYTES: usize = 256;
+
+/// Whether `path` is a path of the app to open: empty, or `/` and
+/// letters, digits and `/._-`, with no empty, `.` or `..` segment after
+/// the first `/`.
+fn is_app_path(path: &str) -> bool {
+    if path.is_empty() {
+        return true;
+    }
+    let Some(rest) = path.strip_prefix('/') else {
+        return false;
+    };
+    path.len() <= MAX_PATH_BYTES
+        && rest
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"/._-".contains(&b))
+        && (rest.is_empty()
+            || rest
+                .split('/')
+                .all(|segment| !matches!(segment, "" | "." | "..")))
 }
 
 impl WebUi {
@@ -166,15 +220,27 @@ impl WebUi {
         WebUi {
             bound: tokio::sync::Mutex::new(None),
             sessions: Arc::new(Sessions::new(limits)),
+            origin: OnceLock::new(),
         }
     }
 
+    /// `http://localhost:<port>` once the listener is bound.
+    pub fn origin(&self) -> Option<&str> {
+        self.origin.get().map(String::as_str)
+    }
+
     /// `CreateWebSession`: binds the listener if needed, mints a session,
-    /// and writes its launch file if asked.
+    /// and writes its launch file if asked, opening the app at `path`.
     pub(crate) async fn create_session(
         state: &Arc<AppState>,
         launch_file: bool,
+        path: &str,
     ) -> Result<CreateWebSessionResponse, WebError> {
+        if !is_app_path(path) {
+            return Err(WebError::InvalidPath {
+                path: path.to_owned(),
+            });
+        }
         let ui = &state.config.file.ui;
         if !ui.enabled {
             return Err(WebError::Disabled);
@@ -195,7 +261,8 @@ impl WebUi {
         for path in ended {
             launch::remove(&path);
         }
-        let session_url = format!("{url}#session={token}");
+        let page = path.strip_prefix('/').unwrap_or_default();
+        let session_url = format!("{url}{page}#session={token}");
         let launch_path = if launch_file {
             let dir = launch_dir.clone();
             let page = session_url.clone();
@@ -252,29 +319,29 @@ fn expire_launch_file(state: &Arc<AppState>, path: PathBuf) {
     });
 }
 
-/// Binds `[ui] listen` and starts serving on it; the server stops with the
-/// daemon, joined by a shutdown hook.
+/// Binds both loopback families on `[ui] listen`'s port and starts serving
+/// on them; the server stops with the daemon, joined by a shutdown hook.
 async fn bind(state: &Arc<AppState>) -> Result<Bound, WebError> {
     let ui = &state.config.file.ui;
-    let unavailable = |source| WebError::Unavailable {
+    // Validated at load; an address `localhost` does not reach never binds.
+    let port = ui.listen_port().map_err(|reason| WebError::Unavailable {
         address: ui.listen.clone(),
-        source,
-    };
-    // Validated at load; a listen address that is not loopback never binds.
-    let addr = ui
-        .listen_addr()
-        .ok_or_else(|| unavailable(io::Error::other("not a loopback address")))?;
-    // Never SO_REUSEPORT: without it, no other user's socket can bind this
-    // address and port while the daemon listens.
-    let listener = TcpListener::bind(addr).await.map_err(unavailable)?;
-    let local = listener.local_addr().map_err(unavailable)?;
-    let authority = authority_of(local);
+        source: io::Error::other(reason),
+    })?;
+    let loopback = Loopback::bind(port).await?;
+    let authority = format!("localhost:{}", loopback.port);
+    let _ = state.web.origin.set(format!("http://{authority}"));
     let gate = Arc::new(gate::Gate {
         origin: format!("http://{authority}"),
         authority: authority.clone(),
         sessions: Arc::clone(&state.web.sessions),
     });
-    let incoming = Capped::new(Accepting::new(listener), state.config.web.max_connections);
+    let ipv6 = loopback.v6.is_some();
+    let accepting: SelectAll<_> = std::iter::once(loopback.v4)
+        .chain(loopback.v6)
+        .map(Accepting::new)
+        .collect();
+    let incoming = Capped::new(accepting, state.config.web.max_connections);
     let server = tokio::spawn(
         crate::server::web_router(state, gate)
             .serve_with_incoming_shutdown(incoming, state.shutdown.clone().cancelled_owned()),
@@ -290,15 +357,86 @@ async fn bind(state: &Arc<AppState>) -> Result<Bound, WebError> {
             }
         })
     });
-    tracing::info!(address = %authority, "web UI listening");
+    tracing::info!(address = %authority, ipv6, "web UI listening");
     Ok(Bound {
         url: format!("http://{authority}/"),
     })
 }
 
-/// `addr` as a URL authority: `127.0.0.1:<port>`, `[::1]:<port>`.
-fn authority_of(addr: SocketAddr) -> String {
-    addr.to_string()
+/// How many kernel-chosen ports [`Loopback::bind`] tries, each free on
+/// `127.0.0.1` but taken on `[::1]`, before it gives up.
+const PORT_ATTEMPTS: usize = 16;
+
+/// The listener's sockets: both loopback families on one port, so that
+/// whichever `localhost` resolves to first is the daemon. A process holding
+/// the other family's address at that port would serve the daemon's exact
+/// origin (S-251). Never `SO_REUSEPORT`: without it, no other user's socket
+/// can bind either address while the daemon listens.
+#[derive(Debug)]
+struct Loopback {
+    port: u16,
+    v4: TcpListener,
+    /// `None` only on a host with no IPv6 loopback, where nobody can bind
+    /// `[::1]` either.
+    v6: Option<TcpListener>,
+}
+
+impl Loopback {
+    /// Binds `127.0.0.1:<port>` and `[::1]:<port>`. With port 0, it takes
+    /// the port the kernel picks for IPv4, and picks again while that port
+    /// is taken on `[::1]`; with a fixed port, either address taken is an
+    /// error naming it.
+    async fn bind(port: u16) -> Result<Loopback, WebError> {
+        let unavailable = |addr: SocketAddr, source| WebError::Unavailable {
+            address: addr.to_string(),
+            source,
+        };
+        // Ports already tried stay held, so the kernel never offers one
+        // twice.
+        let mut tried = Vec::new();
+        loop {
+            let v4_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+            let v4 = TcpListener::bind(v4_addr)
+                .await
+                .map_err(|source| unavailable(v4_addr, source))?;
+            let port = v4
+                .local_addr()
+                .map_err(|source| unavailable(v4_addr, source))?
+                .port();
+            let v6_addr = SocketAddr::from((Ipv6Addr::LOCALHOST, port));
+            let v6 = match TcpListener::bind(v6_addr).await {
+                Ok(v6) => Some(v6),
+                Err(error) if no_ipv6_loopback(&error) => {
+                    tracing::info!(%error, "no IPv6 loopback; the web UI listens on 127.0.0.1 only");
+                    None
+                }
+                Err(error) if v4_addr.port() == 0 && error.kind() == io::ErrorKind::AddrInUse => {
+                    tried.push(v4);
+                    if tried.len() < PORT_ATTEMPTS {
+                        continue;
+                    }
+                    return Err(unavailable(
+                        v6_addr,
+                        io::Error::new(
+                            error.kind(),
+                            format!(
+                                "{error}, as was [::1] at each of the {PORT_ATTEMPTS} ports the kernel picked for 127.0.0.1"
+                            ),
+                        ),
+                    ));
+                }
+                Err(error) => return Err(unavailable(v6_addr, error)),
+            };
+            return Ok(Loopback { port, v4, v6 });
+        }
+    }
+}
+
+/// Whether binding `[::1]` failed because the host has no IPv6 loopback:
+/// the address is not configured, or IPv6 is off.
+fn no_ipv6_loopback(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::AddrNotAvailable
+        || error.raw_os_error() == Some(Errno::EAFNOSUPPORT as i32)
 }
 
 /// A TCP connection counted against [`Limits::max_connections`] until it
@@ -363,18 +501,18 @@ impl AsyncWrite for Counted {
     }
 }
 
-/// The listener's connections, at most `max` open at once: one more is
-/// accepted and closed, with a warning at most every 10 s.
+/// The listener's connections, from both families, at most `max` open at
+/// once: one more is accepted and closed, with a warning at most every 10 s.
 #[derive(Debug)]
 struct Capped {
-    inner: Accepting<TcpListener>,
+    inner: SelectAll<Accepting<TcpListener>>,
     open: Arc<AtomicUsize>,
     max: usize,
     warned_at: Option<Instant>,
 }
 
 impl Capped {
-    fn new(inner: Accepting<TcpListener>, max: usize) -> Capped {
+    fn new(inner: SelectAll<Accepting<TcpListener>>, max: usize) -> Capped {
         Capped {
             inner,
             open: Arc::new(AtomicUsize::new(0)),
@@ -414,5 +552,39 @@ impl Stream for Capped {
                 open: Arc::clone(&self.open),
             })));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_app_path;
+
+    #[test]
+    fn app_paths() {
+        for good in [
+            "",
+            "/",
+            "/approve/apr_0123456789abcdef",
+            "/passkeys",
+            "/repos/abc/smartlog",
+        ] {
+            assert!(is_app_path(good), "{good}");
+        }
+        for bad in [
+            "approve",
+            "//evil.example",
+            "/a//b",
+            "/a/../b",
+            "/./a",
+            "/a?x=1",
+            "/a#b",
+            "/a b",
+            "/a%2f",
+            "/a/",
+            "\\evil",
+        ] {
+            assert!(!is_app_path(bad), "{bad}");
+        }
+        assert!(!is_app_path(&format!("/{}", "a".repeat(256))));
     }
 }

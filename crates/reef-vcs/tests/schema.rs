@@ -903,6 +903,16 @@ async fn outputs_match_their_schemas() {
     script.both(&root, &["store", "list"]).await;
     script.both(&root, &["daemon", "status"]).await;
     script.both(&root, &["ui", "--print"]).await;
+    // R3.43: passkeys are registered only in a browser; these read and
+    // reset the empty set.
+    script.both(&root, &["identity", "passkey", "list"]).await;
+    script
+        .json(&root, &["identity", "passkey", "add", "--print-url"])
+        .await;
+    let me = script.json(&root, &["identity", "show"]).await;
+    script
+        .both(&root, &["identity", "passkey", "reset", &text(&me["name"])])
+        .await;
     let dest = daemon.tmp.path().join("backup");
     script
         .json(&root, &["backup", dest.to_str().unwrap()])

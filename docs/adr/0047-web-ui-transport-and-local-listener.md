@@ -3,6 +3,7 @@
 - Status: accepted
 - Date: 2026-10-31
 - Ticket: R2.18
+- Amended by: [0085](0085-verified-human-presence.md) (decisions 2, 4, 5 and 6: the listener is `localhost` on both loopback families and passes an allowlist of writes; the app runs on Preact behind React's API), and the amendments below
 
 ## Context
 
@@ -62,3 +63,14 @@ The daemon listened only on its Unix socket, which a browser cannot reach, and t
 
 - **One exception to "never fetches on a timer".** Decision 10's rule holds but for one case. A release records its last operation, `RELEASE_WORKSPACE`, before the workspace reaches `RELEASED` or `RECLAIMED`, and neither that change nor a failed release's return to `ACTIVE` records an operation. A page that refreshed at the operation could list the workspace as `RELEASING` and never read it again. So while the workspaces page lists a workspace as `RELEASING`, it reads it again with `GetWorkspace` (without disk, a database read), one run at a time, each reading every releasing workspace, spaced as its refreshes are (at least 250 ms, 4× the last run when slower), until one is not, and then refreshes once. A failed read is read again, not turned into a refresh; an invalid session stops the reads. Nothing is read while nothing is releasing, while the stream is not live, or at an operation. A release whose final write fails stays `RELEASING` in the database until the daemon restarts, and the page reads it every 250 ms or more while it is open: one database read, accepted.
 - **Why not the daemon.** Writing the final state before the operation breaks a failed release's rollback, and holding the operation back cuts across the broker. The general fix, an event for a workspace's state, attention or watch state, is #145's.
+
+## Amendment, 2026-11-19 (R3.43, [0085](0085-verified-human-presence.md)): `localhost`, both loopback families, an allowlist of writes, and Preact
+
+WebAuthn refuses an IP-literal origin, so a passkey works only at `http://localhost:<port>`. [0085](0085-verified-human-presence.md) records the decisions; this is what changes here.
+
+- **Decision 2.** `[ui] listen` must be `127.0.0.1:<port>` or `[::1]:<port>`, and either binds both loopback families on that port; another loopback address, which `localhost` does not reach, is a configuration error. With port 0 the listener binds the port the kernel picks for IPv4 on IPv6 too, trying another while that port is taken on `[::1]`; with a fixed port, either address taken is `WEB_UI_UNAVAILABLE`. IPv6 is skipped only on a host with no IPv6 loopback. The 64-connection cap covers both families together. The listener serves `ACCESS_READ` methods and the writes on its allowlist (`web/rules.rs`), which are the passkey and approval writes and `AddEvidence` signed by a passkey-approved key; every other WRITE and every ADMIN method is still refused.
+- **Decision 4.** The launch file's meta refresh, and every printed URL, go to `http://localhost:<port>/`, at a path when the session was made for a page (`CreateWebSession`'s `path`, such as `/approve/<id>`).
+- **Decision 5.** The `Host` check compares with `localhost:<port>`: a `Host` of `127.0.0.1:<port>` or `[::1]:<port>` is `421` too, so the app has one origin. Step 8 passes a READ method or a row of the allowlist, else `WEB_ACCESS_DENIED`. A passed request carries its caller, the session by the first 16 hex digits of its token's digest, and handlers see the channel `web`.
+- **Decision 6** is replaced: Reef prints `localhost`, never an IP literal. Binding both families on one port leaves no address `localhost` resolves to for another user to take at that port.
+- **The app runs on Preact behind React's API** (#252). The Context's "React and TypeScript" is the source as written: it imports `react` and type-checks against React's types, and the build aliases `react` and `react-dom` to `preact/compat`. Preact is the one runtime dependency in React's place, and it escapes text as React does.
+- The Consequences' "A leaked session URL ... writes nothing" no longer holds: a leaked URL can add an identity's first passkey, approve pending approvals with a passkey it holds, and add the sign-offs they approve, never one a policy pins without the owners' sign-off (S-253).

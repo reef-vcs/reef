@@ -2,7 +2,6 @@
 // route's query driving it as the app's does.
 import { create } from "@bufbuild/protobuf";
 import { timestampFromMs } from "@bufbuild/protobuf/wkt";
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   Attention,
@@ -20,6 +19,7 @@ import { PresenceStore } from "../live/presence";
 import type { Live } from "../live/share";
 import { immediateFrames, operation, operationsFrame, presenceFrame, settle } from "../test/fakes";
 import { change, FakeFleetDaemon, REPO, T, workspace } from "../test/fleet-daemon";
+import { act, cleanup, fireEvent, render, screen, within } from "../test/testing-library";
 import { reverseHex } from "../ui/ids";
 import { useSearch } from "../ui/router";
 import { Fleet } from "./Fleet";

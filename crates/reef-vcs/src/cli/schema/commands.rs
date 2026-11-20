@@ -96,6 +96,7 @@ pub(crate) const REQUIRES: &[(&[&str], &str, &[&str])] = &[
     (&["evidence", "add"], "envelope", &["public_key"]),
     (&["evidence", "add"], "public_key", &["envelope"]),
     (&["evidence", "add"], "oidc_token_file", &["keyless"]),
+    (&["evidence", "add"], "print_url", &["verified"]),
     (&["executor", "check"], "kinds", &["revision"]),
     (&["executor", "check"], "targets", &["revision"]),
     (&["executor", "run"], "require_job", &["once"]),

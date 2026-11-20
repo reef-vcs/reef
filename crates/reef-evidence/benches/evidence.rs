@@ -24,8 +24,8 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use reef_evidence::session::{
-    Actor, Authority, Binding, Custody, IdentityKind, IdentityRef, Issuer, IssuerKind, Presence,
-    certify, check_certificate,
+    Actor, Authority, Binding, Custody, IdentityKind, IdentityRef, Issuer, IssuerKind,
+    PresenceProof, certify, check_certificate,
 };
 use reef_evidence::{
     Artifact, Claim, MAX_ENVELOPE_BYTES, Outcome, SigningKey, TreeDigest, Verified,
@@ -97,7 +97,7 @@ fn session(c: &mut Criterion) {
         actor: Actor::Agent,
         agent: Some("builder-3".into()),
         session: "ses_41c9e07ab2d35f18".into(),
-        presence: Presence::None,
+        presence: PresenceProof::None,
         custody: Custody::Client,
         not_before_ms: 1_793_959_200_000,
         not_after_ms: 1_793_962_800_000,

@@ -1,9 +1,9 @@
 // W3: the token from `#session=` is stored and stripped from the URL, a
 // stored one is reused, and with neither the app shows the no-session page.
-import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import { SESSION_KEY, takeSession } from "./session";
+import { cleanup, render, screen } from "./test/testing-library";
 
 afterEach(() => {
   cleanup();

@@ -1297,9 +1297,10 @@ pub struct UiSection {
     /// `reef ui` works. False: `CreateWebSession` fails with
     /// `WEB_UI_DISABLED` and nothing is ever bound. Default true.
     pub enabled: bool,
-    /// The address the listener binds at the first `reef ui`: a loopback IP
-    /// and a port, 0 for one the kernel picks at every start. Default
-    /// `127.0.0.1:0`.
+    /// Where the listener binds at the first `reef ui`: `127.0.0.1:<port>`
+    /// or `[::1]:<port>`, either meaning both loopback families on that
+    /// port, served as `http://localhost:<port>`; port 0 for one the kernel
+    /// picks at every start. Default `127.0.0.1:0`.
     pub listen: String,
 }
 
@@ -1313,12 +1314,24 @@ impl Default for UiSection {
 }
 
 impl UiSection {
-    /// `listen` as an address, if it is a loopback IP with a port.
-    pub fn listen_addr(&self) -> Option<std::net::SocketAddr> {
-        self.listen
-            .parse::<std::net::SocketAddr>()
-            .ok()
-            .filter(|addr| addr.ip().is_loopback())
+    /// The port of `listen`, or why `listen` is refused: only the loopback
+    /// addresses `localhost` reaches will do.
+    pub fn listen_port(&self) -> Result<u16, String> {
+        let listen = &self.listen;
+        match listen.parse::<std::net::SocketAddr>() {
+            Ok(addr)
+                if addr.ip() == std::net::Ipv4Addr::LOCALHOST
+                    || addr.ip() == std::net::Ipv6Addr::LOCALHOST =>
+            {
+                Ok(addr.port())
+            }
+            Ok(addr) if addr.ip().is_loopback() => Err(format!(
+                "{listen:?} is not reached by `localhost`, where the web UI is served; use 127.0.0.1:<port> or [::1]:<port>, either of which binds both"
+            )),
+            _ => Err(format!(
+                "{listen:?} must be a loopback IP address with a port, such as 127.0.0.1:0; the web UI listens on loopback only, and `[remote]` serves other hosts"
+            )),
+        }
     }
 }
 
@@ -2662,12 +2675,9 @@ fn validate(file: &FileConfig, path: &Path) -> Result<(), ConfigError> {
             "must be empty or an identity name, [a-z0-9][a-z0-9._-]{0,62}".to_owned(),
         ),
         (
-            file.ui.listen_addr().is_some(),
+            file.ui.listen_port().is_ok(),
             "ui.listen",
-            format!(
-                "{:?} must be a loopback IP address with a port, such as 127.0.0.1:0; the web UI listens on loopback only, and `[remote]` serves other hosts",
-                file.ui.listen
-            ),
+            file.ui.listen_port().err().unwrap_or_default(),
         ),
         (
             (Duration::from_millis(10)..=Duration::from_mins(1))

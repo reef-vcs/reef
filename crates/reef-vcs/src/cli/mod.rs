@@ -65,6 +65,7 @@ mod store;
 mod stream;
 mod symbols;
 mod ui;
+mod verified;
 mod ws;
 mod ws_move;
 mod ws_run;
@@ -206,7 +207,8 @@ pub(crate) struct Global {
     no_register: bool,
     /// How long to wait for the daemon's answer [default: 30s; 5m for a
     /// workspace create; 10m for registering a repository; 1h for `ws gc`;
-    /// for `store build`, how long its command may run, 30m].
+    /// for `store build`, how long its command may run, 30m; for `evidence
+    /// add --verified`, how long to wait for the approval, 2m].
     #[arg(long, global = true, value_name = "DURATION", value_parser = humantime::parse_duration, hide = true)]
     timeout: Option<Duration>,
     /// Print nothing on stderr but errors.

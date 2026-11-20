@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use reef_api::v1::{self, EvaluatePolicyRequest, ReadFileRequest};
 use reef_policy::{
     Case, ConflictDecision, Decision, Diagnostic, Evaluation, InputSummary, Need, Policy, RuleKind,
-    RuleResult, SignoffNeed, Status,
+    RuleResult, SignoffNeed, Status, VerifiedSigner,
 };
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -174,6 +174,9 @@ pub(crate) struct PolicyCheck {
     pub(crate) version: u32,
     /// Its rules: the built-in ones first, then in file order.
     pub(crate) rules: Vec<String>,
+    /// What loads but cannot work as written, such as a `presence =
+    /// "user_verified"` no passkey in `[passkeys]` can meet (R3.43).
+    pub(crate) warnings: Vec<Diagnostic>,
     /// With `--input`, the evaluation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) evaluation: Option<Evaluation>,
@@ -405,6 +408,20 @@ pub(crate) fn render_rules(w: &mut dyn Write, evaluation: &Evaluation) -> io::Re
         "{rest} other rule{} satisfied or not applicable",
         if rest == 1 { "" } else { "s" }
     )?;
+    for signer in &evaluation.verified {
+        writeln!(
+            w,
+            "passkey {} of {} on evidence {}: {}",
+            signer.passkey.get(..12).unwrap_or(&signer.passkey),
+            signer.identity,
+            signer.evidence_id.get(..12).unwrap_or(&signer.evidence_id),
+            if signer.pinned {
+                "pinned, counts as user_verified"
+            } else {
+                "not pinned in [passkeys], counts as none"
+            }
+        )?;
+    }
     for diagnostic in &evaluation.diagnostics {
         writeln!(w, "warning: {diagnostic}")?;
     }
@@ -415,6 +432,9 @@ impl TextRender for PolicyCheck {
     fn render(&self, w: &mut dyn Write) -> io::Result<()> {
         writeln!(w, "{}: policy version {} loads", self.path, self.version)?;
         writeln!(w, "rules: {}", self.rules.join(", "))?;
+        for warning in &self.warnings {
+            writeln!(w, "warning: {warning}")?;
+        }
         if let Some(evaluation) = &self.evaluation {
             writeln!(w, "decision: {}", decision_word(evaluation.decision))?;
             render_rules(w, evaluation)?;
@@ -573,6 +593,7 @@ fn check(out: &Out, path: &str, bytes: &[u8], input: Option<&Path>) -> Result<()
         sha256: policy.sha256().to_owned(),
         version: reef_policy::VERSION,
         rules: policy.rule_names(),
+        warnings: policy.warnings().to_vec(),
         evaluation: None,
         conflict: None,
     };
@@ -744,6 +765,16 @@ pub(crate) fn evaluation_of(message: &v1::PolicyEvaluation) -> Evaluation {
             resolutions: i64::from(input.resolutions),
         },
         cost: message.cost,
+        verified: message
+            .verified
+            .iter()
+            .map(|signer| VerifiedSigner {
+                evidence_id: signer.evidence_id.clone(),
+                identity: signer.identity.clone(),
+                passkey: signer.passkey.clone(),
+                pinned: signer.pinned,
+            })
+            .collect(),
     }
 }
 

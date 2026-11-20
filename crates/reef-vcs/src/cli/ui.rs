@@ -63,7 +63,7 @@ impl TextRender for Shown<'_> {
 
 /// Why no browser can be opened here, if none can: over SSH, or on Linux
 /// with no display. `$BROWSER` overrides both.
-fn no_browser_here() -> Option<&'static str> {
+pub(crate) fn no_browser_here() -> Option<&'static str> {
     if std::env::var_os("BROWSER").is_some_and(|b| !b.is_empty()) {
         return None;
     }
@@ -101,7 +101,7 @@ fn opener(path: &Path) -> Command {
 
 /// Runs the opener on `path`; whether it exited zero within
 /// [`OPENER_WAIT`] (one still running then is taken as having opened).
-fn open(path: &Path) -> bool {
+pub(crate) fn open(path: &Path) -> bool {
     let Ok(mut child) = opener(path).spawn() else {
         return false;
     };
@@ -118,7 +118,7 @@ fn open(path: &Path) -> bool {
     }
 }
 
-/// The port of `url` (`http://127.0.0.1:<port>/`).
+/// The port of `url` (`http://localhost:<port>/`).
 fn port_of(url: &str) -> &str {
     url.trim_end_matches('/')
         .rsplit(':')
@@ -134,7 +134,7 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<(), CliError> {
     // opens nothing can still hand its path to the user.
     let response = ctx
         .client
-        .create_web_session(!args.print)
+        .create_web_session(!args.print, "")
         .await
         .map_err(CliError::Daemon)?;
     let launch_path = (!response.launch_path.is_empty()).then(|| response.launch_path.clone());
@@ -178,7 +178,7 @@ mod tests {
 
     #[test]
     fn ports() {
-        assert_eq!(port_of("http://127.0.0.1:52817/"), "52817");
+        assert_eq!(port_of("http://localhost:52817/"), "52817");
         assert_eq!(port_of("http://[::1]:7878/"), "7878");
     }
 }

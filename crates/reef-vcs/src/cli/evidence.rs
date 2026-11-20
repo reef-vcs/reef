@@ -25,7 +25,7 @@ use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use reef_api::v1::{AddEvidenceRequest, GetChangeRequest, ListEvidenceRequest};
+use reef_api::v1::{AddEvidenceRequest, GetChangeRequest, ListEvidenceRequest, ReadFileRequest};
 use reef_client::evidence::session::Actor;
 use reef_client::evidence::{self as format, Artifact, Claim, Outcome, PublicKey, SigningKey};
 use reef_client::json::{self, Evidence, EvidenceAdded, EvidenceKey};
@@ -59,7 +59,7 @@ pub(crate) struct Args {
 enum EvidenceCommand {
     /// Sign a claim about a revision's tree with a session key; store it.
     #[command(
-        after_help = "Example: reef evidence add --kind test --result pass --actor executor --artifact test.log"
+        after_help = "Example: reef evidence add --kind test --result pass --artifact test.log"
     )]
     Add(AddArgs),
     /// List evidence: of the repository, on a revision's tree, or linked to a change.
@@ -141,6 +141,7 @@ enum KeyCommand {
 
 /// `reef evidence add`.
 #[derive(Debug, clap::Args)]
+#[expect(clippy::struct_excessive_bools, reason = "clap flags")]
 struct AddArgs {
     /// What was checked: test, build, lint, policy, or another lowercase kind.
     #[arg(long, value_name = "KIND")]
@@ -148,16 +149,22 @@ struct AddArgs {
     /// How it came out: pass, fail, or error (no verdict).
     #[arg(long, value_name = "RESULT", value_parser = ["pass", "fail", "error"])]
     result: Option<String>,
-    /// Sign with this key file, not a session key; it reads unbound.
+    /// Sign with this key file; it reads unbound.
     #[arg(long, value_name = "PEM")]
     key: Option<PathBuf>,
     /// The identity to sign as [default: yours, or a remote token's].
     #[arg(long, value_name = "NAME", conflicts_with = "key")]
     identity: Option<String>,
-    /// agent (default), executor, or human: declared, not verified.
+    /// agent (default), executor, or human (declared).
     #[arg(long, value_parser = ["agent", "executor", "human"], conflicts_with = "key")]
     actor: Option<String>,
-    /// Sign keyless (Sigstore): see docs/identity.md.
+    /// With --actor human: approve it with a passkey first.
+    #[arg(long, conflicts_with_all = ["key", "keyless", "envelope", "public_key"])]
+    verified: bool,
+    /// Print the approval page's URL, not open it.
+    #[arg(long, requires = "verified", conflicts_with_all = ["key", "keyless", "envelope", "public_key"])]
+    print_url: bool,
+    /// Sign keyless (Sigstore).
     #[arg(long, conflicts_with_all = ["key", "identity"])]
     keyless: bool,
     /// With --keyless, the OIDC token's file (0600); else `SIGSTORE_ID_TOKEN` or GitHub Actions' token.
@@ -166,28 +173,28 @@ struct AddArgs {
     /// The change whose tree it is about [default: the workspace's change].
     #[arg(short = 'r', long, value_name = "REV")]
     revision: Option<String>,
-    /// The test or build target covered [default: the whole check].
+    /// The target covered [default: the whole check].
     #[arg(long, value_name = "TARGET")]
     target: Option<String>,
-    /// When the check started: RFC 3339, or a duration ago (5m) [default: now].
+    /// Start time: RFC 3339, or an age such as 5m [default: now].
     #[arg(long, value_name = "TIME")]
     started: Option<String>,
     /// When it finished [default: now].
     #[arg(long, value_name = "TIME")]
     finished: Option<String>,
-    /// A file the check produced, uploaded first; repeatable (with --envelope, one it names).
+    /// A file the check produced, uploaded first; repeatable.
     #[arg(long, value_name = "PATH")]
     artifact: Vec<PathBuf>,
-    /// Record --artifact files by digest, without uploading.
+    /// Record --artifact files by digest only.
     #[arg(long, conflicts_with_all = ["envelope", "public_key"])]
     no_upload: bool,
-    /// A note in the claim's annotations; repeatable.
+    /// A KEY=VALUE note in the claim; repeatable.
     #[arg(long, value_name = "KEY=VALUE")]
     annotation: Vec<String>,
     /// Send this DSSE envelope, signed elsewhere.
     #[arg(long, value_name = "FILE", conflicts_with_all = ["kind", "result", "key", "identity", "actor", "keyless", "target", "started", "finished", "annotation"], requires = "public_key")]
     envelope: Option<PathBuf>,
-    /// The envelope signer's public key, SPKI PEM.
+    /// Its signer's public key, SPKI PEM.
     #[arg(long, value_name = "PEM", requires = "envelope", conflicts_with_all = ["kind", "result", "key", "identity", "actor", "keyless", "target", "started", "finished", "annotation"])]
     public_key: Option<PathBuf>,
     #[command(flatten)]
@@ -588,6 +595,9 @@ enum Signer {
     File(SigningKey),
     /// A session key for `identity` (empty: the default) as `actor`.
     Session { identity: String, actor: Actor },
+    /// A key a person approves with a passkey for this one claim (R3.43),
+    /// for `identity` (empty: the default).
+    Verified { identity: String },
     /// A keyless key as `actor` (R3.42), with the OIDC token from this file
     /// or the environment.
     Keyless {
@@ -649,6 +659,19 @@ fn prepare(args: &AddArgs) -> Result<Prepared, CliError> {
             },
             claim_of(args)?,
         )),
+        (None, None) if args.verified => {
+            if args.actor.as_deref() != Some("human") {
+                return Err(CliError::Usage(
+                    "--verified signs as a person: give --actor human".into(),
+                ));
+            }
+            Some((
+                Signer::Verified {
+                    identity: args.identity.clone().unwrap_or_default(),
+                },
+                claim_of(args)?,
+            ))
+        }
         (None, None) => Some((
             Signer::Session {
                 identity: args.identity.clone().unwrap_or_default(),
@@ -910,8 +933,33 @@ async fn add(ctx: &Ctx, args: AddArgs, prepared: Prepared) -> Result<(), CliErro
             // A session key lives in this function only: it signs the one
             // envelope and is dropped, its PKCS#8 text wiped.
             let issued;
+            let approved;
             let key = match &signer {
                 Signer::File(key) => key,
+                Signer::Verified { identity } => {
+                    // The approval binds the statement's exact bytes, which
+                    // `claim.sign` below writes again.
+                    let statement = claim
+                        .payload(&tree)
+                        .map_err(|error| invalid_claim(error.to_string()))?;
+                    let change = change.as_ref().ok_or_else(|| {
+                        CliError::Usage("--verified signs a claim about a revision".into())
+                    })?;
+                    approved = Box::pin(super::verified::approved_key(
+                        ctx,
+                        super::verified::Asked {
+                            repo: &scope.repo_id,
+                            workspace: scope.workspace_id(),
+                            identity,
+                            change,
+                            statement: &statement,
+                        },
+                        args.print_url,
+                    ))
+                    .await
+                    .map_err(|error| advice.refine(error))?;
+                    &approved
+                }
                 Signer::Session { identity, actor } => {
                     issued = super::identity::issue_key(
                         ctx,
@@ -1113,7 +1161,42 @@ async fn show(ctx: &Ctx, args: ShowArgs) -> Result<(), CliError> {
     if args.envelope {
         return ctx.out.raw(&evidence.envelope);
     }
-    ctx.out.object(&Shown(Evidence::from(&evidence)))
+    let evidence = Evidence::from(&evidence);
+    let pinned = match evidence.identity.as_ref().and_then(|i| i.key.as_ref()) {
+        Some(key) if !ctx.out.is_json() && key.presence.as_deref() == Some("user_verified") => {
+            pinned_at_trunk(ctx, &scope, key).await
+        }
+        _ => None,
+    };
+    ctx.out.object(&Shown(evidence, pinned))
+}
+
+/// Whether the trunk's `reef-policy.toml` pins `key`'s passkey for its
+/// identity (R3.43); `None` when there is no policy there, or it does not
+/// load.
+async fn pinned_at_trunk(ctx: &Ctx, scope: &scope::Scope, key: &json::SessionKey) -> Option<bool> {
+    let read = ctx
+        .call(ctx.client.read_file_to_end(ReadFileRequest {
+            repo: scope.repo_id.clone(),
+            revision: "trunk()".to_owned(),
+            path: reef_policy::POLICY_PATH.to_owned(),
+            ..ReadFileRequest::default()
+        }))
+        .await
+        .ok()?;
+    let policy = reef_policy::Policy::load(&read.content).ok()?;
+    let effective = policy.presence(&reef_policy::input::Key {
+        identity: key.identity.clone(),
+        identity_id: key.identity_id.clone(),
+        presence: "user_verified".to_owned(),
+        passkey: key
+            .passkey
+            .as_ref()
+            .map(|passkey| passkey.fingerprint.clone())
+            .unwrap_or_default(),
+        ..reef_policy::input::Key::default()
+    });
+    Some(effective == Some(reef_policy::Presence::UserVerified))
 }
 
 fn short(id: &str) -> &str {
@@ -1179,7 +1262,7 @@ fn signer_word(evidence: &Evidence) -> String {
 
 /// The `identity:` line of `show`: whom the key is bound to and its status
 /// when the daemon first saw the object.
-fn identity_line(evidence: &Evidence) -> String {
+fn identity_line(evidence: &Evidence, pinned: Option<bool>) -> String {
     use std::fmt::Write as _;
     let Some(identity) = &evidence.identity else {
         return "-".to_owned();
@@ -1224,9 +1307,9 @@ fn identity_line(evidence: &Evidence) -> String {
                 ),
             };
             let mut line = format!(
-                "{who}, session {}, presence {} (not verified), {certified}",
+                "{who}, session {}, presence {}, {certified}",
                 key.session_id,
-                key.presence.as_deref().unwrap_or("-"),
+                super::identity::presence_text(key, pinned),
             );
             if let Some(revocation) = revocation {
                 let _ = write!(
@@ -1268,10 +1351,11 @@ impl TextRender for Lines {
     }
 }
 
-/// `evidence show`'s object.
+/// `evidence show`'s object, and in text whether the trunk's policy pins
+/// the passkey of a `user_verified` key (`None` when not known).
 #[derive(Serialize)]
 #[serde(transparent)]
-struct Shown(Evidence);
+struct Shown(Evidence, #[serde(skip)] Option<bool>);
 
 impl TextRender for Shown {
     fn render(&self, w: &mut dyn Write) -> io::Result<()> {
@@ -1305,7 +1389,7 @@ impl TextRender for Shown {
             pairs.push(("artifact", artifact_line(artifact)));
         }
         pairs.push(("signature", or_dash(e.signature.as_deref())));
-        pairs.push(("identity", identity_line(e)));
+        pairs.push(("identity", identity_line(e, self.1)));
         block(w, &pairs)?;
         if let Some(payload) = signed_payload(e) {
             // The payload exactly as signed: re-printing it through a JSON

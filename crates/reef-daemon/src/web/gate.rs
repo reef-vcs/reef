@@ -1,8 +1,9 @@
 //! What the web listener accepts (R2.18, ADR 0047): [`WebGateLayer`] sits
 //! outside `tonic_web::GrpcWebLayer` and checks every request, in order:
 //!
-//! 1. `Host` (or HTTP/2's `:authority`) is exactly the bound authority, or
-//!    `421`: DNS rebinding.
+//! 1. `Host` (or HTTP/2's `:authority`) is exactly `localhost:<port>`, or
+//!    `421`: DNS rebinding, and one origin (a `127.0.0.1` or `[::1]` host
+//!    too is `421`).
 //! 2. No `Upgrade` (`400`) and no `OPTIONS` (`405`): no WebSocket, and
 //!    every cross-origin preflight fails. No response carries CORS headers.
 //! 3. `GET` and `HEAD` on any path but an API path serve the assets.
@@ -15,9 +16,11 @@
 //!    `application/grpc-web+proto`), or `415`.
 //! 7. `authorization: Bearer <token>` names a live session, or
 //!    `WEB_SESSION_INVALID`. The header is removed.
-//! 8. The method is `ACCESS_READ`, or `WEB_ACCESS_DENIED`.
-//! 9. The request passes, holding its session in use until its response
-//!    body ends.
+//! 8. The method is `ACCESS_READ` or on the allowlist of writes
+//!    ([`super::rules::TABLE`], R3.43), or `WEB_ACCESS_DENIED`.
+//! 9. The request passes with a [`super::Caller`] naming its session in
+//!    its extensions, which a client cannot set, holding its session in
+//!    use until its response body ends.
 //!
 //! Steps 7 and 8 answer as gRPC-web trailers-only responses, which
 //! Connect-ES reads as typed errors; steps 1 to 6 are plain HTTP, since a
@@ -62,7 +65,7 @@ pub(crate) const GRPC_WEB: [&str; 2] = ["application/grpc-web", "application/grp
 /// What the gate checks against.
 #[derive(Debug)]
 pub(crate) struct Gate {
-    /// The bound authority, `127.0.0.1:<port>` or `[::1]:<port>`.
+    /// The bound authority, `localhost:<port>`.
     pub(crate) authority: String,
     /// `http://<authority>`.
     pub(crate) origin: String,
@@ -219,10 +222,11 @@ where
         if let Some(path) = launch_file {
             super::launch::remove(&path);
         }
-        // 8. Read methods only.
+        // 8. Read methods, and the allowlist's writes.
         let path = request.uri().path().to_owned();
         let access = match reef_api::access(&path) {
             Some(Access::Read) => None,
+            Some(Access::Write) if super::rules::rule(&path).is_some() => None,
             Some(Access::Write) => Some("write"),
             Some(Access::Admin) => Some("admin"),
             _ => Some("unknown"),
@@ -236,8 +240,12 @@ where
                 })))
             });
         }
-        // 9. Pass, the session in use until the body ends. The service that
-        // was polled ready serves this request; a clone takes its place.
+        // 9. Pass, with the caller, the session in use until the body ends.
+        // The service that was polled ready serves this request; a clone
+        // takes its place.
+        request.extensions_mut().insert(super::Caller {
+            session: in_use.session_id(),
+        });
         let clone = self.inner.clone();
         let mut inner = std::mem::replace(&mut self.inner, clone);
         Box::pin(async move {
