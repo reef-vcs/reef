@@ -35,9 +35,31 @@
 //! its row's commit. A snapshot that carried the edit across the rewrite,
 //! through the merge of the three operation heads, fails the seed.
 //!
+//! The other clients of a seed share a clock ([`Clock`]), and in two
+//! seeds of three it is wrong: an hour ahead, or stopped when the seed
+//! began, so that their operations are stamped in one millisecond and fall
+//! behind the daemon's. The head such a client loads is then an operation
+//! stamped by that clock, as is the next one after it. What a snapshot
+//! follows must not depend on what a clock said. No clock is far behind:
+//! jj's own merge of operation heads (its `op_walk`) reads the log in
+//! the order of its end times. With other clients' operations stamped 25
+//! years back in every seed, one merge ran for more than 15 minutes on a
+//! log of 2,700 operations.
+//!
+//! Each seed's first scene ends with a client that loaded the head too
+//! early ([`Scene::write_beside_a_stale_client`]): it loads the head, a
+//! workspace snapshots, a write of Reef's moves that workspace, its agent
+//! writes, and the client commits before the write's follow-ups. Its
+//! operation is one of those since the snapshot, and the operation it
+//! loaded the head at is before it. On a daemon that has run enough
+//! seeds, that client is one with a right clock that loaded the head more
+//! than [`LONG_BEFORE`] operations earlier, in an earlier seed.
+//!
 //! A run of [`SEEDS`] seeds or more must have exercised each of these:
 //! merges of two and of three operation heads, supersedes, supersedes
-//! racing a held snapshot, and rewrites by another client.
+//! racing a held snapshot, rewrites by another client, and a stale client
+//! with each wrong clock. A run of [`LONG_RUN`] seeds or more for each
+//! daemon must also have had a client that loaded the head long before.
 //!
 //! A seed's script is a function of the seed. Where a step lands against
 //! requests still running depends on the scheduler: a step that does not
@@ -70,7 +92,9 @@ use reef_api::v1::{
 };
 use reef_daemon::client::{Client, ClientError};
 use reef_daemon::testing::{SyntheticRepo, TestDaemon, no_automatic_snapshots, test_settings};
+use reef_lib::jj::UserSettings;
 use reef_testing::synth::Preset;
+use time::format_description::well_known::Rfc3339;
 use tokio::task::JoinHandle;
 
 /// Seeds a plain test run covers.
@@ -86,6 +110,13 @@ const SETTLE: Duration = Duration::from_millis(40);
 const FOLLOW: Duration = Duration::from_secs(20);
 /// How long a request gets once every hold is released.
 const HANG: Duration = Duration::from_secs(60);
+
+/// More operations than a follow judges (1,024, ADR 0084): a client that
+/// loaded the head this many operations ago loaded it long before.
+const LONG_BEFORE: usize = 1100;
+/// Seeds for each daemon from which one of them must have had a client
+/// that loaded the head [`LONG_BEFORE`].
+const LONG_RUN: u64 = 60;
 
 /// `SplitMix64`: a seed's script needs no more.
 struct Rng(u64);
@@ -140,7 +171,54 @@ struct Covered {
     /// Rewrites of a busy workspace's commit by another client, each of
     /// which left its change divergent.
     rewrites: usize,
+    /// Stale clients of [`Scene::write_beside_a_stale_client`] whose clock
+    /// was ahead, and stopped.
+    wrong_clocks: [usize; 2],
+    /// Stale clients that loaded the head [`LONG_BEFORE`].
+    long_before: usize,
     failures: Vec<(u64, String)>,
+}
+
+/// What the clock of a seed's other jj clients says.
+#[derive(Clone, Debug)]
+enum Clock {
+    Right,
+    /// Every operation is stamped with this time. `.0` indexes
+    /// [`Covered::wrong_clocks`].
+    Wrong(usize, String),
+}
+
+impl Clock {
+    /// The clock of seed `seed`, which begins now. It does not go by the
+    /// seed's number, so that each daemon of a run gets every clock.
+    fn of(seed: u64) -> Self {
+        let now = time::OffsetDateTime::now_utc();
+        let stamp = |at: time::OffsetDateTime| at.format(&Rfc3339).unwrap();
+        match Rng(seed ^ 0x63_6c6f_636b).below(3) {
+            0 => Self::Right,
+            1 => Self::Wrong(0, stamp(now + time::Duration::HOUR)),
+            _ => Self::Wrong(1, stamp(now)),
+        }
+    }
+
+    /// The settings of a jj client with this clock.
+    fn settings(&self) -> UserSettings {
+        use jj_lib::config::{ConfigLayer, ConfigSource};
+        let Self::Wrong(_, stamp) = self else {
+            return test_settings();
+        };
+        let mut config = test_settings().config().clone();
+        let layer = format!("debug.operation-timestamp = {stamp:?}");
+        config.add_layer(ConfigLayer::parse(ConfigSource::User, &layer).unwrap());
+        UserSettings::from_config_and_home_dir(config, None).unwrap()
+    }
+}
+
+/// A client that loaded the head when the daemon's log had `operations`
+/// operations, for a later seed to release.
+struct Early {
+    client: Vec<OtherClient>,
+    operations: usize,
 }
 
 /// How a seed's last scene ends.
@@ -220,6 +298,11 @@ struct Scene<'a> {
     tag: String,
     counter: usize,
     holds: Vec<(Step, Box<dyn Any + Send>)>,
+    clock: Clock,
+    /// The daemon's client that loaded the head in an earlier seed.
+    early: &'a mut Option<Early>,
+    /// This scene's stale client had loaded the head [`LONG_BEFORE`].
+    long_before: bool,
     /// The supersede has been asked for.
     superseding: bool,
     /// It was asked for while a snapshot of the superseded change's
@@ -357,7 +440,7 @@ impl Scene<'_> {
                     name: format!("{name}-{nth}"),
                     commit: self.stack.base.clone(),
                 });
-                let others = OtherClient::load_all(&self.repo.root, bookmarks.collect()).await;
+                let others = self.other_clients(bookmarks.collect()).await;
                 self.holds.push((step, Box::new(others)));
             }
             Step::Supersede => {
@@ -401,6 +484,94 @@ impl Scene<'_> {
         self.rewrite_outside().await.map(Some)
     }
 
+    /// Other jj clients with the seed's clock, one for each of `what`, all
+    /// loaded at the head now. With a wrong clock, a client with that clock
+    /// wrote the operation they load the head at, and the next after it.
+    async fn other_clients(&self, what: Vec<Outside>) -> Vec<OtherClient> {
+        let (root, clock) = (self.repo.root.clone(), self.clock.clone());
+        let stamped = |nth: usize| {
+            let wrong = matches!(clock, Clock::Wrong(..));
+            let name = format!("{}-{}-clock-{nth}", self.tag, self.counter);
+            let commit = self.stack.base.clone();
+            wrong.then_some(Outside::Bookmark { name, commit })
+        };
+        let (before, after) = (stamped(0), stamped(1));
+        let load = move || {
+            let now = |what: Option<Outside>| {
+                if let Some(what) = what {
+                    let tx = outside_tx(&root, &what, &clock.settings());
+                    pollster::block_on(tx.commit("another client's operation")).unwrap();
+                }
+            };
+            now(before);
+            let load = |what| OtherClient::load(&root, what, clock.settings());
+            let others = what.into_iter().map(load).collect();
+            now(after);
+            others
+        };
+        tokio::task::spawn_blocking(load).await.unwrap()
+    }
+
+    /// A jj client that loaded the head too early commits beside a write
+    /// of Reef's: it loads the head; a workspace snapshots; a write by
+    /// change id moves that workspace; its agent writes; the client
+    /// commits before the write's follow-ups run. The client's
+    /// operation is then one of those since the workspace's last snapshot,
+    /// and the operation it loaded the head at is not. Once the daemon's
+    /// log has [`LONG_BEFORE`] operations more than when its early client
+    /// loaded the head, that is the client, and a new one loads for a
+    /// later seed.
+    async fn write_beside_a_stale_client(&mut self) -> Result<(), String> {
+        self.finish().await?;
+        let at = self.rng.below(self.stack.members.len());
+        writeln!(self.log, "  StaleClient({at})").unwrap();
+        let bookmark = |name: String| Outside::Bookmark {
+            name,
+            commit: self.stack.base.clone(),
+        };
+        let operations = operations(&self.daemon.client, self.repo).await.len();
+        let early = self
+            .early
+            .take_if(|early| operations > early.operations + LONG_BEFORE);
+        if self.early.is_none() {
+            let what = bookmark(format!("{}-early", self.tag));
+            let client = OtherClient::load_all(&self.repo.root, vec![what], Clock::Right).await;
+            *self.early = Some(Early { client, operations });
+        }
+        self.long_before = early.is_some();
+        let stale = if let Some(early) = early {
+            early.client
+        } else {
+            let what = bookmark(format!("{}-stale", self.tag));
+            self.other_clients(vec![what]).await
+        };
+        self.run(Step::Write(at)).await;
+        self.run(Step::Snapshot(at)).await;
+        self.finish().await?;
+        self.run(Step::HoldFollows).await;
+        self.run(Step::Add(at)).await;
+        let scheduler = self.daemon.handle.state().manager.scheduler();
+        let begun = Instant::now();
+        while scheduler.held_follows() == 0 {
+            // A write that failed never gets there: `finish` says why.
+            if self.tasks.iter().any(|(_, task)| task.is_finished()) {
+                return Ok(());
+            }
+            if begun.elapsed() > FOLLOW {
+                return Err(format!(
+                    "the write never reached its follow-ups, after {FOLLOW:?}"
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        // An edit the write did not take: its follow has to carry it.
+        self.run(Step::Write(at)).await;
+        tokio::task::spawn_blocking(move || drop(stale))
+            .await
+            .unwrap();
+        Ok(())
+    }
+
     /// Writes in the bottom workspace and starts a snapshot of it that
     /// waits between its scan and its commit: the superseded change's
     /// commit moves under the supersede that starts next. Every hold of
@@ -442,8 +613,17 @@ impl Scene<'_> {
     /// that commit alone and a third client's bookmark; returns the
     /// workspace. Every request finishes first: one by change id must not
     /// find the change divergent.
+    ///
+    /// Every workspace has followed first too, so that no snapshot of
+    /// Reef's commits while the other client holds its rewrite. jj merges
+    /// the later of two operation heads into the earlier, by their stamps.
+    /// A client whose clock is behind then has its commit kept for a
+    /// workspace both moved, a commit made before that snapshot's files,
+    /// and a workspace with no edits checks it out (ADR 0018). main does
+    /// the same.
     async fn rewrite_outside(&mut self) -> Result<usize, String> {
         self.finish().await?;
+        follows(&self.daemon.client, self.repo, self.stack).await?;
         let at = self.rng.below(self.stack.members.len());
         writeln!(self.log, "  Rewrite({at})").unwrap();
         let name = format!("{}-outside", self.tag);
@@ -456,7 +636,7 @@ impl Scene<'_> {
                 commit: self.stack.base.clone(),
             },
         ];
-        let others = OtherClient::load_all(&self.repo.root, outside).await;
+        let others = self.other_clients(outside).await;
         let target = edit_files_request::Target::NewOn(self.stack.base.clone());
         let (client, repo) = (&self.daemon.client, self.repo.id.clone());
         add(client, repo, target, &format!("beside/{name}.txt"), &name).await?;
@@ -769,24 +949,9 @@ async fn create(client: &Client, repo: &SyntheticRepo, at: usize, on: Option<Str
     }
 }
 
-/// One seed: a stack, then [`SCENES`] scenes, each checked. The last scene
-/// ends as the seed's [`Ending`] says. Returns the ending, and whether a
-/// supersede raced a held snapshot.
-async fn seed(
-    daemon: &TestDaemon,
-    repo: &SyntheticRepo,
-    seed: u64,
-) -> Result<(Ending, bool), String> {
-    let client = &daemon.client;
-    let mut rng = Rng(seed);
-    let depth = 2 + rng.below(2);
-    let ending = match rng.below(4) {
-        0 | 1 => Ending::Supersede,
-        2 => Ending::Rewrite,
-        _ => Ending::Plain,
-    };
-    let supersedes = ending == Ending::Supersede;
-    let mut raced = false;
+/// A stack of `depth` workspaces for seed `seed`, each on the one below
+/// with one file snapshotted.
+async fn stack_of(client: &Client, repo: &SyntheticRepo, seed: u64, depth: usize) -> Stack {
     let mut stack = Stack {
         base: String::new(),
         members: Vec::new(),
@@ -815,15 +980,50 @@ async fn seed(
     };
     let bottom = client.get_change(request).await.unwrap().change.unwrap();
     stack.base.clone_from(&bottom.parent_commit_ids[0]);
+    stack
+}
+
+/// What a seed that passed exercised.
+struct Ran {
+    ending: Ending,
+    /// A supersede raced a held snapshot.
+    raced: bool,
+    clock: Clock,
+    /// Its stale client had loaded the head [`LONG_BEFORE`].
+    long_before: bool,
+}
+
+/// One seed: a stack, then [`SCENES`] scenes, each checked. The first
+/// scene ends with a stale client, and the last as the seed's [`Ending`]
+/// says.
+async fn seed(
+    daemon: &TestDaemon,
+    repo: &SyntheticRepo,
+    seed: u64,
+    early: &mut Option<Early>,
+) -> Result<Ran, String> {
+    let client = &daemon.client;
+    let mut rng = Rng(seed);
+    let clock = Clock::of(seed);
+    let mut long_before = false;
+    let depth = 2 + rng.below(2);
+    let ending = match rng.below(4) {
+        0 | 1 => Ending::Supersede,
+        2 => Ending::Rewrite,
+        _ => Ending::Plain,
+    };
+    let supersedes = ending == Ending::Supersede;
+    let mut raced = false;
+    let mut stack = stack_of(client, repo, seed, depth).await;
     if supersedes {
         // A proposal needs a destination.
         bookmark_main(repo, &stack.base).await;
     }
-    let mut log = format!("seed {seed}, {depth} workspaces\n");
+    let mut log = format!("seed {seed}, {depth} workspaces, other clients' clock {clock:?}\n");
     let mut failure = None;
-    for scene in 0..SCENES {
-        writeln!(log, " scene {scene}").unwrap();
-        let last = scene + 1 == SCENES;
+    for scene_number in 0..SCENES {
+        writeln!(log, " scene {scene_number}").unwrap();
+        let last = scene_number + 1 == SCENES;
         if last && supersedes {
             // Only a proposed change can be superseded.
             let request = v1::TransitionChangeRequest {
@@ -840,16 +1040,23 @@ async fn seed(
             stack: &mut stack,
             rng: &mut rng,
             tag: format!("s{seed}"),
-            counter: scene * 100,
+            counter: scene_number * 100,
             holds: Vec::new(),
+            clock: clock.clone(),
+            early,
+            long_before: false,
             superseding: false,
             raced: false,
             tasks: Vec::new(),
             log: String::new(),
         };
-        let played = scene.play(if last { ending } else { Ending::Plain }).await;
+        let mut played = scene.play(if last { ending } else { Ending::Plain }).await;
+        if scene_number == 0 && played.is_ok() {
+            played = scene.write_beside_a_stale_client().await.map(|()| None);
+        }
         let finished = scene.finish().await;
         raced |= scene.raced;
+        long_before |= scene.long_before;
         log.push_str(&scene.log);
         let checked = match (played, finished) {
             (Err(error), _) | (_, Err(error)) => Err(error),
@@ -872,21 +1079,32 @@ async fn seed(
     }
     match failure {
         Some(error) => Err(format!("{error}\n{log}")),
-        None => Ok((ending, raced)),
+        None => Ok(Ran {
+            ending,
+            raced,
+            clock,
+            long_before,
+        }),
     }
+}
+
+/// Every operation in `repo`'s log.
+async fn operations(client: &Client, repo: &SyntheticRepo) -> Vec<v1::Operation> {
+    let request = v1::ListOperationsRequest {
+        repo: repo.id.clone(),
+        ..v1::ListOperationsRequest::default()
+    };
+    let operations = client.list_operations_limited(request, 0).await;
+    operations.unwrap().items
 }
 
 /// How many operations of `repo` merge operation heads, and how many of
 /// those merge three or more.
 async fn merges(client: &Client, repo: &SyntheticRepo) -> (usize, usize) {
-    let request = v1::ListOperationsRequest {
-        repo: repo.id.clone(),
-        ..v1::ListOperationsRequest::default()
-    };
-    let operations = client.list_operations_limited(request, 0).await.unwrap();
+    let operations = operations(client, repo).await;
     let merging = |heads: usize| {
         let wide = |operation: &&v1::Operation| operation.parent_ids.len() >= heads;
-        operations.items.iter().filter(wide).count()
+        operations.iter().filter(wide).count()
     };
     (merging(2), merging(3))
 }
@@ -901,9 +1119,13 @@ enum Outside {
     Empty { workspace: String },
 }
 
-/// A transaction of another jj client on the registered root, loaded at
-/// the head now, that does `what`.
-fn outside_tx(root: &Path, what: &Outside) -> jj_lib::transaction::Transaction {
+/// A transaction of another jj client with `settings` on the registered
+/// root, loaded at the head now, that does `what`.
+fn outside_tx(
+    root: &Path,
+    what: &Outside,
+    settings: &UserSettings,
+) -> jj_lib::transaction::Transaction {
     use jj_lib::default_backend_factories::{
         default_backend_factories, default_working_copy_factories, default_workspace_loader_factory,
     };
@@ -912,7 +1134,7 @@ fn outside_tx(root: &Path, what: &Outside) -> jj_lib::transaction::Transaction {
         .create(root)
         .unwrap()
         .load(
-            &test_settings(),
+            settings,
             &default_backend_factories(),
             &default_working_copy_factories(),
         )
@@ -953,7 +1175,7 @@ async fn bookmark_main(repo: &SyntheticRepo, commit: &str) {
         commit: commit.to_owned(),
     };
     let set = move || {
-        let tx = outside_tx(&root, &bookmark);
+        let tx = outside_tx(&root, &bookmark, &test_settings());
         pollster::block_on(tx.commit("bookmark set")).unwrap();
     };
     tokio::task::spawn_blocking(set).await.unwrap();
@@ -969,12 +1191,12 @@ struct OtherClient {
 }
 
 impl OtherClient {
-    fn load(root: &Path, what: Outside) -> Self {
+    fn load(root: &Path, what: Outside, settings: UserSettings) -> Self {
         let root = root.to_owned();
         let (go, told) = std::sync::mpsc::channel();
         let (tell, loaded) = std::sync::mpsc::channel();
         let done = std::thread::spawn(move || {
-            let tx = outside_tx(&root, &what);
+            let tx = outside_tx(&root, &what, &settings);
             tell.send(()).unwrap();
             if told.recv().is_ok() {
                 pollster::block_on(tx.commit("another client's operation")).unwrap();
@@ -987,12 +1209,12 @@ impl OtherClient {
         }
     }
 
-    /// One client for each of `what`, all loaded at the head now. Dropped
-    /// together, they commit in that order.
-    async fn load_all(root: &Path, what: Vec<Outside>) -> Vec<Self> {
+    /// One client with `clock` for each of `what`, all loaded at the head
+    /// now. Dropped together, they commit in that order.
+    async fn load_all(root: &Path, what: Vec<Outside>, clock: Clock) -> Vec<Self> {
         let root = root.to_owned();
         let load = move || {
-            let load = |what| Self::load(&root, what);
+            let load = |what| Self::load(&root, what, clock.settings());
             what.into_iter().map(load).collect()
         };
         tokio::task::spawn_blocking(load).await.unwrap()
@@ -1029,16 +1251,25 @@ async fn a_stack_survives_random_interleavings() {
         })
         .await;
         let mut covered = Covered::default();
+        let mut early = None;
         for seed_number in (first..first + seeds).filter(|seed| seed % jobs == job) {
-            match seed(&daemon, &repo, seed_number).await {
-                Ok((ending, raced)) => {
-                    covered.supersedes += usize::from(ending == Ending::Supersede);
-                    covered.raced += usize::from(raced);
-                    covered.rewrites += usize::from(ending == Ending::Rewrite);
+            match seed(&daemon, &repo, seed_number, &mut early).await {
+                Ok(ran) => {
+                    covered.supersedes += usize::from(ran.ending == Ending::Supersede);
+                    covered.raced += usize::from(ran.raced);
+                    covered.rewrites += usize::from(ran.ending == Ending::Rewrite);
+                    match ran.clock {
+                        _ if ran.long_before => covered.long_before += 1,
+                        Clock::Wrong(which, _) => covered.wrong_clocks[which] += 1,
+                        Clock::Right => {}
+                    }
                 }
                 Err(error) => covered.failures.push((seed_number, error)),
             }
         }
+        tokio::task::spawn_blocking(move || drop(early))
+            .await
+            .unwrap();
         (covered.merges, covered.wide_merges) = merges(&daemon.client, &repo).await;
         daemon.stop().await;
         covered
@@ -1054,7 +1285,16 @@ async fn a_stack_survives_random_interleavings() {
         ("supersedes", count(|job| job.supersedes)),
         ("supersedes racing a held snapshot", count(|job| job.raced)),
         ("rewrites by another client", count(|job| job.rewrites)),
+        (
+            "stale clients whose clock was ahead",
+            count(|job| job.wrong_clocks[0]),
+        ),
+        (
+            "stale clients whose clock had stopped",
+            count(|job| job.wrong_clocks[1]),
+        ),
     ];
+    let long_before = count(|job| job.long_before);
     let mut failures: Vec<(u64, String)> =
         covered.into_iter().flat_map(|job| job.failures).collect();
     failures.sort();
@@ -1063,7 +1303,7 @@ async fn a_stack_survives_random_interleavings() {
         .map(|(what, count)| format!("{count} {what}"))
         .collect();
     println!(
-        "stack stress: {seeds} seeds from {first}, {} failed, in {:?}; {}",
+        "stack stress: {seeds} seeds from {first}, {} failed, in {:?}; {}, {long_before} stale clients that loaded the head long before",
         failures.len(),
         begun.elapsed(),
         counts.join(", ")
@@ -1078,5 +1318,11 @@ async fn a_stack_survives_random_interleavings() {
         for (what, count) in exercised {
             assert!(count > 0, "the run exercised no {what}");
         }
+    }
+    if seeds >= LONG_RUN * jobs {
+        assert!(
+            long_before > 0,
+            "the run had no stale client that loaded the head long before"
+        );
     }
 }

@@ -1529,6 +1529,240 @@ async fn a_merge_of_many_heads_keeps_arm_four() {
     assert_diverges(&fx, &mut y, &c).await;
 }
 
+/// `settings()`, with every operation stamped `stamp`: a jj client whose
+/// clock reads that, whatever the time.
+fn settings_at(stamp: &str) -> UserSettings {
+    use jj_lib::config::{ConfigLayer, ConfigSource};
+    let mut config = settings().config().clone();
+    let layer = format!("debug.operation-timestamp = {stamp:?}");
+    config.add_layer(ConfigLayer::parse(ConfigSource::User, &layer).unwrap());
+    UserSettings::from_config_and_home_dir(config, None).unwrap()
+}
+
+/// Another jj client with `settings`, loaded at the head of `main/`.
+async fn other_client(fx: &Fixture, settings: &UserSettings) -> Arc<ReadonlyRepo> {
+    let factories = (
+        default_backend_factories(),
+        default_working_copy_factories(),
+    );
+    let workspace = default_workspace_loader_factory()
+        .create(fx.main.workspace_root())
+        .unwrap()
+        .load(settings, &factories.0, &factories.1)
+        .unwrap();
+    workspace.repo_loader().load_at_head(None).await.unwrap()
+}
+
+/// `count` operations of another jj client on `at`, one after the other,
+/// that move no working copy; `main` is left at the last.
+async fn operations_on(fx: &mut Fixture, at: &Arc<ReadonlyRepo>, count: usize) {
+    let targets = [
+        fx.main.wc_change().unwrap().commit_id,
+        reef_lib::jj::view_wc_commit(at, &format!("reef-{Y}")).unwrap(),
+    ];
+    let mut at = Arc::clone(at);
+    for nth in 0..count {
+        at = concurrent_bookmark(&at, "elsewhere", &targets[nth % 2]).await;
+    }
+    fx.main.set_head(at);
+}
+
+/// The scene of a client that loaded the head too early: `stale` loaded it
+/// before `y` snapshots C; Reef's write then moves `y` to C2; `stale`
+/// commits a bookmark; the reload merges the two heads; `y`'s agent writes.
+/// Returns C and C2.
+async fn beside_a_stale_client(
+    fx: &mut Fixture,
+    (y, y_root): (&mut Repo, &Path),
+    stale: &Arc<ReadonlyRepo>,
+) -> (CommitIdHex, CommitIdHex) {
+    let base = fx.main.wc_change().unwrap().commit_id;
+    y.set_head(Arc::clone(fx.main.head()));
+    write(y_root, "b.txt", "b\n");
+    let snapshot = y.snapshot("reef: snapshot workspace y").await.unwrap();
+    let c = snapshot.wc_commit;
+    fx.main.reload_at_head().await.unwrap();
+    let c2 = write_on(fx, &c, &[content("api.txt", "api\n")]).await;
+    concurrent_bookmark(stale, "stale", &base).await;
+    merge_heads(fx).await;
+    write(y_root, "late.txt", "late\n");
+    (c, c2)
+}
+
+/// `y` carries its edits from C onto C2, the write's commit.
+async fn assert_carries(fx: &Fixture, y: &mut Repo, moved: (&CommitIdHex, &CommitIdHex)) {
+    let (committed, files) = carry_snapshot(fx, y, moved, None).await;
+    assert_eq!(files, 1, "the write's file");
+    for path in ["a.txt", "b.txt", "api.txt", "late.txt"] {
+        assert!(
+            file_in(&committed.repo, &committed.commit_id, path)
+                .await
+                .is_some(),
+            "{path} in the commit"
+        );
+    }
+}
+
+/// More operations than the walk judges (`FOLLOW_LIMIT`, 1,024).
+const PAST_THE_LIMIT: usize = 1100;
+
+// Review 9, R9-1: another jj client loaded the head, and more operations
+// than the walk judges were written before this workspace's last snapshot.
+// The client then commits beside Reef's write. Its operation is the only
+// one of those since the snapshot: the ones before count for nothing.
+#[tokio::test]
+async fn a_client_that_loaded_the_head_long_before_carries() {
+    let mut fx = Fixture::new().await;
+    let (mut y, y_root, _) = busy_workspace(&mut fx, &[("a.txt", "a\n")]).await;
+    let stale = Arc::clone(fx.main.head());
+    operations_on(&mut fx, &stale, PAST_THE_LIMIT).await;
+
+    let (c, c2) = beside_a_stale_client(&mut fx, (&mut y, &y_root), &stale).await;
+    assert_carries(&fx, &mut y, (&c, &c2)).await;
+}
+
+// ADR 0084: a follow that comes more operations after Reef's move than the
+// walk judges takes ADR 0018's fourth arm.
+#[tokio::test]
+async fn a_move_further_back_than_the_limit_diverges() {
+    let mut fx = Fixture::new().await;
+    let (mut y, y_root, c) = busy_workspace(&mut fx, &[("a.txt", "a\n")]).await;
+    write_on(&mut fx, &c, &[content("api.txt", "api\n")]).await;
+    let written = Arc::clone(fx.main.head());
+    operations_on(&mut fx, &written, PAST_THE_LIMIT).await;
+    write(&y_root, "late.txt", "late\n");
+
+    assert_diverges(&fx, &mut y, &c).await;
+}
+
+// Review 9, R9-2: the operations since the last snapshot do not depend on
+// what the clocks said. One client's clock is wrong, and it writes the
+// operation that the stale client loads the head at, or the stale client's
+// own clock is wrong.
+#[tokio::test]
+async fn a_wrong_clock_changes_no_carry() {
+    let (ahead, behind) = ("2030-01-01T00:00:00+00:00", "2001-01-01T00:00:00+00:00");
+    for (loaded_at, stale) in [
+        (Some(ahead), None),
+        (Some(behind), None),
+        (None, Some(ahead)),
+        (None, Some(behind)),
+        (Some(ahead), Some(behind)),
+    ] {
+        let mut fx = Fixture::new().await;
+        let (mut y, y_root, _) = busy_workspace(&mut fx, &[("a.txt", "a\n")]).await;
+        let base = fx.main.wc_change().unwrap().commit_id;
+        if let Some(stamp) = loaded_at {
+            let client = other_client(&fx, &settings_at(stamp)).await;
+            concurrent_bookmark(&client, "wrong-clock", &base).await;
+            fx.main.reload_at_head().await.unwrap();
+        }
+        let stale = match stale {
+            Some(stamp) => other_client(&fx, &settings_at(stamp)).await,
+            None => Arc::clone(fx.main.head()),
+        };
+
+        let (c, c2) = beside_a_stale_client(&mut fx, (&mut y, &y_root), &stale).await;
+        assert_carries(&fx, &mut y, (&c, &c2)).await;
+    }
+}
+
+// Review 9, R9-2: an operation that is read before the one that shows it
+// is before the last snapshot is before it all the same, and so is its
+// history. Two clients loaded the head too early: one at an operation
+// stamped ahead, which is read first, and one at the operation before it.
+#[tokio::test]
+async fn two_stale_clients_below_a_wrong_clock_carry() {
+    let mut fx = Fixture::new().await;
+    let (mut y, y_root, _) = busy_workspace(&mut fx, &[("a.txt", "a\n")]).await;
+    let base = fx.main.wc_change().unwrap().commit_id;
+    let below = Arc::clone(fx.main.head());
+    let client = other_client(&fx, &settings_at("2030-01-01T00:00:00+00:00")).await;
+    concurrent_bookmark(&client, "wrong-clock", &base).await;
+    fx.main.reload_at_head().await.unwrap();
+    let stale = Arc::clone(fx.main.head());
+
+    let (c, c2) = beside_a_stale_client(&mut fx, (&mut y, &y_root), &stale).await;
+    concurrent_bookmark(&below, "below", &base).await;
+    merge_heads(&mut fx).await;
+    assert_carries(&fx, &mut y, (&c, &c2)).await;
+}
+
+// Review 9, R9-2: every operation is written in the same millisecond, so
+// that jj orders them by id. Each round has other ids.
+#[tokio::test]
+async fn operations_in_one_millisecond_carry() {
+    for _ in 0..20 {
+        let mut fx = Fixture::with_settings(&settings_at("2026-01-01T00:00:00+00:00")).await;
+        let (mut y, y_root, _) = busy_workspace(&mut fx, &[("a.txt", "a\n")]).await;
+        let base = fx.main.wc_change().unwrap().commit_id;
+        concurrent_bookmark(fx.main.head(), "first", &base).await;
+        fx.main.reload_at_head().await.unwrap();
+        let stale = Arc::clone(fx.main.head());
+
+        let (c, c2) = beside_a_stale_client(&mut fx, (&mut y, &y_root), &stale).await;
+        assert_carries(&fx, &mut y, (&c, &c2)).await;
+    }
+}
+
+// Review 9, R9-2: the moves are followed in the order the log gives them,
+// not the order of their times. Reef writes twice, and the clock was set
+// back in between, so the first write is stamped after the second.
+#[tokio::test]
+async fn a_clock_set_back_between_two_writes_changes_no_carry() {
+    let mut fx = Fixture::new().await;
+    let (mut y, y_root, c) = busy_workspace(&mut fx, &[("a.txt", "a\n")]).await;
+    let ahead = settings_at("2030-01-01T00:00:00+00:00");
+    let mut early = Repo::open(fx.main.workspace_root(), &ahead).await.unwrap();
+    let meta = OpMeta::new(OpKind::Edit, "reef: edit");
+    let edit = [content("api.txt", "api\n")];
+    let written = early.edit_commit(&c, &edit, None, &meta).await.unwrap();
+    let c2 = written.expect("the edit changed the tree").commit_id;
+    fx.main.reload_at_head().await.unwrap();
+    let c3 = write_on(&mut fx, &c2, &[content("api2.txt", "api\n")]).await;
+    write(&y_root, "late.txt", "late\n");
+
+    let (committed, files) = carry_snapshot(&fx, &mut y, (&c, &c3), None).await;
+    assert_eq!(files, 2, "both writes' files");
+    for path in ["a.txt", "api.txt", "api2.txt", "late.txt"] {
+        assert!(
+            file_in(&committed.repo, &committed.commit_id, path)
+                .await
+                .is_some(),
+            "{path} in the commit"
+        );
+    }
+}
+
+// Review 9, R9-2: a wrong clock launders no move either. Another client's
+// rewrite of this workspace's commit beside Reef's write takes ADR 0018's
+// fourth arm, whatever its clock said and with every operation in one
+// millisecond.
+#[tokio::test]
+async fn a_wrong_clock_keeps_arm_four() {
+    let now = settings();
+    let stamps = [
+        (&now, Some("2030-01-01T00:00:00+00:00")),
+        (&now, Some("2001-01-01T00:00:00+00:00")),
+    ];
+    let one_millisecond = settings_at("2026-01-01T00:00:00+00:00");
+    let ties = std::iter::repeat_n((&one_millisecond, None), 8);
+    for (daemons, others) in stamps.into_iter().chain(ties) {
+        let mut fx = Fixture::with_settings(daemons).await;
+        let (mut y, y_root, c) = busy_workspace(&mut fx, &[("a.txt", "a\n")]).await;
+        let other = match others {
+            Some(stamp) => other_client(&fx, &settings_at(stamp)).await,
+            None => Arc::clone(fx.main.head()),
+        };
+        write_on(&mut fx, &c, &[content("api.txt", "api\n")]).await;
+        concurrent_rewrite(&other, &c).await;
+        merge_heads(&mut fx).await;
+        write(&y_root, "late.txt", "late\n");
+
+        assert_diverges(&fx, &mut y, &c).await;
+    }
+}
+
 // Issue #80: a carried snapshot whose check-out failed is merged again over
 // the disk tree it took, which gives its own commit back: it adopts with no
 // operation, also when the first merge conflicted.

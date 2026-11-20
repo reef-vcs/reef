@@ -1324,8 +1324,14 @@ async fn carried_tree(
     Ok(Some(merged))
 }
 
-/// The most operations [`followed`] reads back from the head.
+/// The most operations since a commit that [`followed`] judges.
 const FOLLOW_LIMIT: usize = 1024;
+
+/// The most views [`followed`] reads to find the operations since a commit.
+/// It reads the views of those operations and of one before them on each
+/// line of the log. Only clocks that were wrong make it read more: views of
+/// operations it then finds are before the commit.
+const VIEW_LIMIT: usize = 4 * FOLLOW_LIMIT;
 
 /// What [`followed`] found.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1353,8 +1359,8 @@ struct Followed {
 /// - another workspace's snapshot of the same change (ADR 0018);
 /// - this workspace's own snapshot, other than `unfinished`'s (a crash
 ///   between its commit and its row), or `unfinished`'s under a later undo;
-/// - a move further back than [`FOLLOW_LIMIT`] operations, or than the
-///   operations the store still has.
+/// - a move with more than [`FOLLOW_LIMIT`] operations since `from`, or
+///   further back than the operations the store still has.
 async fn followed(
     repo: &ReadonlyRepo,
     name: &WorkspaceName,
@@ -1394,7 +1400,9 @@ struct Move {
     now: CommitId,
 }
 
-/// What the moves newer than the one [`Walk::reefs_move`] judges included.
+/// What the moves ordered before the one [`Walk::reefs_move`] judges
+/// included ([`Walk::moves`]): the moves it is in the history of, and any
+/// beside it.
 #[derive(Clone, Debug, Default)]
 struct Trail {
     /// The tree the workspace's [`Unfinished`] snapshot scanned, once that
@@ -1421,74 +1429,267 @@ fn kept<T>(read: Result<T, OpStoreError>) -> Result<Option<T>, OpStoreError> {
     }
 }
 
-impl Walk<'_> {
-    /// The operations since `from` that moved the workspace's commit,
-    /// newest first: those with one parent whose view has another commit
-    /// for it. An operation is since `from` when it is in the head's
-    /// history and in the history of no operation there whose view has
-    /// `from` for the workspace. So an operation of another client that
-    /// loaded the head before `from` was written, and committed later, is
-    /// one. `None` when the workspace was added or forgotten since, and
-    /// when the operations cannot be read back to `from`: there are more
-    /// than [`FOLLOW_LIMIT`] of them, or the store no longer has one.
-    ///
-    /// Operations are read newest first by end time, as jj orders them
-    /// (`jj_lib::op_walk`), until every one left to read is in the history
-    /// of an operation with `from`. A clock that ran backwards can only add
-    /// operations to those judged.
-    async fn moves(&self) -> Result<Option<Vec<Move>>, SnapshotError> {
-        let newest = |queue: &Vec<Operation>| {
-            let end = |at: &usize| (queue[*at].metadata().time.end, queue[*at].id().clone());
-            (0..queue.len()).max_by_key(end)
-        };
-        let mut commits: HashMap<OperationId, Option<CommitId>> = HashMap::new();
-        let mut commit_at = async |op: &Operation| -> Result<Option<CommitId>, SnapshotError> {
-            if let Some(commit) = commits.get(op.id()) {
-                return Ok(commit.clone());
+/// The workspace's commit in the views read, by operation.
+struct Commits<'a> {
+    name: &'a WorkspaceName,
+    read: HashMap<OperationId, Option<CommitId>>,
+}
+
+impl Commits<'_> {
+    async fn at(&mut self, op: &Operation) -> Result<Option<CommitId>, SnapshotError> {
+        if let Some(commit) = self.read.get(op.id()) {
+            return Ok(commit.clone());
+        }
+        let commit = op.view().await?.get_wc_commit_id(self.name).cloned();
+        self.read.insert(op.id().clone(), commit.clone());
+        Ok(commit)
+    }
+}
+
+/// The part of the operation log [`Walk::read_back`] has read: a graph,
+/// from the head down.
+#[derive(Default)]
+struct Log {
+    /// The operations loaded: those read, and those waiting.
+    ops: HashMap<OperationId, Operation>,
+    /// Read: their parents are loaded, or lost.
+    read: HashSet<OperationId>,
+    /// Loaded and not read yet.
+    waiting: Vec<OperationId>,
+    /// Parents of operations read that the store no longer has.
+    lost: HashSet<OperationId>,
+    /// Known to be before `from`: an operation whose view has `from`, or
+    /// one in the history of an operation known to be before.
+    before: HashSet<OperationId>,
+}
+
+impl Log {
+    /// Loads `id` to wait for its read, unless the log has it.
+    async fn load(&mut self, repo: &ReadonlyRepo, id: &OperationId) -> Result<(), OpStoreError> {
+        if self.ops.contains_key(id) || self.lost.contains(id) {
+            return Ok(());
+        }
+        match kept(repo.loader().load_operation(id).await)? {
+            Some(op) => {
+                self.ops.insert(id.clone(), op);
+                self.waiting.push(id.clone());
             }
-            let commit = op.view().await?.get_wc_commit_id(self.name).cloned();
-            commits.insert(op.id().clone(), commit.clone());
-            Ok(commit)
-        };
-        let mut queue = vec![self.repo.operation().clone()];
-        let mut read = HashSet::new();
-        // In the history of an operation whose view has `from`.
-        let mut before = HashSet::new();
-        let mut moves = Vec::new();
-        while queue.iter().any(|op| !before.contains(op.id()))
-            && let Some(at) = newest(&queue)
-        {
-            let op = queue.swap_remove(at);
-            if !read.insert(op.id().clone()) {
-                continue;
+            None => {
+                self.lost.insert(id.clone());
             }
-            if read.len() > FOLLOW_LIMIT {
-                return Ok(None);
-            }
-            let Some(parents) = kept(op.parents().await)? else {
-                return Ok(None);
-            };
-            let since =
-                !before.contains(op.id()) && commit_at(&op).await?.as_ref() != Some(self.from);
-            // A merge of heads is no move: `followed` checks that the
-            // moves lead to the commit it kept.
-            if since && let [parent] = parents.as_slice() {
-                match (commit_at(parent).await?, commit_at(&op).await?) {
-                    (was, now) if was == now => {}
-                    (Some(was), Some(now)) => moves.push(Move {
-                        op: op.clone(),
-                        was,
-                        now,
-                    }),
-                    _ => return Ok(None),
+        }
+        Ok(())
+    }
+
+    /// Records that `op`, which was read, is before `from`: so is its
+    /// history, as far as it was read.
+    fn is_before(&mut self, op: &OperationId) {
+        self.before.insert(op.clone());
+        let mut found = vec![op.clone()];
+        while let Some(id) = found.pop() {
+            for parent in self.ops[&id].parent_ids() {
+                if self.before.insert(parent.clone()) && self.read.contains(parent) {
+                    found.push(parent.clone());
                 }
             }
-            if !since {
-                before.extend(op.parent_ids().iter().cloned());
+        }
+    }
+
+    /// Where in `waiting` the operation with the latest end time is, of
+    /// those known to be before `from`, or of the others.
+    fn latest(&self, before: bool) -> Option<usize> {
+        let end = |at: &usize| {
+            let id = &self.waiting[*at];
+            (self.ops[id].metadata().time.end, id)
+        };
+        (0..self.waiting.len())
+            .filter(|at| self.before.contains(&self.waiting[*at]) == before)
+            .max_by_key(end)
+    }
+
+    /// The operations read that are not known to be before `from`.
+    fn since(&self) -> impl Iterator<Item = &OperationId> {
+        self.read.iter().filter(|id| !self.before.contains(*id))
+    }
+
+    /// Whether no operation of [`Log::since`] can turn out to be before
+    /// `from`. One could only be in the history of an operation not read
+    /// yet. So every such operation, or one the store lost, must be known
+    /// to be before `from`, and must be in the history of each operation
+    /// of `since`: nothing is in its own history. That is checked for the
+    /// lowest of `since`, those with no parent in it; the history of the
+    /// others includes theirs.
+    fn settled(&self) -> bool {
+        let unread = || self.waiting.iter().chain(&self.lost);
+        let before = |id: &OperationId| self.before.contains(id);
+        unread().all(before)
+            && self
+                .since()
+                .filter(|id| self.ops[*id].parent_ids().iter().all(before))
+                .all(|lowest| {
+                    let history = self.history(lowest);
+                    unread().all(|id| history.contains(id))
+                })
+    }
+
+    /// The history of `of`, as far as it was read.
+    fn history<'a>(&'a self, of: &'a OperationId) -> HashSet<&'a OperationId> {
+        let mut history = HashSet::new();
+        let mut found = vec![of];
+        while let Some(id) = found.pop() {
+            if !self.read.contains(id) {
+                continue;
             }
-            queue.extend(parents);
+            for parent in self.ops[id].parent_ids() {
+                if history.insert(parent) {
+                    found.push(parent);
+                }
+            }
+        }
+        history
+    }
+
+    /// The operations of [`Log::since`], each before every operation in
+    /// its history, in an order the graph alone decides. `head` is the one
+    /// that is in no other's history: each of the others is a parent of
+    /// one of them, since a parent of an operation before `from` is before
+    /// it too.
+    fn since_in_order(&self, head: &OperationId) -> Vec<&Operation> {
+        let since: HashSet<&OperationId> = self.since().collect();
+        let parents = |id: &OperationId| {
+            let parents = self.ops[id].parent_ids().iter();
+            parents.filter(|parent| since.contains(parent))
+        };
+        let mut children: HashMap<&OperationId, usize> = HashMap::new();
+        for parent in since.iter().flat_map(|id| parents(id)) {
+            *children.entry(parent).or_default() += 1;
+        }
+        let mut ready: Vec<&OperationId> = since.get(head).copied().into_iter().collect();
+        let mut ordered = Vec::new();
+        while let Some(id) = ready.pop() {
+            ordered.push(&self.ops[id]);
+            for parent in parents(id) {
+                let left = children.entry(parent).or_default();
+                *left -= 1;
+                if *left == 0 {
+                    ready.push(parent);
+                }
+            }
+        }
+        debug_assert_eq!(ordered.len(), since.len(), "one is in no other's history");
+        ordered
+    }
+}
+
+impl Walk<'_> {
+    /// The operations since `from` that moved the workspace's commit, each
+    /// before the moves in its history: those with one parent whose view
+    /// has another commit for it. An operation is since `from` when it is
+    /// in the head's history and in the history of no operation there
+    /// whose view has `from` for the workspace. So an operation of another
+    /// client that loaded the head before `from` was written, and committed
+    /// later, is one. That is a property of the graph: what the clocks
+    /// said when the operations were written does not change it. `None`
+    /// when the workspace was added or forgotten since, and when the
+    /// operations since `from` cannot be judged: there are more than
+    /// [`FOLLOW_LIMIT`] of them, or the log could not be read back far
+    /// enough to know them ([`Walk::read_back`]).
+    async fn moves(&self) -> Result<Option<Vec<Move>>, SnapshotError> {
+        let mut commits = Commits {
+            name: self.name,
+            read: HashMap::new(),
+        };
+        let Some(log) = self.read_back(&mut commits).await? else {
+            return Ok(None);
+        };
+        if log.since().count() > FOLLOW_LIMIT {
+            return Ok(None);
+        }
+        let mut moves = Vec::new();
+        for op in log.since_in_order(self.repo.op_id()) {
+            // A merge of heads is no move: `followed` checks that the
+            // moves lead to the commit it kept.
+            let [parent] = op.parent_ids() else {
+                continue;
+            };
+            let Some(parent) = log.ops.get(parent) else {
+                return Ok(None);
+            };
+            match (commits.at(parent).await?, commits.at(op).await?) {
+                (was, now) if was == now => {}
+                (Some(was), Some(now)) => moves.push(Move {
+                    op: op.clone(),
+                    was,
+                    now,
+                }),
+                _ => return Ok(None),
+            }
         }
         Ok(Some(moves))
+    }
+
+    /// Reads the operation log back from the head until the operations
+    /// since `from` are known ([`Log::since`], once [`Log::settled`]): the
+    /// operations before `from` are read as far as that takes, without
+    /// their views. `None` when it cannot be known: the store no longer
+    /// has an operation it takes, or it takes more than [`VIEW_LIMIT`]
+    /// views.
+    ///
+    /// The order of the reads changes what they cost, and not what they
+    /// find. The operation with the latest end time is read next, as jj
+    /// orders the log (`jj_lib::op_walk`): with right clocks, that reads an
+    /// operation before `from` after the one that shows it is. A clock
+    /// that was wrong can keep an operation since `from` waiting behind
+    /// every operation before `from`, so after 1, 2, 4 and so on of those
+    /// in a row, the latest of the others is read.
+    async fn read_back(&self, commits: &mut Commits<'_>) -> Result<Option<Log>, SnapshotError> {
+        let mut log = Log::default();
+        let head = self.repo.operation();
+        log.ops.insert(head.id().clone(), head.clone());
+        log.waiting.push(head.id().clone());
+        let (mut patience, mut left) = (0_usize, 0_usize);
+        let settled = loop {
+            let at = match (log.latest(false), log.latest(true)) {
+                (None, None) => break log.settled(),
+                (Some(since), None) => since,
+                (since, Some(before)) => {
+                    let later = |since: &usize| {
+                        let end = |at: usize| log.ops[&log.waiting[at]].metadata().time.end;
+                        end(*since) > end(before)
+                    };
+                    if let Some(since) = since.filter(later) {
+                        since
+                    } else if left > 0 {
+                        left -= 1;
+                        before
+                    } else {
+                        patience = (2 * patience).max(1);
+                        left = patience;
+                        match since {
+                            Some(since) => since,
+                            None if log.settled() => break true,
+                            None => {
+                                left -= 1;
+                                before
+                            }
+                        }
+                    }
+                }
+            };
+            let id = log.waiting.swap_remove(at);
+            let op = log.ops[&id].clone();
+            for parent in op.parent_ids() {
+                log.load(self.repo, parent).await?;
+            }
+            log.read.insert(id.clone());
+            if log.before.contains(&id) || commits.at(&op).await?.as_ref() == Some(self.from) {
+                log.is_before(&id);
+            }
+            if commits.read.len() > VIEW_LIMIT {
+                return Ok(None);
+            }
+        };
+        Ok(settled.then_some(log))
     }
 
     /// Whether `step` is a move of Reef's that kept the workspace's edits

@@ -2282,32 +2282,77 @@ struct OtherClient {
     done: std::thread::JoinHandle<()>,
 }
 
+/// The repository at `root` as another jj client with `settings` loads it,
+/// at the head.
+fn other_clients_head(
+    root: &Path,
+    settings: &reef_lib::jj::UserSettings,
+) -> Arc<jj_lib::repo::ReadonlyRepo> {
+    use jj_lib::default_backend_factories::{
+        default_backend_factories, default_working_copy_factories, default_workspace_loader_factory,
+    };
+    let workspace = default_workspace_loader_factory()
+        .create(root)
+        .unwrap()
+        .load(
+            settings,
+            &default_backend_factories(),
+            &default_working_copy_factories(),
+        )
+        .unwrap();
+    pollster::block_on(workspace.repo_loader().load_at_head(None)).unwrap()
+}
+
+/// A transaction on `repo` that sets bookmark `name` on a working-copy
+/// commit: it moves no working copy.
+fn bookmark_tx(
+    repo: &Arc<jj_lib::repo::ReadonlyRepo>,
+    name: &str,
+) -> jj_lib::transaction::Transaction {
+    let mut tx = repo.start_transaction();
+    let on = repo.view().wc_commit_ids().values().next().unwrap().clone();
+    tx.repo_mut().set_local_bookmark_target(
+        jj_lib::ref_name::RefName::new(name),
+        jj_lib::op_store::RefTarget::normal(on),
+    );
+    tx
+}
+
+/// `test_settings()`, with every operation stamped `stamp`: a jj client
+/// whose clock reads that, whatever the time.
+fn settings_at(stamp: &str) -> reef_lib::jj::UserSettings {
+    use jj_lib::config::{ConfigLayer, ConfigSource};
+    let mut config = test_settings().config().clone();
+    let layer = format!("debug.operation-timestamp = {stamp:?}");
+    config.add_layer(ConfigLayer::parse(ConfigSource::User, &layer).unwrap());
+    reef_lib::jj::UserSettings::from_config_and_home_dir(config, None).unwrap()
+}
+
+/// Another jj client with `settings` writes `count` operations on the
+/// registered root, one after the other, with nothing running beside them.
+async fn other_clients_operations(
+    repo: &SyntheticRepo,
+    settings: reef_lib::jj::UserSettings,
+    count: usize,
+) {
+    let root = repo.root.clone();
+    let write = move || {
+        let mut at = other_clients_head(&root, &settings);
+        for _ in 0..count {
+            let tx = bookmark_tx(&at, "elsewhere");
+            at = pollster::block_on(tx.commit("another client's bookmark")).unwrap();
+        }
+    };
+    tokio::task::spawn_blocking(write).await.unwrap();
+}
+
 impl OtherClient {
     fn load(root: &Path, name: &'static str) -> Self {
-        use jj_lib::default_backend_factories::{
-            default_backend_factories, default_working_copy_factories,
-            default_workspace_loader_factory,
-        };
         let root = root.to_owned();
         let (go, told) = std::sync::mpsc::channel();
         let (tell, loaded) = std::sync::mpsc::channel();
         let done = std::thread::spawn(move || {
-            let workspace = default_workspace_loader_factory()
-                .create(&root)
-                .unwrap()
-                .load(
-                    &test_settings(),
-                    &default_backend_factories(),
-                    &default_working_copy_factories(),
-                )
-                .unwrap();
-            let repo = pollster::block_on(workspace.repo_loader().load_at_head(None)).unwrap();
-            let mut tx = repo.start_transaction();
-            let on = repo.view().wc_commit_ids().values().next().unwrap().clone();
-            tx.repo_mut().set_local_bookmark_target(
-                jj_lib::ref_name::RefName::new(name),
-                jj_lib::op_store::RefTarget::normal(on),
-            );
+            let tx = bookmark_tx(&other_clients_head(&root, &test_settings()), name);
             tell.send(()).unwrap();
             told.recv().unwrap();
             pollster::block_on(tx.commit("another client's bookmark")).unwrap();
@@ -2495,6 +2540,79 @@ async fn a_write_carries_across_a_merge_of_three_operation_heads() {
         );
     }
     assert_eq!(merged_heads(client, &repo).await, 3);
+    daemon.stop().await;
+}
+
+/// Issue #80's plain case with `other`'s operation beside it: an edit of
+/// `w`'s `@` by change id while its agent writes, and `other` commits
+/// before the write's follow-ups. One commit, with every file.
+async fn write_carries_beside(
+    daemon: &TestDaemon,
+    repo: &SyntheticRepo,
+    w: &v1::Workspace,
+    other: OtherClient,
+) {
+    let client = &daemon.client;
+    let request = rewrite(repo, None, &w.change_id, vec![content("api.txt", "api\n")]);
+    let edit = {
+        let client = client.clone();
+        async move { client.edit_files(request).await }
+    };
+    let late = || {
+        write(w, "late.txt", "late\n");
+        other.commit_now();
+    };
+    at_follow_hold(daemon, edit, late).await.unwrap();
+
+    follows(client, repo, w, "api.txt").await;
+    snapshot(client, repo, w).await;
+    follows(client, repo, w, "api.txt").await;
+    let row = get(client, repo, w).await;
+    for path in ["one.txt", "two.txt", "api.txt", "late.txt"] {
+        assert!(
+            file(client, repo, &row.commit_id, path).await.is_some(),
+            "{path} in the commit"
+        );
+    }
+    assert_eq!(merged_heads(client, repo).await, 2);
+}
+
+// Ninth R3.11 review, R9-1: another jj client loaded the head, and more
+// operations than the follow judges (1,024) were written before the
+// workspace's last snapshot. Its operation beside the edit is the only one
+// of those since that snapshot: one commit, as without it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_write_carries_beside_a_client_that_loaded_the_head_long_before() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let w = create(client, &repo, "w@test", None).await;
+    write(&w, "one.txt", "one\n");
+    snapshot(client, &repo, &w).await;
+    let other = OtherClient::load(&repo.root, "other-client");
+    other_clients_operations(&repo, test_settings(), 1100).await;
+    write(&w, "two.txt", "two\n");
+    snapshot(client, &repo, &w).await;
+
+    write_carries_beside(&daemon, &repo, &w, other).await;
+    daemon.stop().await;
+}
+
+// Ninth R3.11 review, R9-2: the operation another jj client loaded the
+// head at was written by a client whose clock is ahead, so it is stamped
+// later than the operations after it. One commit, as with a right clock.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_write_carries_beside_a_client_that_loaded_an_operation_stamped_ahead() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let w = create(client, &repo, "w@test", None).await;
+    write(&w, "one.txt", "one\n");
+    snapshot(client, &repo, &w).await;
+    other_clients_operations(&repo, settings_at("2030-01-01T00:00:00+00:00"), 1).await;
+    let other = OtherClient::load(&repo.root, "other-client");
+    write(&w, "two.txt", "two\n");
+    snapshot(client, &repo, &w).await;
+
+    write_carries_beside(&daemon, &repo, &w, other).await;
     daemon.stop().await;
 }
 
