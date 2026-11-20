@@ -248,8 +248,10 @@ fn advise_with_disk(
     }
     // A conflict, and a person the change waits for, come before
     // dependencies and a `warn` disk.
-    if matches!(ws.step.as_deref(), Some("resolve" | "ask" | "await_help"))
-        || behind_and_rebase_fits(ws)
+    if matches!(
+        ws.step.as_deref(),
+        Some("resolve" | "ask" | "await_help" | "dependency")
+    ) || behind_and_rebase_fits(ws)
     {
         return advise(ws, in_run, held);
     }
@@ -420,6 +422,9 @@ fn advise(ws: &Workspace, in_run: bool, held: bool) -> (String, Vec<String>) {
         ("active", "active" | "in_grace") if ws.step.as_deref() == Some("ask") => {
             ask_advice(ws)
         }
+        ("active", "active" | "in_grace") if ws.step.as_deref() == Some("dependency") => {
+            dependency_step_advice(ws)
+        }
         ("active", "active" | "in_grace") if ws.step.as_deref() == Some("resolve") => {
             let files = files(ws.conflicted_path_count);
             (
@@ -514,12 +519,33 @@ fn ask_advice(ws: &Workspace) -> (String, Vec<String>) {
     )
 }
 
+/// What a proposal whose dependency left review asks for (R3.11): move it
+/// off that change, or withdraw it. Only ids go into the hint (S-246).
+fn dependency_step_advice(ws: &Workspace) -> (String, Vec<String>) {
+    let Some(missing) = &ws.missing_dependency else {
+        return (
+            "A change below it in its stack was declined or withdrawn: `reef conflict list` names it.".to_owned(),
+            vec!["reef".to_owned(), "conflict".to_owned(), "list".to_owned()],
+        );
+    };
+    let state = missing.state.as_deref().unwrap_or("declined");
+    (
+        format!(
+            "Change {} below it in its stack was {state}, so this change cannot land on it. `next` moves it, and the changes above it, off that change; or withdraw it (`reef proposal withdraw`). `reef conflict show --kind dependency` says who and why.",
+            missing.change_id_reverse_hex
+        ),
+        missing.next.clone(),
+    )
+}
+
 /// Whether the change is behind trunk and a `reef rebase` fits its step:
 /// not while it is proposed, queued, declined, done or conflicted, since a
 /// rebase makes a proposal amended and a queued change cannot move.
 fn behind_and_rebase_fits(ws: &Workspace) -> bool {
     let fits = match ws.step.as_deref() {
-        Some("land" | "wait" | "revise" | "done" | "resolve" | "await_help" | "ask") => false,
+        Some(
+            "land" | "wait" | "revise" | "done" | "resolve" | "await_help" | "ask" | "dependency",
+        ) => false,
         Some("propose") => ws
             .lifecycle
             .as_ref()

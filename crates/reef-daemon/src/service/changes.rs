@@ -397,6 +397,7 @@ impl ChangeService for ChangesHandler {
                 .iter()
                 .map(crate::lifecycle::messages::transition_message)
                 .collect(),
+            moved: outcome.moved.iter().map(moved_message).collect(),
         }))
     }
 
@@ -466,6 +467,8 @@ impl ChangeService for ChangesHandler {
             _ => String::new(),
         };
         let changes = changes_at_head(state, &target, &rows).await?;
+        let mut dependencies =
+            crate::lifecycle::dependents::dependencies(state, target.repo.id, &rows).await;
         let mut entries = Vec::with_capacity(rows.len());
         for row in &rows {
             let last = state
@@ -500,6 +503,7 @@ impl ChangeService for ChangesHandler {
                     .iter()
                     .map(|resolved| crate::assign::messages::resolution_message(state, resolved))
                     .collect(),
+                dependencies: dependencies.remove(&row.change_id).unwrap_or_default(),
             });
         }
         Ok(Response::new(ListProposalsResponse {
@@ -600,7 +604,7 @@ fn change_prefixes(changes: &[String]) -> Result<Vec<String>, Status> {
 
 /// The visible changes of `rows` at head, by change id; a change with no
 /// visible commit is left out.
-async fn changes_at_head(
+pub(super) async fn changes_at_head(
     state: &AppState,
     target: &super::reading::Target,
     rows: &[crate::db::LifecycleRow],
@@ -714,4 +718,15 @@ pub(super) async fn write_change(
     )
     .await?;
     Ok((rewritten, operation))
+}
+
+/// A dependent a supersede moved, as a message (R3.11).
+fn moved_message(moved: &crate::lifecycle::MovedDependent) -> v1::MovedDependent {
+    v1::MovedDependent {
+        change_id: moved.change.clone(),
+        commit_id: moved.commit.clone(),
+        carried: moved.carried,
+        conflicted: moved.conflicted,
+        skipped: moved.skipped.clone(),
+    }
 }

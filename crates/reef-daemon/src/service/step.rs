@@ -37,6 +37,9 @@ pub(crate) struct Stepped {
     pub(crate) conflict_assignment_id: Option<String>,
     /// With step `ASK`, why it is blocked: `ASK` or `ATTEMPTS`.
     pub(crate) conflict_block_reason: Option<v1::ConflictAssignmentReason>,
+    /// With step `DEPENDENCY`, the change below that left review and how
+    /// to move off it (R3.11).
+    pub(crate) missing_dependency: Option<v1::MissingDependency>,
 }
 
 /// What a person holds a change for, as [`step`] ranks it: a help request
@@ -54,6 +57,8 @@ pub(crate) struct Waits {
     /// The workspace's session asked a help request on the change that is
     /// open, or whose answer it has not taken (R3.32).
     pub(crate) help: bool,
+    /// A change below the proposal in its stack left review (R3.11).
+    pub(crate) dependency: bool,
 }
 
 /// The facts [`step`] reads, besides the change's lifecycle.
@@ -144,6 +149,20 @@ pub(crate) async fn of_workspace(
         .inspect_err(|error| warn(error))
         .ok()
         .flatten();
+    let missing_dependency = if matches!(
+        lifecycle.state(),
+        LifecycleState::Proposed | LifecycleState::Queued
+    ) {
+        let only = [change.change_id.clone()];
+        crate::lifecycle::dependents::held(state, repo, Some(&only))
+            .await
+            .remove(&change.change_id)
+            .map(|(missing, _)| {
+                crate::lifecycle::dependents::missing_message(state, repo, &missing)
+            })
+    } else {
+        None
+    };
     let next = step(
         &change,
         &lifecycle,
@@ -154,6 +173,7 @@ pub(crate) async fn of_workspace(
         Waits {
             conflict: blocked.is_some(),
             help: help_request_id.is_some(),
+            dependency: missing_dependency.is_some(),
         },
     );
     let blocked = blocked.filter(|_| next == ChangeStep::Ask);
@@ -171,6 +191,7 @@ pub(crate) async fn of_workspace(
             .as_ref()
             .map(|row| crate::assign::messages::reason_message(&row.reason)),
         conflict_assignment_id: blocked.map(|row| row.id),
+        missing_dependency: missing_dependency.filter(|_| next == ChangeStep::Dependency),
         step: next,
         lifecycle,
         changed_file_count: changed,
@@ -314,6 +335,14 @@ pub(crate) fn step(
         } else {
             ChangeStep::Resolve
         };
+    }
+    if waits.dependency
+        && matches!(
+            lifecycle.state(),
+            LifecycleState::Proposed | LifecycleState::Queued
+        )
+    {
+        return ChangeStep::Dependency;
     }
     match lifecycle.state() {
         LifecycleState::Queued => return ChangeStep::Wait,
@@ -473,6 +502,7 @@ mod tests {
         let blocked = Waits {
             conflict: true,
             help: false,
+            dependency: false,
         };
         assert_eq!(
             step(&conflicted, &draft, 3, 1, true, false, blocked),
@@ -481,6 +511,30 @@ mod tests {
         assert_eq!(
             step(&described, &draft, 3, 0, true, false, blocked),
             ChangeStep::Propose
+        );
+    }
+
+    /// A proposal whose dependency left review is moved off it (R3.11); a
+    /// tree conflict is resolved first.
+    #[test]
+    fn a_missing_dependency_is_its_own_step() {
+        let proposed = lifecycle(LifecycleState::Proposed, false);
+        let described = change("Fix the parser\n", false);
+        let held = Waits {
+            dependency: true,
+            ..Waits::default()
+        };
+        assert_eq!(
+            step(&described, &proposed, 3, 0, true, false, held),
+            ChangeStep::Dependency
+        );
+        let conflicted = v1::Change {
+            conflict: true,
+            ..described
+        };
+        assert_eq!(
+            step(&conflicted, &proposed, 3, 1, true, false, held),
+            ChangeStep::Resolve
         );
     }
 
@@ -497,6 +551,7 @@ mod tests {
         let both = Waits {
             conflict: true,
             help: true,
+            dependency: false,
         };
         assert_eq!(
             step(&conflicted, &draft, 3, 1, true, false, both),
@@ -547,7 +602,8 @@ mod tests {
                     true,
                     Waits {
                         conflict: false,
-                        help: true
+                        help: true,
+                        dependency: false,
                     }
                 ),
                 expected,

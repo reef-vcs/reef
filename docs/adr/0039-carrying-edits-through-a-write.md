@@ -3,6 +3,7 @@
 - Status: accepted
 - Date: 2026-10-27
 - Ticket: issue #80
+- Amended by: [0084](0084-dependent-change-lifecycle.md) (a snapshot reads its carry from the operation log; the slot is gone, and a move that keeps the tree carries too)
 
 ## Context
 

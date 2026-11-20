@@ -871,7 +871,7 @@ async fn revert_refusals() {
     let on = fx.wc("reef-2").unwrap();
     let on = fx.get(&on.hex().parse().unwrap()).await;
     let described = fx.describe(&on, "renamed").await.unwrap();
-    let plan = undo::plan_revert(&fx.head(), &described.op_id)
+    let plan = undo::plan_revert(&fx.head(), &described.op_id, false)
         .await
         .unwrap();
     assert!(plan.workspaces.contains(&"reef-2".to_owned()), "{plan:?}");
@@ -996,6 +996,8 @@ async fn record_transitions() {
         superseded_by: String::new(),
         destination: "main".to_owned(),
         undoes: String::new(),
+        dependency: String::new(),
+        dependency_event: String::new(),
     };
     let mut meta = meta(OpKind::Transition);
     meta.description = oplog::transition_description("propose", &record.change);
@@ -1710,4 +1712,112 @@ async fn a_chain_leaves_out_a_child_of_a_member_left_out() {
     assert_eq!(included, [true, false, false]);
     assert_eq!(chain.members[1].conflicts, ["c"]);
     assert_eq!(chain.members[2].parent_excluded, Some(hex(&clash)));
+}
+
+// R3.11 test 1: a proposal follows its change only across a rebase onto new
+// commits of the same parent changes, with its own diff unchanged.
+#[tokio::test(flavor = "multi_thread")]
+async fn carry_check_follows_only_a_dependencys_rewrite() {
+    use reef_lib::jj::lifecycle::{CarryCheck, NotCarried, carry_check};
+
+    let mut fx = Fixture::new().await;
+    let mut tx = fx.tx();
+    let base = new_commit(&mut tx, &[], &[("a", "1\n2\n3\n")], "base").await;
+    let x = new_commit(&mut tx, &[&base], &[("a", "1\n2\n3\n"), ("x", "x")], "x").await;
+    let y = new_commit(
+        &mut tx,
+        &[&x],
+        &[("a", "Y\n2\n3\n"), ("x", "x"), ("y", "y")],
+        "y",
+    )
+    .await;
+    // X amended away from Y's line: Y rebases cleanly.
+    let x2 = same_change(
+        &mut tx,
+        x.change_id(),
+        &base,
+        &[("a", "1\n2\n3\n"), ("x", "x2")],
+        "x",
+    )
+    .await;
+    let y2 = jj_lib::rewrite::rebase_commit(tx.repo_mut(), y.clone(), vec![x2.id().clone()])
+        .await
+        .unwrap();
+    // Y's own edit on top of that.
+    let y3 = same_change(
+        &mut tx,
+        y.change_id(),
+        &x2,
+        &[("a", "Y\n2\n3\n"), ("x", "x2"), ("y", "y"), ("z", "z")],
+        "y",
+    )
+    .await;
+    // X amended on Y's line: Y conflicts.
+    let x3 = same_change(
+        &mut tx,
+        x.change_id(),
+        &base,
+        &[("a", "X\n2\n3\n"), ("x", "x")],
+        "x",
+    )
+    .await;
+    let y4 = jj_lib::rewrite::rebase_commit(tx.repo_mut(), y.clone(), vec![x3.id().clone()])
+        .await
+        .unwrap();
+    // A successor S of X, another change: Y moved onto it.
+    let s = new_commit(&mut tx, &[&base], &[("a", "1\n2\n3\n"), ("s", "s")], "s").await;
+    let y5 = jj_lib::rewrite::rebase_commit(tx.repo_mut(), y.clone(), vec![s.id().clone()])
+        .await
+        .unwrap();
+    fx.commit(tx, "setup").await;
+    let head = fx.head();
+    let check =
+        |visible: &Commit, renamed: Vec<(reef_lib::jj::ChangeIdHex, reef_lib::jj::ChangeIdHex)>| {
+            let head = Arc::clone(&head);
+            let (recorded, visible) = (hex(&y), hex(visible));
+            async move {
+                carry_check(&head, &recorded, &visible, &renamed)
+                    .await
+                    .unwrap()
+            }
+        };
+
+    assert_eq!(
+        check(&y2, Vec::new()).await,
+        CarryCheck::Carried {
+            moved: vec![hex_change(&x)],
+            renamed: false,
+        }
+    );
+    assert_eq!(
+        check(&y3, Vec::new()).await,
+        CarryCheck::Not(NotCarried::OwnEdit)
+    );
+    assert!(y4.has_conflict());
+    assert_eq!(
+        check(&y4, Vec::new()).await,
+        CarryCheck::Not(NotCarried::Conflicted {
+            moved: vec![hex_change(&x)]
+        })
+    );
+    assert_eq!(
+        check(&y5, Vec::new()).await,
+        CarryCheck::Not(NotCarried::Parents)
+    );
+    assert_eq!(
+        check(&y5, vec![(hex_change(&x), hex_change(&s))]).await,
+        CarryCheck::Carried {
+            moved: vec![hex_change(&s)],
+            renamed: true,
+        }
+    );
+    // A recorded commit garbage collection took is a verdict, not an error
+    // (R3.11 second review, finding 2).
+    let collected: CommitIdHex = "ab".repeat(20).parse().unwrap();
+    assert_eq!(
+        carry_check(&head, &collected, &hex(&y2), &[])
+            .await
+            .unwrap(),
+        CarryCheck::Not(NotCarried::Gone)
+    );
 }

@@ -862,7 +862,9 @@ async fn run(global: Global, command: Command, out: &Out) -> Result<ExitCode, Cl
         Command::Log(args) => log::run(&connect(&global, out).await?, args).await,
         Command::Show(args) => Box::pin(changes::show(&connect(&global, out).await?, args)).await,
         Command::Diff(args) => diff::run(&connect(&global, out).await?, args).await,
-        Command::Describe(args) => changes::describe(&connect(&global, out).await?, args).await,
+        Command::Describe(args) => {
+            Box::pin(changes::describe(&connect(&global, out).await?, args)).await
+        }
         Command::Publish(args) => {
             Box::pin(publish::publish(&connect(&global, out).await?, args)).await
         }

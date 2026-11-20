@@ -46,7 +46,7 @@ pub use reef::daemon::v0;
 /// The revision of `reef.api.v1` this build serves. It increases by one with
 /// every change to the schema, and [`API_DIGEST`] changes with it; v1 only
 /// grows (ADR 0029). `GetDaemonStatus` reports it.
-pub const API_REVISION: u32 = 40;
+pub const API_REVISION: u32 = 41;
 
 /// blake3 of the v1 descriptors without comments, one per revision, oldest
 /// first: entry `n - 1` is revision `n`'s. A schema change appends one entry
@@ -182,6 +182,15 @@ pub const API_DIGESTS: &[&str] = &[
     // `conflict_block_reason`, `INSTRUCTION_CAUSE_CONFLICT_UNBLOCKED` and
     // `HelpInput.while_blocked`.
     "e1aad57ca00df1495275268f2556d9154a4827ce2f7677a7c73538193d89b5c7",
+    // R3.11: `TRANSITION_CAUSE_DEPENDENCY`, `DependencyEvent`,
+    // `ChangeTransition.dependency`, `MissingDependency`,
+    // `CHANGE_STEP_DEPENDENCY`, `Workspace.missing_dependency`,
+    // `ProposalEntry.dependencies`, `TransitionChangeResponse.moved`,
+    // `CONFLICT_KIND_MISSING_DEPENDENCY`, `Conflict.dependency`,
+    // `GetConflictRequest.kind`, `ListConflictsRequest.kinds`,
+    // `LANDING_REASON_DEPENDENCY` and
+    // `CONFLICT_ASSIGNMENT_REASON_WITHDRAWN`.
+    "a035fc00a26a33dca694cad781f53e1965480814a3820db8be80986e52409fd1",
 ];
 
 /// blake3 of the v1 descriptors without comments, as of [`API_REVISION`]:
@@ -772,6 +781,14 @@ pub mod error {
     /// `LandChange` of a stack with a member proposed for another
     /// destination (R3.10). Metadata: `change_id`, `destination`.
     pub const STACK_DESTINATION_MISMATCH: &str = "STACK_DESTINATION_MISMATCH";
+    /// `TransitionChange` proposing a stack with a member below the
+    /// revision that was declined or withdrawn at its current commit
+    /// (R3.11). Metadata: `change_id`, `state`, `transition_id`.
+    pub const MEMBER_LEFT_REVIEW: &str = "MEMBER_LEFT_REVIEW";
+    /// `LandChange` of a change whose stack holds a member declined or
+    /// withdrawn at its current commit (R3.11). Metadata: `change_id`,
+    /// `state`, `transition_id`.
+    pub const DEPENDENCY_LEFT_REVIEW: &str = "DEPENDENCY_LEFT_REVIEW";
     /// `GetLanding` naming no landing, or a change with none (R3.13).
     /// Metadata: `id` or `change_id`.
     pub const LANDING_NOT_FOUND: &str = "LANDING_NOT_FOUND";

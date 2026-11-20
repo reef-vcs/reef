@@ -1,7 +1,7 @@
 // The human vocabulary (the design pass), used outside developer mode. The
 // API's words (`operationLabel`, lease health words) stay what developer mode
 // shows, so a page can be checked against `reef` output.
-import { LifecycleState } from "../gen/reef/api/v1/lifecycle_pb";
+import { LifecycleState, TransitionCause } from "../gen/reef/api/v1/lifecycle_pb";
 import { OperationKind, SnapshotKind, type Operation } from "../gen/reef/api/v1/operations_pb";
 import type { HealthWord } from "../fleet/lease";
 
@@ -94,6 +94,12 @@ export function operationSentence(operation: WithTransition): string {
     }
     // A stack's transitions share one operation (R3.10).
     const count = operation.transitions?.length ?? 0;
+    // The daemon carried proposals over a rewrite of a change below (R3.11).
+    if (first?.cause === TransitionCause.DEPENDENCY) {
+      return count > 1
+        ? `carried ${plural(count, "proposal")} over changes below them`
+        : "carried a proposal over a change below";
+    }
     if (count > 1 && to !== undefined && STACKS[to]) return STACKS[to](count);
     if (to !== undefined && TRANSITIONS[to]) return TRANSITIONS[to];
   }

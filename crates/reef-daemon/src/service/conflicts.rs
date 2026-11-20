@@ -609,6 +609,28 @@ impl ConflictService for ConflictHandler {
         let limit = size_of(request.page_size, &page, LIST_DEFAULT, LIST_MAX);
         let state = &self.state;
         let target = target(state, &request.repo, &request.workspace)?;
+        let wants = |kind: v1::ConflictKind| {
+            request.kinds.is_empty() || request.kinds.contains(&i32::from(kind))
+        };
+        // R3.11: a proposal's missing dependency, derived from its stack and
+        // the lifecycle, on the first page of a read at head of every open
+        // proposal (the default revset).
+        let mut dependencies = if wants(v1::ConflictKind::MissingDependency)
+            && page.cursor().is_none()
+            && request.at_operation.is_empty()
+            && request.revset.trim().is_empty()
+        {
+            dependency_conflicts(state, &target, None).await?
+        } else {
+            Vec::new()
+        };
+        if !wants(v1::ConflictKind::Tree) {
+            return Ok(Response::new(ListConflictsResponse {
+                conflicts: dependencies,
+                next_page_token: String::new(),
+                at_operation: String::new(),
+            }));
+        }
         let revset_text = if request.revset.trim().is_empty() {
             DEFAULT_REVSET.to_owned()
         } else {
@@ -742,6 +764,8 @@ impl ConflictService for ConflictHandler {
             tracing::warn!(error = %reef_lib::error::ErrorChain(&error), "cannot bring conflict assignments up to date");
         }
         super::assignments::fill(state, target.repo.id, &mut conflicts);
+        dependencies.append(&mut conflicts);
+        let conflicts = dependencies;
         let next_page_token = match resume {
             Some((position, commit)) => page.token_at(&format!("{position}:{commit}"), &at),
             None => String::new(),
@@ -783,6 +807,9 @@ impl ConflictService for ConflictHandler {
         } else {
             request.revision.clone()
         };
+        if request.kind() == v1::ConflictKind::MissingDependency {
+            return dependency_conflict(state, &target, &revision).await;
+        }
         if request.max_file_bytes > MAX_FILE_BYTES {
             return Err(status(ConflictReadError::MaxFileBytes {
                 got: request.max_file_bytes,
@@ -1002,6 +1029,84 @@ impl ConflictService for ConflictHandler {
     ) -> Result<Response<v1::AssignConflictResponse>, Status> {
         super::assignments::assign(&self.state, request).await
     }
+}
+
+/// The `missing_dependency` conflicts of `target`'s open proposals (of
+/// `only`, full change ids), by change, at most 200, each with its
+/// assignment (R3.11).
+async fn dependency_conflicts(
+    state: &Arc<AppState>,
+    target: &super::reading::Target,
+    only: Option<&[String]>,
+) -> Result<Vec<v1::Conflict>, Status> {
+    let repo = target.repo.id;
+    let mut held: Vec<_> = crate::lifecycle::dependents::held(state, repo, only)
+        .await
+        .into_iter()
+        .collect();
+    if held.is_empty() {
+        return Ok(Vec::new());
+    }
+    held.sort_by(|a, b| a.0.cmp(&b.0));
+    held.truncate(200);
+    let rows: Vec<crate::db::LifecycleRow> = held.iter().map(|(_, (_, row))| row.clone()).collect();
+    let mut changes = super::changes::changes_at_head(state, target, &rows).await?;
+    crate::lifecycle::messages::fill(state, repo, changes.values_mut(), None).await;
+    let mut conflicts: Vec<v1::Conflict> = held
+        .iter()
+        .filter_map(|(change, (missing, _))| {
+            let mut conflict = v1::Conflict {
+                id: crate::lifecycle::dependents::conflict_id(change, missing),
+                change: Some(changes.remove(change)?),
+                dependency: Some(crate::lifecycle::dependents::missing_message(
+                    state, repo, missing,
+                )),
+                ..v1::Conflict::default()
+            };
+            conflict.set_kind(v1::ConflictKind::MissingDependency);
+            Some(conflict)
+        })
+        .collect();
+    if let Err(error) = crate::assign::look(state, repo).await {
+        tracing::warn!(error = %reef_lib::error::ErrorChain(&error), "cannot bring conflict assignments up to date");
+    }
+    super::assignments::fill(state, repo, &mut conflicts);
+    Ok(conflicts)
+}
+
+/// `GetConflict` of kind `MISSING_DEPENDENCY`: `revision`'s change's, or
+/// `NOT_CONFLICTED` (R3.11).
+async fn dependency_conflict(
+    state: &Arc<AppState>,
+    target: &super::reading::Target,
+    revision: &str,
+) -> Result<Response<GetConflictResponse>, Status> {
+    let head = state.reads.current(&target.handle).await.map_err(status)?;
+    let read_target = target.clone();
+    let revision = revision.to_owned();
+    let resolved = state
+        .reads
+        .run(&target.handle, move || async move {
+            revset::resolve_revision(&head, &revision, &read_target.scope()).await
+        })
+        .await
+        .map_err(status)?
+        .map_err(status)?;
+    let only = [resolved.change_id.to_string()];
+    let conflict = dependency_conflicts(state, target, Some(&only))
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| {
+            status(conflict::ConflictError::NotConflicted {
+                commit_id: resolved.commit_id.clone(),
+            })
+        })?;
+    Ok(Response::new(GetConflictResponse {
+        conflict: Some(conflict),
+        next_page_token: String::new(),
+        ..GetConflictResponse::default()
+    }))
 }
 
 #[cfg(test)]

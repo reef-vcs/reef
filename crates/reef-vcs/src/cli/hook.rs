@@ -102,7 +102,7 @@ async fn hook(global: &Global, args: Args) -> Result<(), CliError> {
     match args.command {
         HookCommand::Edit(edit) => {
             let ctx = connect(global, &out).await?;
-            declare(&ctx, &event, &edit, &id_file).await
+            Box::pin(declare(&ctx, &event, &edit, &id_file)).await
         }
         HookCommand::End(_) => {
             // The file goes first, so a session that ends with no daemon

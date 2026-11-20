@@ -17,13 +17,16 @@
 //!
 //! # Carried snapshots
 //!
-//! A write by Reef that moves a workspace to another commit of its change
-//! hands the workspace's next snapshot a [`Carry`] (issue #80, ADR 0039).
-//! When that snapshot finds the working copy stale with edits of its own,
-//! and the carry names exactly the move, it records the three-way merge of
-//! the write's tree and the files on disk, over the tree the working copy
-//! last recorded, as a rewrite of the write's commit, instead of diverging.
-//! The merged tree also holds the write's changes, which are not on disk:
+//! A stale working copy with edits of its own is not always ADR 0018's
+//! divergence. When Reef itself moved the workspace's working-copy commit
+//! (a write, issue #80 and ADR 0039, or another workspace's snapshot that
+//! rebased it, ADR 0084), the snapshot records the three-way merge of the
+//! commit's tree and the files on disk, over the tree of the commit the
+//! working copy was checked out from, as a rewrite of the view's commit,
+//! instead of diverging. Who moved it is read from the operation log
+//! ([`moved_by_reef`]), at the head the snapshot scans with or commits on:
+//! nothing is handed from the mover to the workspace. The merged tree also
+//! holds the mover's changes, which are not on disk:
 //! [`PendingSnapshot::check_out_carried`] writes them after the commit and
 //! before [`PendingSnapshot::finish`].
 //!
@@ -44,6 +47,7 @@
 //! keeps the tree it was locked with: `Repo::recorded_tree` reads the
 //! recorded one from disk.
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -60,6 +64,7 @@ use jj_lib::merge::Merge;
 use jj_lib::merged_tree::MergedTree;
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store::{OpStoreError, OperationId};
+use jj_lib::operation::Operation;
 use jj_lib::ref_name::{WorkspaceName, WorkspaceNameBuf};
 use jj_lib::repo::{ReadonlyRepo, Repo as _, RewriteRootCommit};
 use jj_lib::repo_path::RepoPathBuf;
@@ -226,22 +231,18 @@ impl Classify for SnapshotError {
     }
 }
 
-/// Reef's own write moved this workspace's working copy from `from` to `to`,
-/// two commits of one change with different trees (ADR 0039). Given to
-/// [`Repo::begin_snapshot`], it carries the workspace's edits since its last
-/// snapshot onto `to` rather than diverging.
+/// A carried snapshot's commit whose check-out failed: the commit holds
+/// `disk`, the tree that snapshot scanned, and the files do not hold the
+/// rest of the commit yet (ADR 0039). Kept by the workspace and given to
+/// its next [`Repo::begin_snapshot`], which measures its edits from `disk`
+/// rather than from the commit the working copy was checked out from, so
+/// they are not taken twice.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Carry {
-    /// The commit the working copy was checked out from: the caller's
-    /// `expected_commit`.
-    pub from: CommitIdHex,
-    /// The commit the write put the working copy on: the view's.
-    pub to: CommitIdHex,
-    /// The tree the edits are measured from; `None` for the tree the
-    /// working copy last recorded. Set for a carry that is merged again
-    /// after its check-out failed: the disk tree that merge took
-    /// ([`SnapshotPlan::carried`]), so it is not taken twice.
-    pub base: Option<ScannedTree>,
+pub struct Unfinished {
+    /// The commit that snapshot wrote.
+    pub commit: CommitIdHex,
+    /// The tree it scanned.
+    pub disk: ScannedTree,
 }
 
 /// A tree by its ids and conflict labels: plain data.
@@ -275,9 +276,10 @@ pub struct SnapshotPlan {
     /// workspace, so a new commit on `parents`, with a new change id, is
     /// created instead of a rewrite.
     pub recover: Option<Vec<CommitIdHex>>,
-    /// `Some(disk)`: the scan was carried onto `rewrite_of`, a write's
-    /// commit ([`Carry`]): `tree_ids` is the merge, and `disk` is the tree
-    /// on disk it merged, to merge over again if the check-out fails.
+    /// `Some(disk)`: the scan was carried onto `rewrite_of`, the commit
+    /// Reef moved the workspace to ([`moved_by_reef`]): `tree_ids` is the merge,
+    /// and `disk` is the tree on disk it merged, to merge over again if the
+    /// check-out fails ([`Unfinished`]).
     pub carried: Option<ScannedTree>,
     /// `Some`: `rewrite_of` is immutable (on `trunk()` or under a tag), so
     /// the scanned tree is recorded as a new commit on it, with a new change
@@ -319,6 +321,10 @@ pub struct PendingSnapshot<'a> {
     /// For a carried scan, each file its check-out would overwrite or
     /// remove, as the scan left it.
     stamps: Vec<(PathBuf, Option<Stamp>)>,
+    /// The tree the scan read on disk.
+    scanned: MergedTree,
+    /// The workspace's root.
+    root: PathBuf,
 }
 
 /// Why a scan walked every tracked file rather than the paths given to
@@ -424,7 +430,9 @@ impl PendingSnapshot<'_> {
     /// write's own and any conflicted. Returns the files it updated, added
     /// or removed. A file among them that changed on disk since the scan is
     /// [`SnapshotError::ChangedAfterScan`], with nothing checked out: jj's
-    /// check-out would overwrite it unread.
+    /// check-out would overwrite it unread. A commit merged again when it
+    /// was committed ([`onto_moved`]) has paths the scan took no stamp of:
+    /// each must still hold, byte for byte, what the scan read.
     pub async fn check_out_carried(
         &mut self,
         repo: &ReadonlyRepo,
@@ -438,9 +446,66 @@ impl PendingSnapshot<'_> {
         {
             return Err(SnapshotError::ChangedAfterScan(path.display().to_string()));
         }
+        if let Some(path) = self.changed_unstamped(&commit.tree()).await? {
+            return Err(SnapshotError::ChangedAfterScan(path.display().to_string()));
+        }
         self.updated_files = check_out(&mut self.locked, &commit).await?;
         self.checked_out = true;
         Ok(self.updated_files)
+    }
+
+    /// The first file the check-out of `merged` would overwrite or remove,
+    /// with no stamp, that no longer holds what the scan read. The
+    /// check-out diffs from the locked working copy's tree: the scanned
+    /// tree after a full scan, but the tree before the scan after a
+    /// narrowed one, whose paths are then checked too.
+    async fn changed_unstamped(
+        &mut self,
+        merged: &MergedTree,
+    ) -> Result<Option<PathBuf>, BackendError> {
+        let stamped: HashSet<&Path> = self.stamps.iter().map(|(path, _)| path.as_path()).collect();
+        let store = self.scanned.store();
+        let mut seen = HashSet::new();
+        let mut diff = self.scanned.diff(merged, &EverythingMatcher);
+        while let Some(entry) = diff.next().await {
+            let before = entry.values?.before;
+            // jj's check-out skips a file it does not track.
+            if !before.is_present() {
+                continue;
+            }
+            let path = entry.path.to_fs_path_unchecked(&self.root);
+            if !stamped.contains(path.as_path())
+                && !holds(store, &entry.path, &before, &path).await?
+            {
+                return Ok(Some(path));
+            }
+            seen.insert(entry.path);
+        }
+        if self.narrowed.is_none() {
+            return Ok(None);
+        }
+        let old = self.locked.locked_wc().old_tree().clone();
+        let mut diff = old.diff(merged, &EverythingMatcher);
+        while let Some(entry) = diff.next().await {
+            entry.values?;
+            if seen.contains(&entry.path) {
+                continue;
+            }
+            let path = entry.path.to_fs_path_unchecked(&self.root);
+            if stamped.contains(path.as_path()) {
+                continue;
+            }
+            let scanned = self.scanned.path_value(&entry.path).await?;
+            let holds = if scanned.is_present() {
+                holds(store, &entry.path, &scanned, &path).await?
+            } else {
+                std::fs::symlink_metadata(&path).is_err()
+            };
+            if !holds {
+                return Ok(Some(path));
+            }
+        }
+        Ok(None)
     }
 
     /// New files the scan left untracked, by repository-relative path.
@@ -652,6 +717,48 @@ pub async fn commit_snapshot(
     })
 }
 
+/// `plan` recorded on `moved` instead of its `rewrite_of`: an ancestor's
+/// snapshot rebased `rewrite_of` onto `moved`, in the same change, after
+/// the scan (#91). The tree is the three-way merge of `moved`'s and the
+/// plan's over `rewrite_of`'s, so the scan's edits and the rebase both
+/// stay; where they touch the same lines, the commit has jj's conflict and
+/// the check-out writes its markers. The plan is then carried
+/// ([`SnapshotPlan::carried`]): its commit has files that are not on disk
+/// yet, which [`PendingSnapshot::check_out_carried`] writes.
+pub async fn onto_moved(
+    head: &ReadonlyRepo,
+    plan: &SnapshotPlan,
+    moved: &CommitIdHex,
+) -> Result<SnapshotPlan, SnapshotError> {
+    let was = commit_by_hex(head, &plan.rewrite_of).await?;
+    let now = commit_by_hex(head, moved).await?;
+    let scanned = MergedTree::new(
+        Arc::clone(head.store()),
+        plan.tree_ids.clone(),
+        plan.labels.clone(),
+    );
+    let merged = MergedTree::merge(Merge::from_vec(vec![
+        (now.tree(), format!("{} (rebased)", now.conflict_label())),
+        (was.tree(), format!("{} (scanned)", was.conflict_label())),
+        (scanned, "working copy".to_owned()),
+    ]))
+    .await?;
+    let (tree_ids, labels) = merged.tree_ids_and_labels();
+    Ok(SnapshotPlan {
+        workspace_name: plan.workspace_name.clone(),
+        rewrite_of: moved.clone(),
+        tree_ids: tree_ids.clone(),
+        labels: labels.clone(),
+        divergent: false,
+        recover: None,
+        carried: Some(plan.carried.clone().unwrap_or_else(|| ScannedTree {
+            tree_ids: plan.tree_ids.clone(),
+            labels: plan.labels.clone(),
+        })),
+        started_on: None,
+    })
+}
+
 /// `id` as a jj commit id of this store's length.
 fn commit_id(repo: &ReadonlyRepo, id: &CommitIdHex) -> Result<CommitId, SnapshotError> {
     CommitId::try_from_hex(id.as_str())
@@ -800,11 +907,23 @@ impl Repo {
             });
         }
 
+        let mut pending = pending;
         let plan = pending.plan().clone();
         let meta = OpMeta::new(OpKind::Snapshot, description);
         let committed = commit_snapshot(&head, &plan, &meta).await?;
         let finish_start = Instant::now();
-        let finished = pending.finish(&committed.op_id).await;
+        let finished = match plan.carried {
+            // The commit has the mover's changes, which are not on disk.
+            Some(_) => pending
+                .check_out_carried(&committed.repo, &committed.commit_id)
+                .await
+                .map(drop),
+            None => Ok(()),
+        };
+        let finished = match finished {
+            Ok(()) => pending.finish(&committed.op_id).await,
+            Err(error) => Err(error),
+        };
         // The operation is published once committed. Adopt it even if saving
         // the working-copy state failed, so the next snapshot sees a stale
         // working copy instead of building a sibling operation on the old one.
@@ -844,11 +963,13 @@ impl Repo {
     ///   edits since the last update, or with files that already match the
     ///   rewritten commit: check it out on disk
     ///   ([`PendingSnapshot::adopted`]); nothing to commit;
-    /// - stale with edits, and `carry` names this move (its `to` is the
-    ///   view's commit and its `from` is `expected_commit`): plan a rewrite
-    ///   of `to` with the three-way merge of `to`'s tree and the scanned
-    ///   one over the carry's base ([`SnapshotPlan::carried`]), or, when the
-    ///   merge is `to`'s tree, check it out as above (ADR 0039);
+    /// - stale with edits, and Reef moved the working-copy commit from
+    ///   `expected_commit` to the view's ([`moved_by_reef`]): plan a rewrite of
+    ///   the view's commit with the three-way merge of its tree and the
+    ///   scanned one over `expected_commit`'s tree, or over `unfinished`'s
+    ///   when the move includes that commit ([`SnapshotPlan::carried`]),
+    ///   or, when the merge is the view's tree, check it out as above (ADR
+    ///   0039, ADR 0084);
     /// - stale with edits otherwise: plan a rewrite of `expected_commit`
     ///   instead, which makes the change divergent
     ///   ([`SnapshotPlan::divergent`]);
@@ -870,7 +991,7 @@ impl Repo {
     pub async fn begin_snapshot(
         &mut self,
         expected_commit: Option<&CommitIdHex>,
-        carry: Option<&Carry>,
+        unfinished: Option<&Unfinished>,
         extra: &IgnoreSources<'_>,
         prefixes: Option<&[PathBuf]>,
     ) -> Result<PendingSnapshot<'_>, SnapshotError> {
@@ -965,9 +1086,9 @@ impl Repo {
             }
             Some(wc) => {
                 let last = own_last().await?;
-                match carried_tree(&repo, (wc, &last), carry, &new_tree).await? {
+                match carried_tree(&repo, &name, (wc, &last), unfinished, &new_tree).await? {
                     Some(merged) if merged.tree_ids() == wc.tree_ids() => {
-                        // The edits were already the write's.
+                        // The edits were already the commit's.
                         updated_files = check_out(&mut locked, wc).await?;
                         adopted = true;
                         (CommitIdHex::of(wc.id()), false, false, None)
@@ -1032,6 +1153,8 @@ impl Repo {
             full_reason,
             checked_out: false,
             stamps,
+            scanned: new_tree,
+            root,
         })
     }
 
@@ -1170,37 +1293,488 @@ async fn check_out(
     Ok(stats.updated_files + stats.added_files + stats.removed_files)
 }
 
-/// A carried snapshot's tree, when `carry` names this move: `to` is `wc`,
-/// the view's commit (the write's), and `from` is `last`, the commit the
-/// working copy was checked out from. The tree is the merge of `wc`'s and
-/// the scanned `disk` over the carry's base, by default `last`'s tree
-/// (ADR 0039). `None` otherwise.
+/// A carried snapshot's tree, when Reef moved the working copy from `last`,
+/// the commit it was checked out from, to `wc`, the view's commit
+/// ([`followed`]): the merge of `wc`'s tree and the scanned `disk` over
+/// `last`'s tree, or over `unfinished`'s when the move includes its commit
+/// (ADR 0039). `None` otherwise, and when `wc` is `last`.
 async fn carried_tree(
     repo: &ReadonlyRepo,
+    name: &WorkspaceName,
     (wc, last): (&Commit, &Commit),
-    carry: Option<&Carry>,
+    unfinished: Option<&Unfinished>,
     disk: &MergedTree,
-) -> Result<Option<MergedTree>, BackendError> {
-    let Some(carry) = carry.filter(|carry| {
-        carry.to.as_str() == wc.id().hex() && carry.from.as_str() == last.id().hex()
-    }) else {
+) -> Result<Option<MergedTree>, SnapshotError> {
+    if wc.id() == last.id() {
+        return Ok(None);
+    }
+    let Some(followed) = followed(repo, name, last.id(), unfinished).await? else {
         return Ok(None);
     };
-    let base = match &carry.base {
-        Some(base) => MergedTree::new(
-            Arc::clone(repo.store()),
-            base.tree_ids.clone(),
-            base.labels.clone(),
-        ),
+    let base = match followed.base {
+        Some(base) => MergedTree::new(Arc::clone(repo.store()), base.tree_ids, base.labels),
         None => last.tree(),
     };
-    MergedTree::merge(Merge::from_vec(vec![
+    let merged = MergedTree::merge(Merge::from_vec(vec![
         (wc.tree(), format!("{} (rewritten)", wc.conflict_label())),
         (base, format!("{} (snapshotted)", last.conflict_label())),
         (disk.clone(), "working copy".to_owned()),
     ]))
-    .await
-    .map(Some)
+    .await?;
+    Ok(Some(merged))
+}
+
+/// The most operations since a commit that [`followed`] judges.
+const FOLLOW_LIMIT: usize = 1024;
+
+/// What [`followed`] found.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Followed {
+    /// The tree to measure the workspace's edits from, when the move
+    /// includes the [`Unfinished`] commit; `None` for `from`'s tree.
+    base: Option<ScannedTree>,
+}
+
+/// Whether Reef moved workspace `name`'s working-copy commit from `from`
+/// to the commit `repo`'s view has for it, so that edits made on `from`
+/// belong on that commit (ADR 0039, ADR 0084). Read from the operation
+/// log: every operation since `from` ([`Walk::moves`]) that moved the
+/// commit must be one Reef wrote, and must have kept the workspace on its
+/// change, or put it on a new empty change on it (a landing, ADR 0071);
+/// and those moves must lead from `from` to the view's commit. The shape of
+/// the log does not matter: operations that ran beside each other, and the
+/// merges of their heads, are read like any others. These moves are not
+/// Reef's, and give `None`, ADR 0018's divergence:
+///
+/// - another jj client's operation, whichever commit a merge then kept;
+/// - a merge of operation heads that left the workspace on a commit none
+///   of the heads had (it rebased the commit over another client's
+///   rewrite): no move leads to that commit;
+/// - another workspace's snapshot of the same change (ADR 0018);
+/// - this workspace's own snapshot, other than `unfinished`'s (a crash
+///   between its commit and its row), or `unfinished`'s under a later undo;
+/// - a move with more than [`FOLLOW_LIMIT`] operations since `from`, or
+///   further back than the operations the store still has.
+async fn followed(
+    repo: &ReadonlyRepo,
+    name: &WorkspaceName,
+    from: &CommitId,
+    unfinished: Option<&Unfinished>,
+) -> Result<Option<Followed>, SnapshotError> {
+    let walk = Walk {
+        repo,
+        name,
+        from,
+        unfinished,
+    };
+    let Some(moves) = walk.moves().await? else {
+        return Ok(None);
+    };
+    let mut trail = Trail::default();
+    for step in &moves {
+        if !walk.reefs_move(step, &mut trail).await? {
+            return Ok(None);
+        }
+    }
+    let mut reached = HashSet::from([from]);
+    for step in moves.iter().rev() {
+        if reached.contains(&step.was) {
+            reached.insert(&step.now);
+        }
+    }
+    let to = repo.view().get_wc_commit_id(name);
+    let led = to.is_some_and(|to| reached.contains(to));
+    Ok(led.then_some(Followed { base: trail.base }))
+}
+
+/// An operation that moved the workspace's commit.
+struct Move {
+    op: Operation,
+    was: CommitId,
+    now: CommitId,
+}
+
+/// What the moves ordered before the one [`Walk::reefs_move`] judges
+/// included ([`Walk::moves`]): the moves it is in the history of, and any
+/// beside it.
+#[derive(Clone, Debug, Default)]
+struct Trail {
+    /// The tree the workspace's [`Unfinished`] snapshot scanned, once that
+    /// snapshot was among them.
+    base: Option<ScannedTree>,
+    /// An undo was among them.
+    undone: bool,
+}
+
+/// [`followed`]'s question.
+struct Walk<'a> {
+    repo: &'a ReadonlyRepo,
+    name: &'a WorkspaceName,
+    from: &'a CommitId,
+    unfinished: Option<&'a Unfinished>,
+}
+
+/// An operation the store no longer has reads as `None`.
+fn kept<T>(read: Result<T, OpStoreError>) -> Result<Option<T>, OpStoreError> {
+    match read {
+        Ok(read) => Ok(Some(read)),
+        Err(OpStoreError::ObjectNotFound { .. }) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// The workspace's commit in the views read, by operation.
+struct Commits<'a> {
+    name: &'a WorkspaceName,
+    read: HashMap<OperationId, Option<CommitId>>,
+}
+
+impl Commits<'_> {
+    async fn at(&mut self, op: &Operation) -> Result<Option<CommitId>, SnapshotError> {
+        if let Some(commit) = self.read.get(op.id()) {
+            return Ok(commit.clone());
+        }
+        let commit = op.view().await?.get_wc_commit_id(self.name).cloned();
+        self.read.insert(op.id().clone(), commit.clone());
+        Ok(commit)
+    }
+}
+
+/// The part of the operation log [`Walk::read_back`] has read: a graph,
+/// from the head down.
+#[derive(Default)]
+struct Log {
+    /// The operations loaded: those read, and those waiting.
+    ops: HashMap<OperationId, Operation>,
+    /// Read: their parents are loaded, or lost.
+    read: HashSet<OperationId>,
+    /// Loaded and not read yet.
+    waiting: Vec<OperationId>,
+    /// Parents of operations read that the store no longer has.
+    lost: HashSet<OperationId>,
+    /// Known to be before `from`: an operation whose view has `from`, or
+    /// one in the history of an operation known to be before.
+    before: HashSet<OperationId>,
+}
+
+impl Log {
+    /// Loads `id` to wait for its read, unless the log has it.
+    async fn load(&mut self, repo: &ReadonlyRepo, id: &OperationId) -> Result<(), OpStoreError> {
+        if self.ops.contains_key(id) || self.lost.contains(id) {
+            return Ok(());
+        }
+        match kept(repo.loader().load_operation(id).await)? {
+            Some(op) => {
+                self.ops.insert(id.clone(), op);
+                self.waiting.push(id.clone());
+            }
+            None => {
+                self.lost.insert(id.clone());
+            }
+        }
+        Ok(())
+    }
+
+    /// Records that `op`, which was read, is before `from`: so is its
+    /// history, as far as it was read.
+    fn is_before(&mut self, op: &OperationId) {
+        self.before.insert(op.clone());
+        let mut found = vec![op.clone()];
+        while let Some(id) = found.pop() {
+            for parent in self.ops[&id].parent_ids() {
+                if self.before.insert(parent.clone()) && self.read.contains(parent) {
+                    found.push(parent.clone());
+                }
+            }
+        }
+    }
+
+    /// Where in `waiting` the operation with the latest end time is, of
+    /// those known to be before `from`, or of the others.
+    fn latest(&self, before: bool) -> Option<usize> {
+        let end = |at: &usize| {
+            let id = &self.waiting[*at];
+            (self.ops[id].metadata().time.end, id)
+        };
+        (0..self.waiting.len())
+            .filter(|at| self.before.contains(&self.waiting[*at]) == before)
+            .max_by_key(end)
+    }
+
+    /// The operations read that are not known to be before `from`.
+    fn since(&self) -> impl Iterator<Item = &OperationId> {
+        self.read.iter().filter(|id| !self.before.contains(*id))
+    }
+
+    /// Whether no operation of [`Log::since`] can turn out to be before
+    /// `from`. One could only be in the history of an operation not read
+    /// yet. So every such operation, or one the store lost, must be known
+    /// to be before `from`, and must be in the history of each operation
+    /// of `since`: nothing is in its own history. That is checked for the
+    /// lowest of `since`, those with no parent in it; the history of the
+    /// others includes theirs.
+    fn settled(&self) -> bool {
+        let unread = || self.waiting.iter().chain(&self.lost);
+        let before = |id: &OperationId| self.before.contains(id);
+        unread().all(before)
+            && self
+                .since()
+                .filter(|id| self.ops[*id].parent_ids().iter().all(before))
+                .all(|lowest| {
+                    let history = self.history(lowest);
+                    unread().all(|id| history.contains(id))
+                })
+    }
+
+    /// The history of `of`, as far as it was read.
+    fn history<'a>(&'a self, of: &'a OperationId) -> HashSet<&'a OperationId> {
+        let mut history = HashSet::new();
+        let mut found = vec![of];
+        while let Some(id) = found.pop() {
+            if !self.read.contains(id) {
+                continue;
+            }
+            for parent in self.ops[id].parent_ids() {
+                if history.insert(parent) {
+                    found.push(parent);
+                }
+            }
+        }
+        history
+    }
+
+    /// The operations of [`Log::since`], each before every operation in
+    /// its history, in an order the graph alone decides. `head` is the one
+    /// that is in no other's history: each of the others is a parent of
+    /// one of them, since a parent of an operation before `from` is before
+    /// it too. `None` if one is left out all the same.
+    fn since_in_order(&self, head: &OperationId) -> Option<Vec<&Operation>> {
+        let since: HashSet<&OperationId> = self.since().collect();
+        let parents = |id: &OperationId| {
+            let parents = self.ops[id].parent_ids().iter();
+            parents.filter(|parent| since.contains(parent))
+        };
+        let mut children: HashMap<&OperationId, usize> = HashMap::new();
+        for parent in since.iter().flat_map(|id| parents(id)) {
+            *children.entry(parent).or_default() += 1;
+        }
+        let mut ready: Vec<&OperationId> = since.get(head).copied().into_iter().collect();
+        let mut ordered = Vec::new();
+        while let Some(id) = ready.pop() {
+            ordered.push(&self.ops[id]);
+            for parent in parents(id) {
+                let left = children.entry(parent).or_default();
+                *left -= 1;
+                if *left == 0 {
+                    ready.push(parent);
+                }
+            }
+        }
+        (ordered.len() == since.len()).then_some(ordered)
+    }
+}
+
+impl Walk<'_> {
+    /// The operations since `from` that moved the workspace's commit, each
+    /// before the moves in its history: those with one parent whose view
+    /// has another commit for it. An operation is since `from` when it is
+    /// in the head's history and in the history of no operation there
+    /// whose view has `from` for the workspace. So an operation of another
+    /// client that loaded the head before `from` was written, and committed
+    /// later, is one. That is a property of the graph: what the clocks
+    /// said when the operations were written does not change it. `None`
+    /// when the workspace was added or forgotten since, and when the
+    /// operations since `from` cannot be judged: there are more than
+    /// [`FOLLOW_LIMIT`] of them, the log could not be read back far enough
+    /// to know them ([`Walk::read_back`]), or they could not all be put in
+    /// order ([`Log::since_in_order`]).
+    async fn moves(&self) -> Result<Option<Vec<Move>>, SnapshotError> {
+        let mut commits = Commits {
+            name: self.name,
+            read: HashMap::new(),
+        };
+        let Some(log) = self.read_back(&mut commits).await? else {
+            return Ok(None);
+        };
+        if log.since().count() > FOLLOW_LIMIT {
+            return Ok(None);
+        }
+        let Some(since) = log.since_in_order(self.repo.op_id()) else {
+            return Ok(None);
+        };
+        let mut moves = Vec::new();
+        for op in since {
+            // A merge of heads is no move: `followed` checks that the
+            // moves lead to the commit it kept.
+            let [parent] = op.parent_ids() else {
+                continue;
+            };
+            let Some(parent) = log.ops.get(parent) else {
+                return Ok(None);
+            };
+            match (commits.at(parent).await?, commits.at(op).await?) {
+                (was, now) if was == now => {}
+                (Some(was), Some(now)) => moves.push(Move {
+                    op: op.clone(),
+                    was,
+                    now,
+                }),
+                _ => return Ok(None),
+            }
+        }
+        Ok(Some(moves))
+    }
+
+    /// Reads the operation log back from the head until the operations
+    /// since `from` are known ([`Log::since`], once [`Log::settled`]): the
+    /// operations before `from` are read as far as that takes, without
+    /// their views. `None` when it cannot be known: the store no longer
+    /// has an operation it takes.
+    ///
+    /// The order of the reads changes what they cost, and not what they
+    /// find, so nothing bounds them: a bound would make the answer depend
+    /// on the order. The operation with the latest end time is read next, as jj
+    /// orders the log (`jj_lib::op_walk`): with right clocks, that reads an
+    /// operation before `from` after the one that shows it is. A clock
+    /// that was wrong can keep an operation since `from` waiting behind
+    /// every operation before `from`, so after 1, 2, 4 and so on of those
+    /// in a row, the latest of the others is read. It can also put
+    /// operations before `from` ahead of the one that shows they are, and
+    /// each of those is then read with its view.
+    async fn read_back(&self, commits: &mut Commits<'_>) -> Result<Option<Log>, SnapshotError> {
+        let mut log = Log::default();
+        let head = self.repo.operation();
+        log.ops.insert(head.id().clone(), head.clone());
+        log.waiting.push(head.id().clone());
+        let (mut patience, mut left) = (0_usize, 0_usize);
+        let settled = loop {
+            let at = match (log.latest(false), log.latest(true)) {
+                (None, None) => break log.settled(),
+                (Some(since), None) => since,
+                (since, Some(before)) => {
+                    let later = |since: &usize| {
+                        let end = |at: usize| log.ops[&log.waiting[at]].metadata().time.end;
+                        end(*since) > end(before)
+                    };
+                    if let Some(since) = since.filter(later) {
+                        since
+                    } else if left > 0 {
+                        left -= 1;
+                        before
+                    } else {
+                        patience = (2 * patience).max(1);
+                        left = patience;
+                        match since {
+                            Some(since) => since,
+                            None if log.settled() => break true,
+                            None => {
+                                left -= 1;
+                                before
+                            }
+                        }
+                    }
+                }
+            };
+            let id = log.waiting.swap_remove(at);
+            let op = log.ops[&id].clone();
+            for parent in op.parent_ids() {
+                log.load(self.repo, parent).await?;
+            }
+            log.read.insert(id.clone());
+            if log.before.contains(&id) || commits.at(&op).await?.as_ref() == Some(self.from) {
+                log.is_before(&id);
+            }
+        };
+        Ok(settled.then_some(log))
+    }
+
+    /// Whether `step` is a move of Reef's that kept the workspace's edits
+    /// in their change.
+    async fn reefs_move(&self, step: &Move, trail: &mut Trail) -> Result<bool, SnapshotError> {
+        let Move { op, was, now } = step;
+        let class = super::oplog::classify(&super::oplog::entry(op));
+        let mover = class
+            .workspace_id
+            .map(|id| format!("{}{id}", super::workspace::REEF_WORKSPACE_PREFIX));
+        let reefs = match class.kind {
+            None | Some(OpKind::External) => false,
+            Some(OpKind::Snapshot) if mover.as_deref() == Some(self.name.as_str()) => {
+                let unfinished = self.unfinished.filter(|own| {
+                    trail.base.is_none() && !trail.undone && own.commit.as_str() == now.hex()
+                });
+                if let Some(own) = unfinished {
+                    trail.base = Some(own.disk.clone());
+                }
+                trail.base.is_some()
+            }
+            Some(OpKind::Snapshot) => match mover {
+                Some(mover) => !same_change(self.repo, op, &mover, now).await?,
+                None => false,
+            },
+            Some(kind) => {
+                trail.undone |= kind == OpKind::Undo;
+                true
+            }
+        };
+        Ok(reefs && kept_change(self.repo, was, now).await?)
+    }
+}
+
+/// Whether Reef moved workspace `workspace`'s working-copy commit from
+/// `from` to the commit `repo`'s view has for it, read from the operation
+/// log (ADR 0084): every operation since that moved it is one Reef wrote,
+/// and none is another workspace's snapshot of the same change (ADR 0018).
+/// A snapshot planned on `from` is then recorded on the view's commit
+/// ([`onto_moved`]); [`Repo::begin_snapshot`] asks the same of the commit
+/// its working copy was checked out from.
+pub async fn moved_by_reef(
+    repo: &ReadonlyRepo,
+    workspace: &str,
+    from: &CommitIdHex,
+) -> Result<bool, SnapshotError> {
+    let from = commit_id(repo, from)?;
+    let followed = followed(repo, WorkspaceName::new(workspace), &from, None).await?;
+    Ok(followed.is_some())
+}
+
+/// Whether workspace `mover`'s working-copy commit after `op` is in the
+/// change of `commit`: `op`, the mover's snapshot, rewrote the commit both
+/// were on (ADR 0018). True when the mover has none: not known to be
+/// another change's.
+async fn same_change(
+    repo: &ReadonlyRepo,
+    op: &Operation,
+    mover: &str,
+    commit: &CommitId,
+) -> Result<bool, SnapshotError> {
+    let view = op.view().await?;
+    let Some(movers) = view.get_wc_commit_id(WorkspaceName::new(mover)) else {
+        return Ok(true);
+    };
+    let movers = repo.store().get_commit_async(movers).await?;
+    let commit = repo.store().get_commit_async(commit).await?;
+    Ok(movers.change_id() == commit.change_id())
+}
+
+/// Whether a move from `was` to `now` kept the workspace's edits in their
+/// change: `now` is in `was`'s change, or is a new empty change on it (a
+/// landing that rebased the change, ADR 0071), where edits made meanwhile
+/// go, never into the landed commit.
+async fn kept_change(
+    repo: &ReadonlyRepo,
+    was: &CommitId,
+    now: &CommitId,
+) -> Result<bool, SnapshotError> {
+    let was = repo.store().get_commit_async(was).await?;
+    let now = repo.store().get_commit_async(now).await?;
+    if was.change_id() == now.change_id() {
+        return Ok(true);
+    }
+    let [parent] = now.parent_ids() else {
+        return Ok(false);
+    };
+    let parent = repo.store().get_commit_async(parent).await?;
+    Ok(parent.change_id() == was.change_id() && parent.tree_ids() == now.tree_ids())
 }
 
 /// The files on disk under `root` that checking `merged` out over the
@@ -1222,6 +1796,49 @@ async fn overwritten(
         }
     }
     Ok(stamps)
+}
+
+/// Whether `disk` holds `value`, `path`'s value in the scanned tree: a
+/// file with the same bytes, or a symlink to the same target. Anything else
+/// (a conflict, a directory, a submodule) reads as changed, which only
+/// costs a merge at the next snapshot.
+async fn holds(
+    store: &Arc<jj_lib::store::Store>,
+    path: &jj_lib::repo_path::RepoPath,
+    value: &jj_lib::backend::MergedTreeValue,
+    disk: &Path,
+) -> Result<bool, BackendError> {
+    use futures::AsyncReadExt as _;
+    use jj_lib::backend::TreeValue;
+    let Ok(metadata) = std::fs::symlink_metadata(disk) else {
+        return Ok(false);
+    };
+    match value.as_resolved() {
+        Some(Some(TreeValue::File { id, .. })) if metadata.is_file() => {
+            let Ok(on_disk) = std::fs::read(disk) else {
+                return Ok(false);
+            };
+            let mut reader = store.read_file(path, id).await?;
+            let mut stored = Vec::with_capacity(on_disk.len());
+            reader
+                .read_to_end(&mut stored)
+                .await
+                .map_err(|error| BackendError::ReadFile {
+                    path: path.to_owned(),
+                    id: id.clone(),
+                    source: error.into(),
+                })?;
+            Ok(stored == on_disk)
+        }
+        Some(Some(TreeValue::Symlink(id))) if metadata.is_symlink() => {
+            let Ok(target) = std::fs::read_link(disk) else {
+                return Ok(false);
+            };
+            let stored = store.read_symlink(path, id).await?;
+            Ok(target.to_str() == Some(stored.as_str()))
+        }
+        _ => Ok(false),
+    }
 }
 
 /// Whether the locked working copy is stale against `repo`, by jj's

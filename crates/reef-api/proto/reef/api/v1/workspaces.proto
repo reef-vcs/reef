@@ -449,6 +449,9 @@ message Workspace {
   // With step ASK: why the conflict waits, ASK (its policy tier) or
   // ATTEMPTS (its attempt limit is used up) (R3.28).
   ConflictAssignmentReason conflict_block_reason = 32;
+  // With step DEPENDENCY: the change below that left review, and how to
+  // move off it (R3.11).
+  MissingDependency missing_dependency = 33;
 }
 
 // Another open change that changes a path a workspace's change changes
