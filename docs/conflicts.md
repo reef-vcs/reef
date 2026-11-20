@@ -19,7 +19,7 @@ A commit whose parent is conflicted carries the same conflict until someone reso
 | Field | Means |
 | --- | --- |
 | `id` | `cfl_` and 32 hex digits: SHA-256 over the change id and each file's id. A describe, or an edit to a path that does not conflict, leaves it; a change to a conflicted path's sides changes it. |
-| `kind` | `tree`: jj's stored conflict. Later tickets add conflicts jj does not store, such as a dependent of an undone operation (R3.26) or of a withdrawn dependency (R3.11). |
+| `kind` | `tree`: jj's stored conflict. `missing_dependency`: an open proposal whose stack holds a change declined or withdrawn at its current commit (R3.11, below). R3.26 adds a dependent of an undone operation. |
 | `change` | The conflicted commit, as `reef show` prints it. |
 | `arity` | The number of sides. |
 | `terms` | Every term, in jj's order: `index`, `role` (`side` or `base`), jj's `label` verbatim, `origin` (the label's last parenthesized part, such as `rebase destination`), `source` (below), and for a side, `provenance` (below). |
@@ -76,6 +76,10 @@ reef conflict show -r <rev> --policy-input > c.json && reef policy check --input
 `reef status` names `reef conflict show` under a workspace's conflicted paths, and the conflicts assigned to the workspace below them, and a refused proposal or evidence for a conflicted change gives it as its `next`. `--policy-input` prints the conflict as a [policy](policy.md)'s `[[conflicts.rule]]` sees it (the change, every conflicted path, and per side the source's change and the identity and agent of its newest record), so a policy author can test a conflict tier; R3.28 applies tiers.
 
 Through the API, `ListConflicts` reads the conflicted commits of a revset in its log order (`mutable() & conflicts()` by default; `introduced_only` leaves out inherited ones), each with its terms, sources and provenance and its first 20 paths, a page looking at no more than 10,000 commits (so a page may hold none, with a token to go on); `GetConflict` reads one with its files a page at a time (`paths` filters; every page repeats the terms). Both are READ: any caller of the socket, the web listener and the remote listener may use them. A revision without a conflict is `NOT_FOUND` with reason `NOT_CONFLICTED`. MCP has no conflict tools: an agent learns of its assignments from `get_status`, and runs the CLI.
+
+## Missing dependencies
+
+A `missing_dependency` conflict ([ADR 0084](adr/0084-dependent-change-lifecycle.md)) is not in any tree: it says an open proposal cannot land because a change below it in its stack was declined or withdrawn at its current commit. It is derived on every read from the stack and the lifecycle, has no terms or files, and carries `dependency`: the lowest such change, its state, the transition that took it out (who, when and why; the reason is untrusted text), and how to move off it. `reef conflict list` prints these first; `reef conflict show --kind dependency` reads one. Its id changes when the change is declined again after a new proposal, not when a rewrite below moves it. It goes away when the missing change is proposed again, the dependent is moved off it, or the dependent leaves review. Its assignment has kind `dependency` and follows the owner rules below, with no tier and no attempt cap: there are no files for a policy to judge.
 
 ## Who resolves a conflict
 

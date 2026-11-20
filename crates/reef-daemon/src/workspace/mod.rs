@@ -36,7 +36,7 @@ use std::time::Duration;
 
 use reef_lib::error::{Classify, ErrorKind, classify_by_source};
 use reef_lib::jj::repo::ReadError;
-use reef_lib::jj::snapshot::{Carry, SnapshotError};
+use reef_lib::jj::snapshot::{SnapshotError, Unfinished};
 use reef_lib::jj::workspace::{CommitLookupError, ResetError};
 use reef_lib::jj::{
     CheckoutSummary, CheckoutTreeError, CreateWorkspaceError, ForgetWorkspaceError,
@@ -106,9 +106,14 @@ pub struct WorkspaceEntry {
     pub spec: Mutex<SnapshotSpec>,
     /// The shared stores mounted in it (R1.20).
     pub stores: Mutex<Vec<MountedStore>>,
-    /// What a write that moved it within its change hands its next
-    /// snapshot (issue #80, ADR 0039).
-    pub carry: CarrySlot,
+    /// Its last carried snapshot's commit, when the check-out of it failed
+    /// (ADR 0039). Written and read by its own snapshots, under
+    /// `scan_lock`; no other workspace or write touches it.
+    pub unfinished: Mutex<Option<Unfinished>>,
+    /// A follow snapshot after another's commit moved it is queued, and no
+    /// snapshot of it has loaded a head since (#91, #202): set and cleared
+    /// on the repository thread.
+    pub follow_pending: std::sync::atomic::AtomicBool,
 }
 
 /// A workspace's last scans that succeeded ([`WorkspaceEntry::last_scan`]).
@@ -126,40 +131,6 @@ pub struct ScanMark {
     pub last_full: Option<(std::time::Instant, Option<crate::snapshot::WalkReason>)>,
 }
 
-/// A workspace's [`Carry`], if a write left one. A leaf lock: never held
-/// across an `.await` or while taking another lock.
-#[derive(Debug, Default)]
-pub struct CarrySlot(Mutex<Option<Carry>>);
-
-impl CarrySlot {
-    /// Hands `carry` to the workspace's next snapshot, replacing any.
-    pub(crate) fn set(&self, carry: Carry) {
-        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = Some(carry);
-    }
-
-    /// Whether a write left a carry.
-    pub(crate) fn is_set(&self) -> bool {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .is_some()
-    }
-
-    /// The carry for this snapshot, emptying the slot.
-    pub(crate) fn take(&self) -> Option<Carry> {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner).take()
-    }
-
-    /// Puts back a carry a snapshot took and did not use, unless a newer
-    /// one was set meanwhile.
-    pub(crate) fn restore(&self, carry: Carry) {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get_or_insert(carry);
-    }
-}
-
 /// The parts of a workspace's spec its snapshots and watcher apply, from
 /// the `reef.toml` of the tree it was created on (`crate::spec::resolve`);
 /// empty when that tree has none.
@@ -170,6 +141,32 @@ pub struct SnapshotSpec {
     /// Shared store mount points (`[[store]] mount`), repository-root
     /// relative.
     pub mounts: Vec<String>,
+}
+
+impl WorkspaceEntry {
+    /// Its last carried commit, if the check-out of it failed.
+    pub(crate) fn unfinished(&self) -> Option<Unfinished> {
+        self.unfinished
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    pub(crate) fn set_unfinished(&self, unfinished: Option<Unfinished>) {
+        *self
+            .unfinished
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = unfinished;
+    }
+
+    /// Whether a snapshot has work to do though no file changed: a commit
+    /// moved the workspace and its follow has not run, or its last
+    /// check-out failed.
+    pub(crate) fn owes_snapshot(&self) -> bool {
+        self.follow_pending
+            .load(std::sync::atomic::Ordering::Acquire)
+            || self.unfinished().is_some()
+    }
 }
 
 impl std::fmt::Debug for WorkspaceEntry {
@@ -779,33 +776,4 @@ pub(crate) fn gone_advice(id: WorkspaceId, state: WorkspaceState, repo: RepoId) 
         ),
         ["reef", "ws", "create", "--repo", &repo.as_hex()],
     )
-}
-
-#[cfg(test)]
-mod carry_slot_tests {
-    use reef_lib::jj::CommitIdHex;
-
-    use super::*;
-
-    fn carry(to: &str) -> Carry {
-        Carry {
-            from: "aa".parse::<CommitIdHex>().unwrap(),
-            to: to.parse::<CommitIdHex>().unwrap(),
-            base: None,
-        }
-    }
-
-    #[test]
-    fn restore_keeps_a_newer_carry_and_take_empties() {
-        let slot = CarrySlot::default();
-        slot.set(carry("b1"));
-        let taken = slot.take().unwrap();
-        assert_eq!(slot.take(), None, "take empties the slot");
-        // A newer write's carry, set while the snapshot ran, wins.
-        slot.set(carry("b2"));
-        slot.restore(taken.clone());
-        assert_eq!(slot.take(), Some(carry("b2")));
-        slot.restore(taken);
-        assert_eq!(slot.take(), Some(carry("b1")));
-    }
 }

@@ -57,6 +57,9 @@ use crate::service::policy::{self, PolicyFile};
 
 /// The kind of jj's stored conflicts, as rows name it.
 pub const KIND_TREE: &str = "tree";
+/// The kind of a proposal whose stack holds a change that left review
+/// (R3.11), as rows name it.
+pub const KIND_DEPENDENCY: &str = "dependency";
 /// How long an ended owner keeps its assignment before it is queued, unless
 /// it is followed first.
 pub const OWNER_GRACE: Duration = Duration::from_mins(5);
@@ -174,11 +177,13 @@ pub enum Reason {
     Attempts,
     /// A person gave the go-ahead, or granted attempts (R3.28).
     Allowed,
+    /// Closed: the dependent left review itself (R3.11).
+    Withdrawn,
 }
 
 impl Reason {
     /// Every reason.
-    pub const ALL: [Reason; 18] = [
+    pub const ALL: [Reason; 19] = [
         Reason::Default,
         Reason::Followed,
         Reason::Returned,
@@ -197,6 +202,7 @@ impl Reason {
         Reason::Ask,
         Reason::Attempts,
         Reason::Allowed,
+        Reason::Withdrawn,
     ];
 
     /// The column's text.
@@ -220,6 +226,7 @@ impl Reason {
             Reason::Ask => "ask",
             Reason::Attempts => "attempts",
             Reason::Allowed => "allowed",
+            Reason::Withdrawn => "withdrawn",
         }
     }
 
@@ -1169,6 +1176,8 @@ async fn look_at(
         })
         .await?;
         looked.warned_full = warned;
+        let mut changes = changes;
+        changes.extend(look_dependencies(state, repo, now).await?);
         let announced = record_and_announce(state, repo, changes, None, None, unblocked).await?;
         // The follower's own operations need no second reading of jj; a
         // look that left lookups for later reads again soon.
@@ -1310,6 +1319,155 @@ fn reconcile(
     }
     changes.extend(closes(state, repo, by_change.into_values(), scan, now)?);
     Ok(changes)
+}
+
+/// [`dependencies`], from the open proposals' missing dependencies now. A
+/// failed read changes nothing: it never closes a row (R3.11). Instructions
+/// go out from the carry follower, outside every lock.
+async fn look_dependencies(
+    state: &Arc<AppState>,
+    repo: RepoId,
+    now: Timestamp,
+) -> Result<Vec<Change>, AssignError> {
+    let open: Vec<AssignmentRow> = state
+        .db
+        .open_assignments(repo)?
+        .into_iter()
+        .filter(|row| row.kind == KIND_DEPENDENCY)
+        .collect();
+    let Some(missing) = crate::lifecycle::dependents::try_held(state, repo, None).await else {
+        return Ok(Vec::new());
+    };
+    blocking(state, move |state| {
+        dependencies(state, repo, &open, &missing, now)
+    })
+    .await
+}
+
+/// The `dependency` assignments a look opens, changes and closes (R3.11):
+/// one open per proposal whose stack holds a change that left review
+/// (`held`), owned as a tree conflict's would be, reopened within
+/// [`REOPEN_WINDOW`] like one. Blocking.
+fn dependencies(
+    state: &AppState,
+    repo: RepoId,
+    open: &[AssignmentRow],
+    read: &crate::lifecycle::dependents::Held,
+    now: Timestamp,
+) -> Result<Vec<Change>, AssignError> {
+    let daemon = Caller::daemon();
+    let mut changes = Vec::new();
+    let held = &read.held;
+    for (change, (missing, _)) in held {
+        let conflict_id = crate::lifecycle::dependents::conflict_id(change, missing);
+        let commit = missing_commit(state, repo, change);
+        match open.iter().find(|row| &row.change_id == change) {
+            Some(row) if row.conflict_id == conflict_id => {}
+            Some(row) => {
+                let mut next = row.clone();
+                next.conflict_id = conflict_id;
+                next.commit_id = commit;
+                next.conflict_changed_at = now;
+                next.events = row.events.saturating_add(1);
+                next.updated_at = now;
+                changes.push((
+                    next.clone(),
+                    event_of(Some(row), &next, Reason::Changed, None, &daemon, now),
+                ));
+            }
+            None => {
+                let owner = default_owner(state, repo, change)?;
+                let (next_state, reason) = match &owner {
+                    Some(_) => (State::Assigned, Reason::Default),
+                    None => (State::Unowned, Reason::NoOwner),
+                };
+                // The same missing dependency back within the window (a
+                // withdraw, propose, withdraw loop) reopens its row (S-249).
+                if let Some(closed) = state.db.reopenable_assignment(
+                    repo,
+                    change,
+                    KIND_DEPENDENCY,
+                    &conflict_id,
+                    ago(now, REOPEN_WINDOW),
+                )? {
+                    let mut next =
+                        moved(&closed, next_state, reason, owner.unwrap_or_default(), now);
+                    next.commit_id = commit;
+                    next.closed_at = None;
+                    next.closed_commit_id = None;
+                    next.resolved_session_id = None;
+                    let event =
+                        event_of(Some(&closed), &next, Reason::Reopened, None, &daemon, now);
+                    changes.push((next, event));
+                    continue;
+                }
+                let row = AssignmentRow {
+                    repo_id: repo,
+                    id: crate::identity::new_id("asg_"),
+                    change_id: change.clone(),
+                    kind: KIND_DEPENDENCY.to_owned(),
+                    commit_id: commit,
+                    conflict_id: conflict_id.clone(),
+                    first_conflict_id: conflict_id,
+                    introduced: 0,
+                    files_total: 0,
+                    state: next_state.as_str().to_owned(),
+                    reason: reason.as_str().to_owned(),
+                    owner: owner.unwrap_or_default(),
+                    priority: 0,
+                    queued_at: None,
+                    claims: 0,
+                    events: 1,
+                    opened_at: now,
+                    updated_at: now,
+                    conflict_changed_at: now,
+                    closed_at: None,
+                    closed_commit_id: None,
+                    resolved_session_id: None,
+                    tier: TierColumns::default(),
+                    attempts: u32::from(next_state == State::Assigned),
+                    granted: 0,
+                    go_ahead_identity_id: None,
+                    go_ahead_at: None,
+                    approval: false,
+                };
+                let event = event_of(None, &row, reason, None, &daemon, now);
+                changes.push((row, event));
+            }
+        }
+    }
+    // A proposal whose stack could not be read is left as it is.
+    for row in open
+        .iter()
+        .filter(|row| !held.contains_key(&row.change_id) && !read.unread.contains(&row.change_id))
+    {
+        let lifecycle = state.db.lifecycle_row(repo, &row.change_id)?;
+        let reason = match lifecycle.as_ref().map(|row| row.state.as_str()) {
+            Some("proposed" | "queued") => Reason::Resolved,
+            Some("landed") => Reason::Immutable,
+            _ => Reason::Withdrawn,
+        };
+        let mut next = moved(row, State::Closed, reason, row.owner.clone(), now);
+        next.closed_at = Some(now);
+        next.closed_commit_id = lifecycle.map(|row| row.commit_id);
+        changes.push((
+            next.clone(),
+            event_of(Some(row), &next, reason, None, &daemon, now),
+        ));
+    }
+    Ok(changes)
+}
+
+/// The commit `change`'s proposal recorded, which a `dependency`
+/// assignment's row names.
+fn missing_commit(state: &AppState, repo: RepoId, change: &str) -> String {
+    state
+        .db
+        .lifecycle_row(repo, change)
+        .ok()
+        .flatten()
+        .map(|row| row.commit_id)
+        .unwrap_or_default()
 }
 
 /// The rows of `rows` whose change the scan did not find conflicted, closed

@@ -515,6 +515,7 @@ impl Daemon {
         state.executor.start(state.shutdown.clone());
         // Landings seen on trunk() (R3.09).
         crate::lifecycle::observe::start(&state);
+        crate::lifecycle::carry::start(&state);
         // Queued landings resume (R3.13).
         crate::landing::start(&state);
         // Open proposals are judged again, and land when they may (R3.45).

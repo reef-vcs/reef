@@ -102,8 +102,8 @@ pub use lifecycle::{
 /// `0021_landing_stacks` (R3.10), `0023_automatic_landing` (R3.45;
 /// `0022` is #262's), `0025_help_requests` (R3.32) and
 /// `0026_resolution_tiers` (R3.28, numbered after R3.32's, which merged
-/// first; `0024` is unused) and `0028_passkeys` (R3.43; `0027` is
-/// R3.11's).
+/// first; `0024` is unused), `0027_dependent_lifecycle` (R3.11) and
+/// `0028_passkeys` (R3.43).
 /// They are independent of each other, so a database may have a later one
 /// without an earlier one; see [`migrate`].
 const MIGRATIONS: &[(&str, &str)] = &[
@@ -187,6 +187,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0026_resolution_tiers",
         include_str!("migrations/0026_resolution_tiers.sql"),
+    ),
+    (
+        "0027_dependent_lifecycle",
+        include_str!("migrations/0027_dependent_lifecycle.sql"),
     ),
     (
         "0028_passkeys",
@@ -971,6 +975,7 @@ mod tests {
                 "0023_automatic_landing",
                 "0025_help_requests",
                 "0026_resolution_tiers",
+                "0027_dependent_lifecycle",
                 "0028_passkeys"
             ]
         );
@@ -1025,6 +1030,7 @@ mod tests {
                 "0023_automatic_landing",
                 "0025_help_requests",
                 "0026_resolution_tiers",
+                "0027_dependent_lifecycle",
                 "0028_passkeys"
             ]
         );
@@ -1483,7 +1489,7 @@ mod tests {
         assert_eq!(attempts, [("asg_1".to_owned(), 3), ("asg_2".to_owned(), 1)]);
     }
 
-    // R3.43 test 12: a database migrated up to `0026_resolution_tiers`
+    // R3.43 test 12: a database migrated up to `0027_dependent_lifecycle`
     // gains `0028_passkeys`: an empty `passkeys` table, and the new columns
     // of `session_keys` and `evidence` unset on the rows it had.
     #[test]
@@ -1495,7 +1501,7 @@ mod tests {
             .iter()
             .position(|(name, _)| *name == "0028_passkeys")
             .unwrap();
-        assert_eq!(MIGRATIONS[before - 1].0, "0026_resolution_tiers");
+        assert_eq!(MIGRATIONS[before - 1].0, "0027_dependent_lifecycle");
         for (index, (name, sql)) in MIGRATIONS[..before].iter().enumerate() {
             conn.execute_batch(sql).unwrap();
             conn.execute(

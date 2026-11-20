@@ -2403,10 +2403,12 @@ impl Client {
             page_token: String::new(),
             ..request
         };
-        let mut whole = self.get_conflict_page(request.clone()).await?;
+        // Boxed: a page holds a whole `Conflict`, and a caller's future
+        // would hold two.
+        let mut whole = Box::pin(self.get_conflict_page(request.clone())).await?;
         while !whole.next_page_token.is_empty() {
             request.page_token = std::mem::take(&mut whole.next_page_token);
-            let next = self.get_conflict_page(request.clone()).await?;
+            let next = Box::pin(self.get_conflict_page(request.clone())).await?;
             if let (Some(conflict), Some(more)) = (whole.conflict.as_mut(), next.conflict) {
                 conflict.files.extend(more.files);
             }
@@ -2758,8 +2760,9 @@ impl Client {
             .await
     }
 
-    /// `IdentityService.ResetPasskeys` (R3.43): every passkey of an identity
-    /// removed, and the keys they certified revoked.
+    /// `IdentityService.ResetPasskeys` (R3.43): every live passkey of an
+    /// identity removed, and the unexpired keys any of its passkeys
+    /// certified, removed ones included, revoked.
     pub async fn reset_passkeys(
         &self,
         request: v1::ResetPasskeysRequest,

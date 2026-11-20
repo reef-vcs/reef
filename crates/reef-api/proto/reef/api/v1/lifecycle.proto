@@ -75,6 +75,10 @@ enum ChangeStep {
   // once the session took its answer, `Workspace.help_request_id` names it
   // and asking again is no use: wait for a person to allow or take it.
   CHANGE_STEP_ASK = 11;
+  // A change below it in its stack was declined or withdrawn at its current
+  // commit (R3.11): move this change off it (`reef rebase <change above it>
+  // --source --onto <its parent>`), or withdraw. Ranks with RESOLVE.
+  CHANGE_STEP_DEPENDENCY = 12;
 }
 
 // Why a transition was recorded.
@@ -90,6 +94,30 @@ enum TransitionCause {
   // The landing service queued it, returned it to PROPOSED, or landed it
   // (R3.13).
   TRANSITION_CAUSE_LANDING = 4;
+  // The daemon carried a proposal across a rewrite of a change below it
+  // (R3.11, ADR 0084): its own diff is the one proposed, on new commits of
+  // the same parent changes. `ChangeTransition.dependency` names the change.
+  TRANSITION_CAUSE_DEPENDENCY = 5;
+}
+
+// What happened to the change below a carried proposal (R3.11).
+enum DependencyEvent {
+  // Not set.
+  DEPENDENCY_EVENT_UNSPECIFIED = 0;
+  // It was rewritten while not landed: amended, described, rebased.
+  DEPENDENCY_EVENT_AMENDED = 1;
+  // A landing rewrote it.
+  DEPENDENCY_EVENT_LANDED = 2;
+  // It was superseded, and the proposal moved onto its successor.
+  DEPENDENCY_EVENT_SUPERSEDED = 3;
+}
+
+// The change below a carried proposal, and what happened to it (R3.11).
+message TransitionDependency {
+  // The change, in hex: the moved parent, or for SUPERSEDED the successor.
+  string change_id = 1;
+  // What happened to it.
+  DependencyEvent event = 2;
 }
 
 // Who performed a transition, as recorded. Over the socket a caller
@@ -154,6 +182,8 @@ message ChangeTransition {
   string session_id = 19;
   // The remote token the call came through (R2.08).
   RemoteCaller remote = 20;
+  // For cause DEPENDENCY, the change below that moved (R3.11).
+  TransitionDependency dependency = 21;
 }
 
 // A change's lifecycle as of a read.
@@ -179,4 +209,25 @@ message ChangeLifecycle {
   // Whether the change has a visible commit. False for a recorded change
   // whose commits were all abandoned outside Reef.
   bool visible = 9;
+}
+
+// The change a proposal depends on that left review: declined or withdrawn
+// at its current commit (R3.11, ADR 0084), and how the proposal's owner
+// moves off it. A MISSING_DEPENDENCY conflict and a workspace with step
+// DEPENDENCY carry it.
+message MissingDependency {
+  // The change, in hex: the lowest of the proposal's stack that left
+  // review.
+  string change_id = 1;
+  // Its state: DECLINED or WITHDRAWN.
+  LifecycleState state = 2;
+  // The transition that took it out of review: who, when and why (the
+  // reason is the performer's text, untrusted).
+  ChangeTransition transition = 3;
+  // The change above it to move, with the changes above that: `reef rebase
+  // <move_change_id> --source --onto <move_onto>`.
+  string move_change_id = 4;
+  // Where to: the change below the missing one, in hex, or the
+  // destination's bookmark when it sits on the destination.
+  string move_onto = 5;
 }

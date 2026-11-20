@@ -69,6 +69,11 @@ pub fn limit(row: &AssignmentRow) -> u32 {
 
 /// Why `row` cannot start a new attempt, if it cannot.
 pub fn blocked(row: &AssignmentRow) -> Option<Block> {
+    // A missing dependency has no files and no sides: no tier, no cap
+    // (R3.11).
+    if row.kind == super::KIND_DEPENDENCY {
+        return None;
+    }
     if tier_of(row) == Tier::Ask && row.go_ahead_at.is_none() {
         Some(Block::Ask)
     } else if row.attempts >= limit(row) {

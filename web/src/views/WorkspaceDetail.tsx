@@ -55,6 +55,7 @@ const STEP_WORDS: Record<ChangeStep, string> = {
   [ChangeStep.DONE]: "none: the change has landed, was superseded, or is on trunk",
   [ChangeStep.AWAIT_HELP]: "wait: its agent asked a person for help (reef comment answer)",
   [ChangeStep.ASK]: "ask a person: its conflict waits for their go-ahead",
+  [ChangeStep.DEPENDENCY]: "move it off a change below that was declined or withdrawn",
 };
 
 const PATHS_SHOWN = 20;

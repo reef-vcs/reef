@@ -88,6 +88,9 @@ enum ConflictAssignmentReason {
   CONFLICT_ASSIGNMENT_REASON_ATTEMPTS = 17;
   // A person gave the go-ahead, or granted attempts (R3.28).
   CONFLICT_ASSIGNMENT_REASON_ALLOWED = 18;
+  // Closed: a MISSING_DEPENDENCY conflict's proposal left review itself
+  // (R3.11).
+  CONFLICT_ASSIGNMENT_REASON_WITHDRAWN = 19;
 }
 
 // How a conflict's resolution may proceed (R3.28): the `[conflicts]` table

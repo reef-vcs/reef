@@ -668,6 +668,7 @@ impl WorkspaceService for WorkspacesService {
                 if let Some(reason) = stepped.conflict_block_reason {
                     workspace.set_conflict_block_reason(reason);
                 }
+                workspace.missing_dependency = stepped.missing_dependency.map(Box::new);
             }
         }
         Ok(Response::new(GetWorkspaceResponse {

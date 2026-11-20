@@ -33,7 +33,7 @@ use futures::FutureExt as _;
 use reef_lib::error::{Classify, ErrorChain, ErrorKind};
 use reef_lib::jj::land;
 use reef_lib::jj::lifecycle::{
-    self as jj_lifecycle, LifecycleState, TransitionCause, TransitionRecord,
+    self as jj_lifecycle, DependencyEvent, LifecycleState, TransitionCause, TransitionRecord,
 };
 use reef_lib::jj::log::{ChangeInfo, Describer};
 use reef_lib::jj::oplog::{self, OpMeta, RemoteToken};
@@ -52,6 +52,8 @@ use crate::repo::RepoThreadError;
 use crate::workspace::ManagerError;
 use crate::workspace::{Write, WriteRequest};
 
+pub mod carry;
+pub(crate) mod dependents;
 pub mod messages;
 pub mod observe;
 
@@ -66,9 +68,57 @@ const PENDING_SLACK: Duration = Duration::from_mins(5);
 #[derive(Debug, Default)]
 pub struct Lifecycle {
     locks: Mutex<HashMap<RepoId, Arc<tokio::sync::Mutex<()>>>>,
+    /// Carry checks that did not carry, each made once (R3.11).
+    pub(crate) verdicts: carry::Verdicts,
+    /// Each repository's last read of the proposals above a declined or
+    /// withdrawn change, by what it read (R3.11).
+    pub(crate) above: dependents::AboveCache,
+    /// Test hook: while [`Lifecycle::hold_supersede_carries`]' guard holds
+    /// it for writing, a supersede that moved dependents waits before it
+    /// carries them.
+    #[cfg(any(test, feature = "testing"))]
+    carry_hold: Arc<tokio::sync::RwLock<()>>,
+    /// Test hook: supersedes waiting at the hold now.
+    #[cfg(any(test, feature = "testing"))]
+    held_carries: std::sync::atomic::AtomicUsize,
 }
 
+/// Holds every supersede before it carries its dependents; see
+/// [`Lifecycle::hold_supersede_carries`].
+#[cfg(any(test, feature = "testing"))]
+#[must_use = "dropping the guard lets the held supersedes carry at once"]
+#[derive(Debug)]
+pub struct CarryHold(
+    #[allow(dead_code, reason = "held for its drop")] tokio::sync::OwnedRwLockWriteGuard<()>,
+);
+
 impl Lifecycle {
+    /// Test hook: until the guard drops, every supersede that moved
+    /// dependents waits after its operation and before it carries them.
+    #[cfg(any(test, feature = "testing"))]
+    pub async fn hold_supersede_carries(&self) -> CarryHold {
+        CarryHold(Arc::clone(&self.carry_hold).write_owned().await)
+    }
+
+    /// Test hook: how many supersedes wait at
+    /// [`Lifecycle::hold_supersede_carries`]' hold now.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn held_supersede_carries(&self) -> usize {
+        self.held_carries.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Where a supersede waits while `Lifecycle::hold_supersede_carries` (a
+    /// test hook) holds it.
+    async fn supersede_carry_hold_point(&self) {
+        #[cfg(any(test, feature = "testing"))]
+        {
+            use std::sync::atomic::Ordering;
+            self.held_carries.fetch_add(1, Ordering::SeqCst);
+            drop(self.carry_hold.read().await);
+            self.held_carries.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
     /// `repo`'s lifecycle lock: held from a transition's state check to its
     /// commit, by every transition and by R3.13's landing. A read waiting
     /// for a pending transition takes it alone and drops it at once
@@ -238,6 +288,22 @@ pub enum LifecycleError {
     /// A write that records a transition returned no operation.
     #[error("the transition's operation was not written")]
     NotWritten,
+    /// A stack proposal with a member below the revision declined or
+    /// withdrawn at its current commit (R3.11).
+    #[error("change {change} below it was {state} at its current commit")]
+    MemberLeftReview {
+        /// The member.
+        change: String,
+        /// `declined` or `withdrawn`.
+        state: LifecycleState,
+        /// The transition that took it out of review.
+        transition: String,
+        /// The member above it to move off it, and the change to move onto.
+        moves: Option<(String, String)>,
+    },
+    /// A read on the repository's read pool failed (R3.11's carries).
+    #[error("read the repository: {0}")]
+    Read(String),
 }
 
 impl From<DbError> for LifecycleError {
@@ -299,6 +365,7 @@ impl Classify for LifecycleError {
             | Self::StackTooLarge { .. }
             | Self::Conflicted { .. }
             | Self::Divergent { .. }
+            | Self::MemberLeftReview { .. }
             | Self::InReview { .. } => ErrorKind::Conflict,
             Self::RemoteNotOwned { .. } | Self::RemoteHuman => ErrorKind::PermissionDenied,
             Self::Revision(error) => error.kind(),
@@ -308,7 +375,7 @@ impl Classify for LifecycleError {
             Self::Thread(error) => error.kind(),
             Self::Record(error) => error.kind(),
             Self::Db(error) => error.kind(),
-            Self::NotWritten => ErrorKind::Internal,
+            Self::NotWritten | Self::Read(_) => ErrorKind::Internal,
         }
     }
 }
@@ -362,6 +429,30 @@ impl Advise for LifecycleError {
             Self::RemoteHuman => Some(Advice::hint(
                 "Decline on the daemon's machine; a remote human can decline once R3.43 verifies them.",
             )),
+            Self::MemberLeftReview {
+                change,
+                state,
+                moves,
+                ..
+            } => {
+                let hint = format!(
+                    "Change {change} below it was {state} at this commit. Move this change off it, revise {change} first, or put it back on purpose with `reef propose {change} --only`."
+                );
+                Some(match moves {
+                    Some((above, onto)) => Advice::run(
+                        hint,
+                        [
+                            "reef",
+                            "rebase",
+                            above.as_str(),
+                            "--source",
+                            "--onto",
+                            onto.as_str(),
+                        ],
+                    ),
+                    None => Advice::hint(hint),
+                })
+            }
             _ => None,
         }
     }
@@ -428,6 +519,19 @@ impl LifecycleError {
                 vec![("change_id", change.clone())],
             ),
             Self::RemoteHuman => (reason::REMOTE_HUMAN_REQUIRED, Vec::new()),
+            Self::MemberLeftReview {
+                change,
+                state,
+                transition,
+                ..
+            } => (
+                reason::MEMBER_LEFT_REVIEW,
+                vec![
+                    ("change_id", change.clone()),
+                    ("state", state.as_str().to_owned()),
+                    ("transition_id", transition.clone()),
+                ],
+            ),
             _ => return None,
         })
     }
@@ -510,6 +614,8 @@ impl Planned {
             superseded_by: row.superseded_by.clone().unwrap_or_default(),
             destination: row.destination.clone().unwrap_or_default(),
             undoes: row.undoes_operation_id.clone().unwrap_or_default(),
+            dependency: row.dependency_change_id.clone().unwrap_or_default(),
+            dependency_event: row.dependency_event.clone().unwrap_or_default(),
         }
     }
 }
@@ -686,12 +792,12 @@ pub(crate) async fn record_daemon_transitions(
 pub(crate) fn commit_written_transition(
     state: &AppState,
     repo: RepoId,
-    row: &TransitionRow,
+    (row, owner): (&TransitionRow, Option<&Owner>),
     op_id: &str,
     recorded_at: Timestamp,
 ) -> Result<Option<TransitionRow>, LifecycleError> {
     let existing = state.db.lifecycle_row(repo, &row.change_id)?;
-    let update = update_for(row, existing.as_ref(), recorded_at, None);
+    let update = update_for(row, existing.as_ref(), recorded_at, owner);
     let committed = state
         .db
         .commit_transition(repo, &row.id, op_id, recorded_at, &update)?;
@@ -752,6 +858,24 @@ pub struct TransitionOutcome {
     /// The change, at the head the checks read; `None` for a recorded
     /// change with no visible commit, named by its id.
     pub change: Option<ChangeInfo>,
+    /// For a supersede, the dependents it rebased onto the successor
+    /// (R3.11).
+    pub moved: Vec<MovedDependent>,
+}
+
+/// A dependent a supersede rebased onto the superseding change (R3.11).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MovedDependent {
+    /// The change, in hex.
+    pub change: String,
+    /// Its commit afterwards; empty when it was left.
+    pub commit: String,
+    /// Its proposal was carried.
+    pub carried: bool,
+    /// The rebase left a conflict in it.
+    pub conflicted: bool,
+    /// Why it was left: `ancestor_of_successor`; empty when it moved.
+    pub skipped: String,
 }
 
 /// What a transition's checks found on the repository thread.
@@ -851,9 +975,23 @@ pub async fn transition(
     let state = Arc::clone(state);
     let repo = request.repo;
     let span = tracing::Span::current();
-    tokio::spawn(async move { transition_inner(&state, request).await }.instrument(span))
-        .await
-        .map_err(|_| LifecycleError::Thread(RepoThreadError::Panicked { id: repo }))?
+    tokio::spawn(
+        async move {
+            // A stack proposal reads its members' recorded commits: carry
+            // them across rewrites below first, so a declined member rebased
+            // by one still counts as declined (R3.11, S-245).
+            if request.stack
+                && request.to == LifecycleState::Proposed
+                && let Err(error) = carry::carry(&state, repo, None).await
+            {
+                tracing::warn!(error = %ErrorChain(&error), "cannot carry proposals before a stack proposal");
+            }
+            transition_inner(&state, request).await
+        }
+        .instrument(span),
+    )
+    .await
+    .map_err(|_| LifecycleError::Thread(RepoThreadError::Panicked { id: repo }))?
 }
 
 #[expect(
@@ -862,14 +1000,14 @@ pub async fn transition(
 )]
 #[tracing::instrument(skip_all, fields(repo = %request.repo, to = request.to.as_str()))]
 async fn transition_inner(
-    state: &AppState,
+    state: &Arc<AppState>,
     request: TransitionRequest,
 ) -> Result<TransitionOutcome, LifecycleError> {
     check_request(&request)?;
     let repo = request.repo;
     let handle = state.manager.handle(repo)?;
     let create_lock = state.manager.repo_lock(repo);
-    let _shared = create_lock.read().await;
+    let shared = Arc::new(create_lock.read_owned().await);
     let lifecycle_lock = state.lifecycle.lock(repo);
     let _held = lifecycle_lock.lock().await;
 
@@ -943,6 +1081,19 @@ async fn transition_inner(
     } else {
         vec![facts.clone()]
     };
+    // A member a reviewer declined, or its proposer withdrew, is not put
+    // back by proposing a change above it (R3.11, S-245), even when a
+    // rewrite below it moved it since.
+    let mut still_left = HashMap::new();
+    if request.stack && request.to == LifecycleState::Proposed {
+        for member in members.iter().filter(|member| member.change != change) {
+            if let Some(row) = state.db.lifecycle_row(repo, &member.change)?
+                && let Some(left) = dependents::still_left(state, repo, &row, &member.commit).await
+            {
+                still_left.insert(member.change.clone(), (left, row));
+            }
+        }
+    }
     let mut planned = Vec::with_capacity(members.len());
     for member in &members {
         let is_head = member.change == change;
@@ -951,6 +1102,37 @@ async fn transition_inner(
         } else {
             state.db.lifecycle_row(repo, &member.change)?
         };
+        if let Some((left, row)) = still_left.get(&member.change) {
+            let links: Vec<dependents::Link> = members
+                .iter()
+                .map(|member| dependents::Link {
+                    change: member.change.clone(),
+                    commit: member.commit.clone(),
+                    parents: member.info.as_ref().map_or_else(Vec::new, |info| {
+                        info.parent_commit_ids
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect()
+                    }),
+                })
+                .collect();
+            let at = links
+                .iter()
+                .position(|link| link.change == member.change)
+                .unwrap_or_default();
+            let bookmark = destination
+                .clone()
+                .or_else(|| row.destination.clone())
+                .unwrap_or_default();
+            return Err(LifecycleError::MemberLeftReview {
+                change: member.change.clone(),
+                state: *left,
+                transition: dependents::left_transition(state, repo, row),
+                moves: Some(dependents::move_off(&links, at, &bookmark, |link| {
+                    still_left.contains_key(&link.change)
+                })),
+            });
+        }
         let decided = plan_member(
             state,
             &request,
@@ -968,6 +1150,7 @@ async fn transition_inner(
             transitions: Vec::new(),
             op_id: None,
             change: facts.info,
+            moved: Vec::new(),
         });
     }
     let verb = planned.last().map_or("propose", |plan| {
@@ -988,7 +1171,41 @@ async fn transition_inner(
             .as_ref()
             .map(|record| record.owner.clone())
     });
-    let recorded = record(state, repo, planned, meta).await?;
+    // A supersede moves the superseded change's dependents onto the
+    // superseding change in the same operation (R3.11).
+    let mut moved = Vec::new();
+    let superseding = match (&facts.info, &facts.superseded_by) {
+        (Some(info), Some(successor)) if request.to == LifecycleState::Superseded => {
+            Some((info.change_id.clone(), successor.clone()))
+        }
+        _ => None,
+    };
+    let recorded = match superseding {
+        Some((superseded, successor)) if planned.len() == 1 => {
+            let written = supersede_moving(
+                state,
+                &request,
+                &planned[0],
+                &meta,
+                (&superseded, &successor),
+                Arc::clone(&shared),
+            )
+            .await?;
+            moved = written.1;
+            match written.0 {
+                Some(recorded) => recorded,
+                None => record(state, repo, planned, meta).await?,
+            }
+        }
+        _ => record(state, repo, planned, meta).await?,
+    };
+    let successor = recorded
+        .rows
+        .iter()
+        .find(|row| row.change_id == change)
+        .and_then(|row| row.superseded_by.clone())
+        .unwrap_or_default();
+    carry_moved(state, repo, &successor, &mut moved).await;
     let lifecycle = state.db.lifecycle_row(repo, &change)?;
     tracing::info!(
         change_id = %change,
@@ -1007,7 +1224,45 @@ async fn transition_inner(
         transitions: recorded.rows,
         op_id: Some(recorded.op_id),
         change: facts.info,
+        moved,
     })
+}
+
+/// Carries the dependents a supersede by `successor` moved (`moved`) that
+/// still apply on it, at once (R3.11), each naming the successor, its
+/// children's children too, and marks them carried. The caller holds the
+/// lifecycle lock it superseded under, so the carry follower, which the
+/// supersede's operation wakes, cannot record a carry first: a dependent
+/// `moved` reports as not carried was not carried.
+async fn carry_moved(
+    state: &Arc<AppState>,
+    repo: RepoId,
+    successor: &str,
+    moved: &mut [MovedDependent],
+) {
+    let still_apply: Vec<String> = moved
+        .iter()
+        .filter(|moved| moved.skipped.is_empty() && !moved.conflicted)
+        .map(|moved| moved.change.clone())
+        .collect();
+    if still_apply.is_empty() {
+        return;
+    }
+    state.lifecycle.supersede_carry_hold_point().await;
+    let because = Some((successor, DependencyEvent::Superseded));
+    let only = Some(still_apply.as_slice());
+    match carry::carry_because(state, repo, only, because, carry::Locks::Held).await {
+        Ok(carried) => {
+            for row in carried.rows {
+                if let Some(moved) = moved.iter_mut().find(|moved| moved.change == row.change_id) {
+                    moved.carried = true;
+                }
+            }
+        }
+        Err(error) => {
+            tracing::warn!(error = %ErrorChain(&error), "cannot carry a supersede's dependents now; the carry follower does");
+        }
+    }
 }
 
 /// The transition `request` makes of `member`, whose row is `current`, or
@@ -1132,6 +1387,8 @@ fn plan_member(
             .or(remote_name),
         created_at: Timestamp::now(),
         recorded_at: None,
+        dependency_change_id: None,
+        dependency_event: None,
     }))
 }
 
@@ -1319,21 +1576,32 @@ pub struct UndoOutcome {
 
 /// Reverts the transitions the operation `op_id` recorded, each still its
 /// change's latest, with inverse transitions in one operation of kind
-/// `undo`; see `UndoOperation`. `remote` is the caller's token id through
-/// the remote listener.
+/// `undo`; see `UndoOperation`. With `view`, the operation also changed the
+/// view (a supersede that moved its dependents, R3.11), and the same
+/// operation reverts that too, its workspaces following. `remote` is the
+/// caller's token id through the remote listener.
 pub async fn undo(
     state: &Arc<AppState>,
     repo: RepoId,
     workspace: Option<WorkspaceRecord>,
     agent: Option<String>,
     remote: Option<(String, String)>,
-    op_id: OperationIdHex,
+    (op_id, view): (OperationIdHex, bool),
 ) -> Result<UndoOutcome, LifecycleError> {
     let state = Arc::clone(state);
     let span = tracing::Span::current();
     tokio::spawn(
-        async move { undo_inner(&state, repo, workspace.as_ref(), agent, remote, &op_id).await }
-            .instrument(span),
+        async move {
+            undo_inner(
+                &state,
+                repo,
+                workspace.as_ref(),
+                (agent, remote),
+                (&op_id, view),
+            )
+            .await
+        }
+        .instrument(span),
     )
     .await
     .map_err(|_| LifecycleError::Thread(RepoThreadError::Panicked { id: repo }))?
@@ -1348,12 +1616,11 @@ async fn undo_inner(
     state: &AppState,
     repo: RepoId,
     workspace: Option<&WorkspaceRecord>,
-    agent: Option<String>,
-    remote: Option<(String, String)>,
-    op_id: &OperationIdHex,
+    (agent, remote): (Option<String>, Option<(String, String)>),
+    (op_id, view): (&OperationIdHex, bool),
 ) -> Result<UndoOutcome, LifecycleError> {
     let create_lock = state.manager.repo_lock(repo);
-    let _shared = create_lock.read().await;
+    let shared = Arc::new(create_lock.read_owned().await);
     let lifecycle_lock = state.lifecycle.lock(repo);
     let _held = lifecycle_lock.lock().await;
     let refuse = |why| {
@@ -1474,12 +1741,30 @@ async fn undo_inner(
                     .or_else(|| remote_name.clone()),
                 created_at: Timestamp::now(),
                 recorded_at: None,
+                dependency_change_id: None,
+                dependency_event: None,
             },
+        });
+    }
+    let agent = agent.or_else(|| workspace.map(|record| record.owner.clone()));
+    if view {
+        let request = WriteRequest {
+            repo,
+            workspace: workspace.map(|record| record.id),
+            agent,
+            write: Write::Undo {
+                operation: op_id.to_string(),
+                transitions: planned.iter().map(Planned::record).collect(),
+            },
+        };
+        let (recorded, _) = record_in_write(state, repo, &planned, request, shared).await?;
+        return Ok(UndoOutcome {
+            op_id: recorded.op_id,
         });
     }
     let mut meta = OpMeta::new(OpKind::Undo, format!("{}{op_id}", oplog::REVERT_PREFIX));
     meta.workspace = workspace.map(|record| record.id.as_hex());
-    meta.agent = agent.or_else(|| workspace.map(|record| record.owner.clone()));
+    meta.agent = agent;
     let recorded = record(state, repo, planned, meta).await?;
     Ok(UndoOutcome {
         op_id: recorded.op_id,
@@ -1563,6 +1848,8 @@ pub(crate) async fn record_observed(
         remote_token_name: None,
         created_at: Timestamp::now(),
         recorded_at: None,
+        dependency_change_id: None,
+        dependency_event: None,
     };
     let description = oplog::transition_description("land", change);
     if !workspaces.is_empty() {
@@ -1597,54 +1884,212 @@ async fn record_with_new_changes(
     (description, workspaces): (String, Vec<String>),
     shared: Arc<tokio::sync::OwnedRwLockReadGuard<()>>,
 ) -> Result<Recorded, LifecycleError> {
-    state.db.insert_pending_transition(&planned.row)?;
-    let written = state
-        .manager
-        .rewrite_held(
-            WriteRequest {
-                repo,
-                workspace: None,
-                agent: None,
-                write: Write::StartOnLanded {
-                    workspaces,
-                    transitions: vec![planned.record()],
-                    description,
-                },
-            },
-            shared,
-        )
-        .await;
-    let op_id = match written.map(|written| written.op_id.and_then(|id| id.parse().ok())) {
-        Ok(Some(op_id)) => op_id,
-        Ok(None) => {
-            // A write with a transition always writes an operation.
-            drop_pending_row(state, repo, &planned.row.id);
-            return Err(LifecycleError::NotWritten);
+    let write = Write::StartOnLanded {
+        workspaces,
+        transitions: vec![planned.record()],
+        description,
+    };
+    let request = WriteRequest {
+        repo,
+        workspace: None,
+        agent: None,
+        write,
+    };
+    record_in_write(state, repo, std::slice::from_ref(&planned), request, shared)
+        .await
+        .map(|(recorded, _)| recorded)
+}
+
+/// Records `planned` in the operation `request`'s write makes, which
+/// carries their transitions: their pending rows, the write through
+/// `Manager::rewrite_held`, then the rows committed. The caller holds the
+/// lifecycle lock; `shared` is the create lock, held shared.
+async fn record_in_write(
+    state: &AppState,
+    repo: RepoId,
+    planned: &[Planned],
+    request: WriteRequest,
+    shared: Arc<tokio::sync::OwnedRwLockReadGuard<()>>,
+) -> Result<(Recorded, crate::workspace::Rewritten), LifecycleError> {
+    for plan in planned {
+        state.db.insert_pending_transition(&plan.row)?;
+    }
+    let drop_pending = || {
+        for plan in planned {
+            drop_pending_row(state, repo, &plan.row.id);
         }
+    };
+    let written = state.manager.rewrite_held(request, shared).await;
+    let written = match written {
+        Ok(written) => written,
         Err(error) => {
-            // Refused before anything was written: the row goes now, so a
-            // retry does not leave another. Otherwise the operation may
-            // exist: the next start finds it, or drops the row.
-            let before_writing = match &error {
-                ManagerError::Rewrite(error) => !matches!(error, RewriteError::Commit(_)),
-                ManagerError::RewriteSnapshot { .. }
-                | ManagerError::Revision(_)
-                | ManagerError::NotLoaded(_)
-                | ManagerError::RepoNotOpen(_) => true,
-                _ => false,
-            };
-            if before_writing {
-                drop_pending_row(state, repo, &planned.row.id);
+            // Refused before anything was written: the rows go now, so a
+            // retry does not leave others. Otherwise the operation may
+            // exist: the next start finds it, or drops the rows.
+            if before_writing(&error) {
+                drop_pending();
             }
             return Err(error.into());
         }
     };
-    let op_id: OperationIdHex = op_id;
+    let Some(op_id) = written
+        .op_id
+        .as_deref()
+        .and_then(|id| id.parse::<OperationIdHex>().ok())
+    else {
+        // A write with a transition always writes an operation.
+        drop_pending();
+        return Err(LifecycleError::NotWritten);
+    };
     let recorded_at = crate::landing::operation_end(state, repo, op_id.as_str()).await;
-    let rows = commit_written_transition(state, repo, &planned.row, op_id.as_str(), recorded_at)?
-        .into_iter()
-        .collect();
-    Ok(Recorded { op_id, rows })
+    let mut rows = Vec::with_capacity(planned.len());
+    for plan in planned {
+        rows.extend(commit_written_transition(
+            state,
+            repo,
+            (&plan.row, plan.owner.as_ref()),
+            op_id.as_str(),
+            recorded_at,
+        )?);
+    }
+    Ok((Recorded { op_id, rows }, written))
+}
+
+/// A supersede of `superseded` by `successor` that moves its dependents
+/// (the mutable children of its visible commit, with their descendants)
+/// onto the successor's visible commit, with the transition, in one
+/// operation of kind `transition` (R3.11, ADR 0084). Their workspaces
+/// follow as for any rebase; dependents whose own diff still applies are
+/// carried right after. `None` when it has none to move.
+///
+/// Both changes are named by change id, here and in the write, and read
+/// in the job that uses them: a snapshot of either one's workspace may
+/// rewrite its commit at any point, and the dependents are the children of
+/// the commit the change has then.
+async fn supersede_moving(
+    state: &AppState,
+    request: &TransitionRequest,
+    planned: &Planned,
+    meta: &OpMeta,
+    (superseded, successor): (&ChangeIdHex, &ChangeIdHex),
+    shared: Arc<tokio::sync::OwnedRwLockReadGuard<()>>,
+) -> Result<(Option<Recorded>, Vec<MovedDependent>), LifecycleError> {
+    let repo = request.repo;
+    let handle = state.manager.handle(repo)?;
+    let (from, to) = (superseded.clone(), successor.clone());
+    let read = handle
+        .call_async(move |head| {
+            async move {
+                let repo = head.repo.readonly();
+                // A successor with no visible commit leaves no dependent
+                // where it is by descending from it: the rebase onto it
+                // is refused, and reports them all.
+                let onto = reef_lib::jj::assignment::visible_commit(&repo, &to)
+                    .await
+                    .map_err(|error| LifecycleError::Read(ErrorChain(&error).to_string()))?
+                    .map(|visible| visible.commit);
+                reef_lib::jj::rebase::children_of(&repo, &from, onto.as_ref())
+                    .await
+                    .map_err(|error| LifecycleError::Read(ErrorChain(&error).to_string()))
+            }
+            .boxed_local()
+        })
+        .await??;
+    let (moves, stays) = read;
+    let skipped = |changes: &[ChangeIdHex], why: &str| -> Vec<MovedDependent> {
+        changes
+            .iter()
+            .map(|change| MovedDependent {
+                change: change.to_string(),
+                commit: String::new(),
+                carried: false,
+                conflicted: false,
+                skipped: why.to_owned(),
+            })
+            .collect()
+    };
+    let mut dependents = skipped(&stays, "ancestor_of_successor");
+    if moves.is_empty() {
+        return Ok((None, dependents));
+    }
+    let description = format!(
+        "{} (moved {} {} onto change {})",
+        meta.description,
+        moves.len(),
+        if moves.len() == 1 {
+            "dependent"
+        } else {
+            "dependents"
+        },
+        successor
+    );
+    let write = Write::Rebase {
+        // Both by change, resolved when the write plans: either one's
+        // workspace may snapshot in between.
+        revision: superseded.reverse_hex(),
+        onto: successor.reverse_hex(),
+        mode: reef_lib::jj::rebase::RebaseMode::Children,
+        expected: String::new(),
+        remote: None,
+        transitions: vec![planned.record()],
+        description,
+    };
+    let write_request = WriteRequest {
+        repo,
+        workspace: request.workspace.as_ref().map(|record| record.id),
+        agent: meta.agent.clone(),
+        write,
+    };
+    let (recorded, written) = match record_in_write(
+        state,
+        repo,
+        std::slice::from_ref(planned),
+        write_request,
+        shared,
+    )
+    .await
+    {
+        Ok(written) => written,
+        // The rebase was refused before anything was written (a
+        // divergent change among them, too many to move): the supersede
+        // is recorded alone, and the dependents are reported where they
+        // are.
+        Err(LifecycleError::Manager(error)) if before_writing(&error) => {
+            tracing::warn!(error = %ErrorChain(&error), "a supersede could not move its dependents; recording it alone");
+            dependents.extend(skipped(&moves, "rebase_refused"));
+            return Ok((None, dependents));
+        }
+        Err(error) => return Err(error),
+    };
+    if let Some(outcome) = &written.rebase {
+        for change in &outcome.rebased.changes {
+            dependents.push(MovedDependent {
+                change: change.change_id.to_string(),
+                commit: change.new_commit_id.to_string(),
+                carried: false,
+                conflicted: change.conflicted,
+                skipped: String::new(),
+            });
+        }
+    }
+    Ok((Some(recorded), dependents))
+}
+
+/// Whether `error` refused a write before it wrote anything.
+fn before_writing(error: &ManagerError) -> bool {
+    match error {
+        ManagerError::Rewrite(error) => !matches!(error, RewriteError::Commit(_)),
+        ManagerError::Rebase(error) => !matches!(
+            error,
+            reef_lib::jj::rebase::RebaseError::Commit(_)
+                | reef_lib::jj::rebase::RebaseError::CheckOut(_)
+        ),
+        ManagerError::RewriteSnapshot { .. }
+        | ManagerError::Revision(_)
+        | ManagerError::NotLoaded(_)
+        | ManagerError::RepoNotOpen(_) => true,
+        _ => false,
+    }
 }
 
 fn drop_pending_row(state: &AppState, repo: RepoId, id: &str) {

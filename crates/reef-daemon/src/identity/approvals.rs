@@ -248,6 +248,14 @@ pub(crate) struct Approvals {
     /// How long a new approval waits, in milliseconds:
     /// [`APPROVAL_LIFETIME`], shortened by tests of the expiry.
     waits_ms: AtomicU64,
+    /// Test hook: while [`Identities::hold_approves`]' guard holds it for
+    /// writing, every approve waits after it used the passkey and before it
+    /// certifies the key.
+    #[cfg(any(test, feature = "testing"))]
+    hold: Arc<tokio::sync::RwLock<()>>,
+    /// Test hook: approves waiting at the hold now.
+    #[cfg(any(test, feature = "testing"))]
+    held_approves: std::sync::atomic::AtomicUsize,
 }
 
 impl Default for Approvals {
@@ -257,6 +265,10 @@ impl Default for Approvals {
             waits_ms: AtomicU64::new(
                 u64::try_from(APPROVAL_LIFETIME.as_millis()).unwrap_or(u64::MAX),
             ),
+            #[cfg(any(test, feature = "testing"))]
+            hold: Arc::new(tokio::sync::RwLock::new(())),
+            #[cfg(any(test, feature = "testing"))]
+            held_approves: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 }
@@ -265,7 +277,27 @@ impl Approvals {
     fn lock(&self) -> MutexGuard<'_, HashMap<String, Held>> {
         self.held.lock().unwrap_or_else(PoisonError::into_inner)
     }
+
+    /// Where an approve waits while `Identities::hold_approves` (a test
+    /// hook) holds it.
+    async fn hold_point(&self) {
+        #[cfg(any(test, feature = "testing"))]
+        {
+            self.held_approves.fetch_add(1, Ordering::SeqCst);
+            drop(self.hold.read().await);
+            self.held_approves.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
 }
+
+/// Holds every approve between its passkey's use and its key's
+/// certification; see [`Identities::hold_approves`].
+#[cfg(any(test, feature = "testing"))]
+#[must_use = "dropping the guard lets the held approves go on at once"]
+#[derive(Debug)]
+pub struct ApproveHold(
+    #[allow(dead_code, reason = "held for its drop")] tokio::sync::OwnedRwLockWriteGuard<()>,
+);
 
 /// How a resolution resolves.
 #[derive(Debug)]
@@ -285,6 +317,20 @@ impl Identities {
             u64::try_from(wait.as_millis()).unwrap_or(u64::MAX),
             Ordering::Relaxed,
         );
+    }
+
+    /// Test hook: until the guard drops, every approve waits after it
+    /// recorded its passkey's use and before it certifies the key.
+    #[cfg(any(test, feature = "testing"))]
+    pub async fn hold_approves(&self) -> ApproveHold {
+        ApproveHold(Arc::clone(&self.approvals.hold).write_owned().await)
+    }
+
+    /// Test hook: how many approves wait at [`Identities::hold_approves`]'
+    /// hold now.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn held_approves(&self) -> usize {
+        self.approvals.held_approves.load(Ordering::SeqCst)
     }
 
     /// `RequestApproval` through `channel`.
@@ -554,6 +600,7 @@ impl Identities {
         }
         let (passkey, key, bytes) =
             self.verify_assertion(&identity.id, assertion, &approval.challenge(), origin)?;
+        self.approvals.hold_point().await;
         let evidence = PresenceEvidence {
             passkey: key,
             credential_id: passkey.credential_id.clone(),

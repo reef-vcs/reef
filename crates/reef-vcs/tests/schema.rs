@@ -525,11 +525,13 @@ async fn outputs_match_their_schemas() {
     let bottom_dir = PathBuf::from(text(&bottom["path"]));
     std::fs::write(bottom_dir.join("bottom.txt"), "bottom\n").unwrap();
     // Proposed alone and withdrawn: proposing takes the workspace's
-    // snapshot first, and the stack's proposal below proposes it again.
+    // snapshot first. A stack's proposal above does not put a withdrawn
+    // change back (R3.11); proposing it alone does.
     script.json(&bottom_dir, &["propose", "--only"]).await;
     script
         .json(&bottom_dir, &["proposal", "withdraw", "--stack"])
         .await;
+    script.json(&bottom_dir, &["propose", "--only"]).await;
     let upper = script
         .json(
             &root,

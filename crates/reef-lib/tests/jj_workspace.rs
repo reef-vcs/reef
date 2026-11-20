@@ -25,15 +25,16 @@ use jj_lib::settings::UserSettings;
 use reef_lib::error::{Classify as _, ErrorKind};
 use reef_lib::jj::diff::conflicted_paths;
 use reef_lib::jj::files::{self, Edit, EditAction};
-use reef_lib::jj::revset::RevisionError;
+use reef_lib::jj::rebase::{self, RebaseMode, RebaseRequest};
+use reef_lib::jj::revset::{RevisionError, RevsetScope};
 use reef_lib::jj::settings::user_settings_with_max_new_file_size;
 use reef_lib::jj::settings::{Identity, user_settings};
 use reef_lib::jj::workspace::CommitLookupError;
 use reef_lib::jj::{
-    Carry, ChangeIdHex, CommitIdHex, CreateWorkspaceError, ForgetWorkspaceError, IgnoreSources,
-    OpenError, Repo, StartPoint, commit_snapshot,
+    ChangeIdHex, CommitIdHex, CreateWorkspaceError, ForgetWorkspaceError, IgnoreSources, OpenError,
+    Repo, StartPoint, commit_snapshot,
 };
-use reef_lib::jj::{OpKind, OpMeta};
+use reef_lib::jj::{OpKind, OpMeta, Unfinished};
 use tempfile::TempDir;
 
 fn settings() -> UserSettings {
@@ -695,9 +696,18 @@ async fn stale_diverges_when_dirty() {
 
 /// One Reef workspace, `reef-y`, on a new change with `files` snapshotted
 /// at commit C; the fixture's `main` is loaded at head to write on it.
+/// The busy workspace's id: its snapshots name it, as the daemon's do.
+const Y: &str = "00000000000000bb";
+
+fn y_snapshot() -> OpMeta {
+    OpMeta::new(OpKind::Snapshot, "reef: snapshot workspace y").workspace(Y)
+}
+
 async fn busy_workspace(fx: &mut Fixture, files: &[(&str, &str)]) -> (Repo, PathBuf, CommitIdHex) {
     let base = fx.main.wc_change().unwrap().commit_id;
-    let (mut y, y_root, _) = fx.create("reef-y", StartPoint::NewOn(base)).await;
+    let (mut y, y_root, _) = fx
+        .create(&format!("reef-{Y}"), StartPoint::NewOn(base))
+        .await;
     for (path, contents) in files {
         write(&y_root, path, contents);
     }
@@ -749,33 +759,29 @@ async fn visible_commits(fx: &Fixture, change: &ChangeIdHex) -> BTreeSet<CommitI
     }
 }
 
-/// Snapshots `y` with `carry` against `main`'s head, commits and checks the
-/// carried commit out, and finishes. Returns the committed snapshot and how
-/// many files the check-out wrote.
+/// Snapshots `y`, which `main`'s head moved from `expected` to `to`,
+/// against that head, commits and checks the carried commit out, and
+/// saves; returns the commit and the files checked out.
 async fn carry_snapshot(
     fx: &Fixture,
     y: &mut Repo,
-    expected: &CommitIdHex,
-    carry: &Carry,
+    (expected, to): (&CommitIdHex, &CommitIdHex),
+    unfinished: Option<&Unfinished>,
 ) -> (reef_lib::jj::SnapshotCommit, u32) {
     y.set_head(Arc::clone(fx.main.head()));
     let mut pending = y
-        .begin_snapshot(Some(expected), Some(carry), &IgnoreSources::default(), None)
+        .begin_snapshot(Some(expected), unfinished, &IgnoreSources::default(), None)
         .await
         .unwrap();
     assert!(pending.changed());
     assert!(pending.carried());
     assert!(!pending.adopted());
     let plan = pending.plan().clone();
-    assert_eq!(plan.rewrite_of, carry.to);
+    assert_eq!(&plan.rewrite_of, to);
     assert!(!plan.divergent);
-    let committed = commit_snapshot(
-        fx.main.head(),
-        &plan,
-        &OpMeta::new(OpKind::Snapshot, "reef: snapshot workspace y"),
-    )
-    .await
-    .unwrap();
+    let committed = commit_snapshot(fx.main.head(), &plan, &y_snapshot())
+        .await
+        .unwrap();
     assert!(!committed.divergent);
     let files = pending
         .check_out_carried(&committed.repo, &committed.commit_id)
@@ -786,9 +792,10 @@ async fn carry_snapshot(
     (committed, files)
 }
 
-// Issue #80: a stale working copy with edits, given the carry of the write
-// that moved it, records the merge of the write and its edits as a rewrite
-// of the write's commit, in the same change, and checks it out.
+// Issue #80: a stale working copy with edits, moved by a write of Reef's,
+// records the merge of the write and its edits as a rewrite of the write's
+// commit, in the same change, and checks it out. Nothing tells it of the
+// write: it reads the operation log (ADR 0084).
 #[tokio::test]
 async fn stale_carries_onto_the_rewrite() {
     let mut fx = Fixture::new().await;
@@ -803,12 +810,7 @@ async fn stale_carries_onto_the_rewrite() {
     write(&y_root, "late.txt", "late\n");
     write(&y_root, "b.txt", "late b\n");
 
-    let carry = Carry {
-        from: c.clone(),
-        to: c2,
-        base: None,
-    };
-    let (committed, files) = carry_snapshot(&fx, &mut y, &c, &carry).await;
+    let (committed, files) = carry_snapshot(&fx, &mut y, (&c, &c2), None).await;
     assert_eq!(committed.change_id, change);
     assert_eq!(files, 2, "the write's a.txt and api.txt");
     for (path, contents) in [
@@ -837,7 +839,7 @@ async fn stale_carries_onto_the_rewrite() {
     );
 
     // The working copy is fresh again: the next edit rewrites the carried
-    // commit, with no carry.
+    // commit.
     write(&y_root, "after.txt", "after\n");
     let pending = y
         .begin_snapshot(
@@ -864,12 +866,7 @@ async fn carry_leaves_overlap_as_a_conflict() {
     let c2 = write_on(&mut fx, &c, &[content("a.txt", "two\n")]).await;
     write(&y_root, "a.txt", "three\n");
 
-    let carry = Carry {
-        from: c.clone(),
-        to: c2,
-        base: None,
-    };
-    let (committed, _) = carry_snapshot(&fx, &mut y, &c, &carry).await;
+    let (committed, _) = carry_snapshot(&fx, &mut y, (&c, &c2), None).await;
     assert_eq!(
         conflicted_paths(&committed.repo, &committed.commit_id, 10).unwrap(),
         (vec!["a.txt".to_owned()], 1)
@@ -931,13 +928,8 @@ async fn carry_merges_modes_and_deletions() {
     write(&y_root, "big.bin", &"x".repeat(2048));
 
     y.set_head(Arc::clone(fx.main.head()));
-    let carry = Carry {
-        from: c.clone(),
-        to: c2,
-        base: None,
-    };
     let pending = y
-        .begin_snapshot(Some(&c), Some(&carry), &IgnoreSources::default(), None)
+        .begin_snapshot(Some(&c), None, &IgnoreSources::default(), None)
         .await
         .unwrap();
     assert_eq!(
@@ -949,7 +941,7 @@ async fn carry_merges_modes_and_deletions() {
         ["big.bin"]
     );
     drop(pending);
-    let (committed, _) = carry_snapshot(&fx, &mut y, &c, &carry).await;
+    let (committed, _) = carry_snapshot(&fx, &mut y, (&c, &c2), None).await;
     let (repo, id) = (&committed.repo, &committed.commit_id);
     assert_eq!(
         file_in(repo, id, "run.sh").await.as_deref(),
@@ -983,61 +975,833 @@ async fn carry_merges_modes_and_deletions() {
     assert!(y_root.join("big.bin").is_file());
 }
 
-// Issue #80: a carry that does not name this move is ignored, and ADR
-// 0018's fourth arm diverges as before; the carry, not the shape of the
-// change, decides.
+// ADR 0084: two writes of Reef's before the snapshot are followed as one
+// move, from the commit the working copy was checked out from to the
+// view's.
 #[tokio::test]
-async fn carry_that_does_not_match_takes_arm_four() {
+async fn two_writes_carry_as_one_move() {
     let mut fx = Fixture::new().await;
     let (mut y, y_root, c) = busy_workspace(&mut fx, &[("a.txt", "a\n")]).await;
     let c2 = write_on(&mut fx, &c, &[content("api.txt", "api\n")]).await;
     let c3 = write_on(&mut fx, &c2, &[content("api2.txt", "api\n")]).await;
     write(&y_root, "late.txt", "late\n");
-    y.set_head(Arc::clone(fx.main.head()));
-    let other = fx.main.commit_parents(&c).await.unwrap().remove(0);
-    for carry in [
-        // (a) another write moved the working copy on since.
-        Carry {
-            from: c.clone(),
-            to: c2.clone(),
-            base: None,
-        },
-        // (b) not the commit it was checked out from.
-        Carry {
-            from: other,
-            to: c3.clone(),
-            base: None,
-        },
-    ] {
-        let pending = y
-            .begin_snapshot(Some(&c), Some(&carry), &IgnoreSources::default(), None)
-            .await
-            .unwrap();
-        assert!(pending.changed());
-        assert!(!pending.carried(), "{carry:?}");
-        assert_eq!(pending.plan().rewrite_of, c);
-        assert!(pending.plan().divergent);
+    let (committed, files) = carry_snapshot(&fx, &mut y, (&c, &c3), None).await;
+    assert_eq!(files, 2, "both writes' files");
+    for path in ["a.txt", "api.txt", "api2.txt", "late.txt"] {
+        assert!(y_root.join(path).is_file(), "{path} on disk");
+        assert!(
+            file_in(&committed.repo, &committed.commit_id, path)
+                .await
+                .is_some(),
+            "{path} in the commit"
+        );
     }
+}
 
-    // (c) two workspaces on one change: a carry naming x's snapshot carries
-    // y's edits onto it (the daemon never makes this carry).
-    let (_fx, mut x, x_root, mut y, y_root) = two_on_one_change().await;
-    let shared = y.wc_change().unwrap().commit_id;
-    write(&x_root, "from-x.txt", "x\n");
-    write(&y_root, "from-y.txt", "y\n");
-    let x_snapshot = x.snapshot("reef: snapshot workspace x").await.unwrap();
-    y.set_head(Arc::clone(x.head()));
-    let carry = Carry {
-        from: shared.clone(),
-        to: x_snapshot.wc_commit.clone(),
-        base: None,
-    };
+// ADR 0018's fourth arm stands for a move that is not Reef's: another jj
+// client's rewrite, a commit the working copy was not checked out from,
+// and another workspace's snapshot of the same change. The operation log,
+// not the shape of the change, decides.
+#[tokio::test]
+async fn a_move_that_is_not_reefs_takes_arm_four() {
+    // (a) another jj client rewrote the commit.
+    let mut fx = Fixture::new().await;
+    let (mut y, y_root, c) = busy_workspace(&mut fx, &[("a.txt", "a\n")]).await;
+    fx.main
+        .edit_commit(
+            &c,
+            &[content("api.txt", "api\n")],
+            None,
+            &OpMeta::new(OpKind::External, "another client's rewrite"),
+        )
+        .await
+        .unwrap()
+        .expect("the edit changed the tree");
+    write(&y_root, "late.txt", "late\n");
+    y.set_head(Arc::clone(fx.main.head()));
     let pending = y
-        .begin_snapshot(Some(&shared), Some(&carry), &IgnoreSources::default(), None)
+        .begin_snapshot(Some(&c), None, &IgnoreSources::default(), None)
         .await
         .unwrap();
-    assert!(pending.carried());
-    assert_eq!(pending.plan().rewrite_of, x_snapshot.wc_commit);
+    assert!(pending.changed());
+    assert!(!pending.carried());
+    assert_eq!(pending.plan().rewrite_of, c);
+    assert!(pending.plan().divergent);
+    drop(pending);
+
+    // (b) Reef's write, but the row names a commit the view never had for
+    // this workspace.
+    let mut fx = Fixture::new().await;
+    let (mut y, y_root, c) = busy_workspace(&mut fx, &[("a.txt", "a\n")]).await;
+    write_on(&mut fx, &c, &[content("api.txt", "api\n")]).await;
+    write(&y_root, "late.txt", "late\n");
+    y.set_head(Arc::clone(fx.main.head()));
+    let other = fx.main.commit_parents(&c).await.unwrap().remove(0);
+    let pending = y
+        .begin_snapshot(Some(&other), None, &IgnoreSources::default(), None)
+        .await
+        .unwrap();
+    assert!(!pending.carried());
+    assert_eq!(pending.plan().rewrite_of, other);
+    drop(pending);
+
+    // (c) two workspaces on one change: x's snapshot is not y's to follow.
+    let x_id = "00000000000000aa";
+    let mut fx = Fixture::new().await;
+    let base = fx.main.wc_change().unwrap().commit_id;
+    let (mut x, x_root, _) = fx
+        .create(&format!("reef-{x_id}"), StartPoint::NewOn(base))
+        .await;
+    let shared = x.wc_change().unwrap().commit_id;
+    let (mut y, y_root, _) = fx
+        .create(&format!("reef-{Y}"), StartPoint::Edit(shared.clone()))
+        .await;
+    write(&x_root, "from-x.txt", "x\n");
+    write(&y_root, "from-y.txt", "y\n");
+    x.set_head(Arc::clone(fx.main.head()));
+    let pending = x
+        .begin_snapshot(Some(&shared), None, &IgnoreSources::default(), None)
+        .await
+        .unwrap();
+    let meta = OpMeta::new(OpKind::Snapshot, "reef: snapshot workspace x").workspace(x_id);
+    let x_snapshot = commit_snapshot(fx.main.head(), pending.plan(), &meta)
+        .await
+        .unwrap();
+    pending.finish(&x_snapshot.op_id).await.unwrap();
+    y.set_head(Arc::clone(&x_snapshot.repo));
+    let pending = y
+        .begin_snapshot(Some(&shared), None, &IgnoreSources::default(), None)
+        .await
+        .unwrap();
+    assert!(!pending.carried());
+    assert_eq!(pending.plan().rewrite_of, shared);
+    assert!(pending.plan().divergent);
+}
+
+// ADR 0084: a snapshot of the workspace below, which rebases this one's
+// commit, is Reef's move: the edits made meanwhile are carried onto the
+// rebased commit.
+#[tokio::test]
+async fn a_snapshot_below_carries() {
+    let x_id = "00000000000000aa";
+    let mut fx = Fixture::new().await;
+    let base = fx.main.wc_change().unwrap().commit_id;
+    let (mut x, x_root, _) = fx
+        .create(&format!("reef-{x_id}"), StartPoint::NewOn(base))
+        .await;
+    let below = x.wc_change().unwrap().commit_id;
+    let (mut y, y_root, _) = fx
+        .create(&format!("reef-{Y}"), StartPoint::NewOn(below.clone()))
+        .await;
+    let c = y.wc_change().unwrap().commit_id;
+    write(&x_root, "from-x.txt", "x\n");
+    write(&y_root, "from-y.txt", "y\n");
+    x.set_head(Arc::clone(fx.main.head()));
+    let pending = x
+        .begin_snapshot(Some(&below), None, &IgnoreSources::default(), None)
+        .await
+        .unwrap();
+    let meta = OpMeta::new(OpKind::Snapshot, "reef: snapshot workspace x").workspace(x_id);
+    let x_snapshot = commit_snapshot(fx.main.head(), pending.plan(), &meta)
+        .await
+        .unwrap();
+    pending.finish(&x_snapshot.op_id).await.unwrap();
+    fx.main.set_head(Arc::clone(&x_snapshot.repo));
+    let rebased = reef_lib::jj::view_wc_commit(fx.main.head(), &format!("reef-{Y}")).unwrap();
+    assert_ne!(rebased, c);
+
+    let (committed, files) = carry_snapshot(&fx, &mut y, (&c, &rebased), None).await;
+    assert_eq!(files, 1, "x's file");
+    for path in ["from-x.txt", "from-y.txt"] {
+        assert!(y_root.join(path).is_file(), "{path} on disk");
+        assert!(
+            file_in(&committed.repo, &committed.commit_id, path)
+                .await
+                .is_some(),
+            "{path} in the commit"
+        );
+    }
+}
+
+/// Another jj client's operation on `at`, bookmark `name` set on `commit`,
+/// concurrent with whatever `main` wrote since `at`: `main`'s next reload
+/// merges the operation heads. Returns the repository at that operation.
+async fn concurrent_bookmark(
+    at: &Arc<ReadonlyRepo>,
+    name: &str,
+    commit: &CommitIdHex,
+) -> Arc<ReadonlyRepo> {
+    let mut tx = at.start_transaction();
+    tx.repo_mut().set_local_bookmark_target(
+        jj_lib::ref_name::RefName::new(name),
+        jj_lib::op_store::RefTarget::normal(CommitId::try_from_hex(commit.as_str()).unwrap()),
+    );
+    tx.commit(format!("another client's bookmark {name}"))
+        .await
+        .unwrap()
+}
+
+/// Another jj client's rewrite of `commit` on `at`, which empties its
+/// tree, concurrent with whatever `main` wrote since `at`. It moves every
+/// working copy on the commit. Returns the repository at that operation.
+async fn concurrent_rewrite(at: &Arc<ReadonlyRepo>, commit: &CommitIdHex) -> Arc<ReadonlyRepo> {
+    let id = CommitId::try_from_hex(commit.as_str()).unwrap();
+    let old = at.store().get_commit_async(&id).await.unwrap();
+    let mut tx = at.start_transaction();
+    tx.repo_mut()
+        .rewrite_commit(&old)
+        .set_tree(at.store().root_commit().tree())
+        .write()
+        .await
+        .unwrap();
+    tx.repo_mut().rebase_descendants().await.unwrap();
+    tx.commit("another client's rewrite").await.unwrap()
+}
+
+/// Another jj client's new description of `commit` on `at`, concurrent
+/// with whatever `main` wrote since `at`. It keeps the commit's tree.
+async fn concurrent_describe(at: &Arc<ReadonlyRepo>, commit: &CommitIdHex) {
+    let id = CommitId::try_from_hex(commit.as_str()).unwrap();
+    let old = at.store().get_commit_async(&id).await.unwrap();
+    let mut tx = at.start_transaction();
+    tx.repo_mut()
+        .rewrite_commit(&old)
+        .set_description("another client's")
+        .write()
+        .await
+        .unwrap();
+    tx.repo_mut().rebase_descendants().await.unwrap();
+    tx.commit("another client's describe").await.unwrap();
+}
+
+/// Points `main` at the merge of `heads`, as jj merges operation heads:
+/// each one in turn into the first.
+async fn merge_in_order(fx: &mut Fixture, heads: &[&Arc<ReadonlyRepo>]) {
+    let operations = heads.iter().map(|head| head.operation().clone()).collect();
+    let attributes = Vec::<(String, String)>::new();
+    let (merged, _) = fx
+        .main
+        .head()
+        .loader()
+        .merge_operations(operations, None, None, attributes)
+        .await
+        .unwrap();
+    assert_eq!(merged.operation().parent_ids().len(), heads.len());
+    fx.main.set_head(merged);
+}
+
+/// Reloads `main` at head, which merges two operation heads.
+async fn merge_heads(fx: &mut Fixture) {
+    fx.main.reload_at_head().await.unwrap();
+    assert_eq!(
+        fx.main.head().operation().parent_ids().len(),
+        2,
+        "the head is a merge of two operations"
+    );
+}
+
+/// `y`'s snapshot against `main`'s head, with edits on `expected`, takes
+/// ADR 0018's fourth arm.
+async fn assert_diverges(fx: &Fixture, y: &mut Repo, expected: &CommitIdHex) {
+    y.set_head(Arc::clone(fx.main.head()));
+    let pending = y
+        .begin_snapshot(Some(expected), None, &IgnoreSources::default(), None)
+        .await
+        .unwrap();
+    assert!(pending.changed());
+    assert!(!pending.carried());
+    assert_eq!(&pending.plan().rewrite_of, expected);
+    assert!(pending.plan().divergent);
+}
+
+// Review 7, F1: another jj client's operation concurrent with the snapshot
+// of the workspace below leaves a merge of the two operation heads. The
+// merge took this workspace's commit from the snapshot's side, and the
+// client's side never moved it: the move is still Reef's.
+#[tokio::test]
+async fn a_merge_beside_a_snapshot_below_carries() {
+    let x_id = "00000000000000aa";
+    let mut fx = Fixture::new().await;
+    let base = fx.main.wc_change().unwrap().commit_id;
+    let (mut x, x_root, _) = fx
+        .create(&format!("reef-{x_id}"), StartPoint::NewOn(base))
+        .await;
+    let below = x.wc_change().unwrap().commit_id;
+    let (mut y, y_root, _) = fx
+        .create(&format!("reef-{Y}"), StartPoint::NewOn(below.clone()))
+        .await;
+    let c = y.wc_change().unwrap().commit_id;
+    write(&x_root, "from-x.txt", "x\n");
+    write(&y_root, "from-y.txt", "y\n");
+    let fork = Arc::clone(fx.main.head());
+    x.set_head(Arc::clone(&fork));
+    let pending = x
+        .begin_snapshot(Some(&below), None, &IgnoreSources::default(), None)
+        .await
+        .unwrap();
+    let meta = OpMeta::new(OpKind::Snapshot, "reef: snapshot workspace x").workspace(x_id);
+    let x_snapshot = commit_snapshot(&fork, pending.plan(), &meta).await.unwrap();
+    pending.finish(&x_snapshot.op_id).await.unwrap();
+    concurrent_bookmark(&fork, "concurrent", &below).await;
+    merge_heads(&mut fx).await;
+    let rebased = reef_lib::jj::view_wc_commit(fx.main.head(), &format!("reef-{Y}")).unwrap();
+    assert_ne!(rebased, c);
+
+    let (committed, files) = carry_snapshot(&fx, &mut y, (&c, &rebased), None).await;
+    assert_eq!(files, 1, "x's file");
+    for path in ["from-x.txt", "from-y.txt"] {
+        assert!(y_root.join(path).is_file(), "{path} on disk");
+        assert!(
+            file_in(&committed.repo, &committed.commit_id, path)
+                .await
+                .is_some(),
+            "{path} in the commit"
+        );
+    }
+}
+
+// Review 7, F1: the other client loaded the head before this workspace's
+// last snapshot, and committed after Reef's write: its side of the merge
+// has a commit older than the one the working copy was checked out from.
+// It still never moved it.
+#[tokio::test]
+async fn a_merge_with_a_side_older_than_the_last_snapshot_carries() {
+    let mut fx = Fixture::new().await;
+    let (mut y, y_root, c0) = busy_workspace(&mut fx, &[("a.txt", "a\n")]).await;
+    let fork = Arc::clone(fx.main.head());
+    write(&y_root, "b.txt", "b\n");
+    let c = y
+        .snapshot("reef: snapshot workspace y")
+        .await
+        .unwrap()
+        .wc_commit;
+    assert_ne!(c, c0);
+    fx.main.reload_at_head().await.unwrap();
+    let c2 = write_on(&mut fx, &c, &[content("api.txt", "api\n")]).await;
+    concurrent_bookmark(&fork, "concurrent", &c0).await;
+    merge_heads(&mut fx).await;
+    write(&y_root, "late.txt", "late\n");
+
+    let (committed, files) = carry_snapshot(&fx, &mut y, (&c, &c2), None).await;
+    assert_eq!(files, 1, "the write's file");
+    for path in ["a.txt", "b.txt", "api.txt", "late.txt"] {
+        assert!(
+            file_in(&committed.repo, &committed.commit_id, path)
+                .await
+                .is_some(),
+            "{path} in the commit"
+        );
+    }
+}
+
+// Review 7, F1: a merge after Reef's write, of two operations that both
+// left this workspace's commit alone, is walked through to the write.
+#[tokio::test]
+async fn a_merge_after_the_write_carries() {
+    let mut fx = Fixture::new().await;
+    let (mut y, y_root, c) = busy_workspace(&mut fx, &[("a.txt", "a\n")]).await;
+    let c2 = write_on(&mut fx, &c, &[content("api.txt", "api\n")]).await;
+    let fork = Arc::clone(fx.main.head());
+    let base = fx.main.wc_change().unwrap().commit_id;
+    fx.create("reef-00000000000000cc", StartPoint::NewOn(base.clone()))
+        .await;
+    concurrent_bookmark(&fork, "concurrent", &base).await;
+    merge_heads(&mut fx).await;
+    write(&y_root, "late.txt", "late\n");
+
+    let (committed, _) = carry_snapshot(&fx, &mut y, (&c, &c2), None).await;
+    for path in ["a.txt", "api.txt", "late.txt"] {
+        assert!(
+            file_in(&committed.repo, &committed.commit_id, path)
+                .await
+                .is_some(),
+            "{path} in the commit"
+        );
+    }
+}
+
+// Review 7, F1: a merge does not launder a move that is not Reef's. ADR
+// 0018's fourth arm stands when the other client's side moved this
+// workspace's commit, alone or beside a write of Reef's, and when the
+// merge is beside another workspace's snapshot of the same change.
+#[tokio::test]
+async fn a_merge_keeps_arm_four_for_moves_that_are_not_reefs() {
+    // (a) only the other client moved the commit; Reef's side is unrelated.
+    let mut fx = Fixture::new().await;
+    let (mut y, y_root, c) = busy_workspace(&mut fx, &[("a.txt", "a\n")]).await;
+    let fork = Arc::clone(fx.main.head());
+    let base = fx.main.wc_change().unwrap().commit_id;
+    fx.create("reef-00000000000000cc", StartPoint::NewOn(base))
+        .await;
+    concurrent_rewrite(&fork, &c).await;
+    merge_heads(&mut fx).await;
+    let moved = reef_lib::jj::view_wc_commit(fx.main.head(), &format!("reef-{Y}")).unwrap();
+    assert_ne!(moved, c, "the other client's rewrite moved y");
+    write(&y_root, "late.txt", "late\n");
+    assert_diverges(&fx, &mut y, &c).await;
+
+    // (b) both sides moved it: Reef's write and the other client's rewrite.
+    let mut fx = Fixture::new().await;
+    let (mut y, y_root, c) = busy_workspace(&mut fx, &[("a.txt", "a\n")]).await;
+    let fork = Arc::clone(fx.main.head());
+    write_on(&mut fx, &c, &[content("api.txt", "api\n")]).await;
+    concurrent_rewrite(&fork, &c).await;
+    merge_heads(&mut fx).await;
+    write(&y_root, "late.txt", "late\n");
+    assert_diverges(&fx, &mut y, &c).await;
+
+    // (c) two workspaces on one change: x's snapshot is not y's to follow,
+    // with a merge beside it either.
+    let x_id = "00000000000000aa";
+    let mut fx = Fixture::new().await;
+    let base = fx.main.wc_change().unwrap().commit_id;
+    let (mut x, x_root, _) = fx
+        .create(&format!("reef-{x_id}"), StartPoint::NewOn(base.clone()))
+        .await;
+    let shared = x.wc_change().unwrap().commit_id;
+    let (mut y, y_root, _) = fx
+        .create(&format!("reef-{Y}"), StartPoint::Edit(shared.clone()))
+        .await;
+    write(&x_root, "from-x.txt", "x\n");
+    write(&y_root, "from-y.txt", "y\n");
+    let fork = Arc::clone(fx.main.head());
+    x.set_head(Arc::clone(&fork));
+    let pending = x
+        .begin_snapshot(Some(&shared), None, &IgnoreSources::default(), None)
+        .await
+        .unwrap();
+    let meta = OpMeta::new(OpKind::Snapshot, "reef: snapshot workspace x").workspace(x_id);
+    let x_snapshot = commit_snapshot(&fork, pending.plan(), &meta).await.unwrap();
+    pending.finish(&x_snapshot.op_id).await.unwrap();
+    concurrent_bookmark(&fork, "concurrent", &base).await;
+    merge_heads(&mut fx).await;
+    assert_diverges(&fx, &mut y, &shared).await;
+}
+
+// Review 8, R8-1: two other jj clients ran beside Reef's write, and the
+// reload merges three operation heads in one operation. Neither client
+// moved this workspace's commit: the move is still Reef's.
+#[tokio::test]
+async fn a_merge_of_three_heads_carries() {
+    let mut fx = Fixture::new().await;
+    let (mut y, y_root, c) = busy_workspace(&mut fx, &[("a.txt", "a\n")]).await;
+    let fork = Arc::clone(fx.main.head());
+    let base = fx.main.wc_change().unwrap().commit_id;
+    let c2 = write_on(&mut fx, &c, &[content("api.txt", "api\n")]).await;
+    concurrent_bookmark(&fork, "one", &base).await;
+    concurrent_bookmark(&fork, "two", &base).await;
+    fx.main.reload_at_head().await.unwrap();
+    assert_eq!(fx.main.head().operation().parent_ids().len(), 3);
+    write(&y_root, "late.txt", "late\n");
+
+    let (committed, files) = carry_snapshot(&fx, &mut y, (&c, &c2), None).await;
+    assert_eq!(files, 1, "the write's file");
+    for path in ["a.txt", "api.txt", "late.txt"] {
+        assert!(
+            file_in(&committed.repo, &committed.commit_id, path)
+                .await
+                .is_some(),
+            "{path} in the commit"
+        );
+    }
+}
+
+// Review 8, R8-1: a criss-cross. Reef's write and another client's
+// operation are merged twice, by the daemon and by another jj process, and
+// the next reload merges the two merges, which have two closest common
+// ancestors. Only Reef moved this workspace's commit.
+#[tokio::test]
+async fn a_criss_cross_merge_carries() {
+    let mut fx = Fixture::new().await;
+    let (mut y, y_root, c) = busy_workspace(&mut fx, &[("a.txt", "a\n")]).await;
+    let fork = Arc::clone(fx.main.head());
+    let base = fx.main.wc_change().unwrap().commit_id;
+    let c2 = write_on(&mut fx, &c, &[content("api.txt", "api\n")]).await;
+    let written = Arc::clone(fx.main.head());
+    let other = concurrent_bookmark(&fork, "one", &base).await;
+    merge_heads(&mut fx).await;
+    // Another jj process merged the same two heads, and wrote on top.
+    let daemons = Arc::clone(fx.main.head());
+    merge_in_order(&mut fx, &[&written, &other]).await;
+    concurrent_bookmark(fx.main.head(), "two", &base).await;
+    fx.main.set_head(daemons);
+    merge_heads(&mut fx).await;
+    write(&y_root, "late.txt", "late\n");
+
+    let (committed, files) = carry_snapshot(&fx, &mut y, (&c, &c2), None).await;
+    assert_eq!(files, 1, "the write's file");
+    for path in ["a.txt", "api.txt", "late.txt"] {
+        assert!(
+            file_in(&committed.repo, &committed.commit_id, path)
+                .await
+                .is_some(),
+            "{path} in the commit"
+        );
+    }
+}
+
+// Review 8, R8-1: no shape of merge launders a move that is not Reef's.
+// ADR 0018's fourth arm stands when another client moved this workspace's
+// commit on any of the merged heads, whichever commit the merge kept, and
+// when the merge itself moved it.
+#[tokio::test]
+async fn a_merge_of_many_heads_keeps_arm_four() {
+    // (a) three heads: Reef's write, a bookmark, and another client's
+    // rewrite. jj keeps the commit of the head it merges into, so each
+    // order is tried: Reef's commit kept, and the other client's.
+    for reefs_first in [true, false] {
+        let mut fx = Fixture::new().await;
+        let (mut y, y_root, c) = busy_workspace(&mut fx, &[("a.txt", "a\n")]).await;
+        let fork = Arc::clone(fx.main.head());
+        let base = fx.main.wc_change().unwrap().commit_id;
+        let c2 = write_on(&mut fx, &c, &[content("api.txt", "api\n")]).await;
+        let written = Arc::clone(fx.main.head());
+        let bookmark = concurrent_bookmark(&fork, "one", &base).await;
+        let rewrite = concurrent_rewrite(&fork, &c).await;
+        let heads = if reefs_first {
+            [&written, &bookmark, &rewrite]
+        } else {
+            [&rewrite, &bookmark, &written]
+        };
+        merge_in_order(&mut fx, &heads).await;
+        let kept = reef_lib::jj::view_wc_commit(fx.main.head(), &format!("reef-{Y}")).unwrap();
+        assert_eq!(kept == c2, reefs_first, "the merge kept its first head's");
+        write(&y_root, "late.txt", "late\n");
+        assert_diverges(&fx, &mut y, &c).await;
+    }
+
+    // (b) a criss-cross of Reef's write and another client's rewrite.
+    let mut fx = Fixture::new().await;
+    let (mut y, y_root, c) = busy_workspace(&mut fx, &[("a.txt", "a\n")]).await;
+    let fork = Arc::clone(fx.main.head());
+    let base = fx.main.wc_change().unwrap().commit_id;
+    write_on(&mut fx, &c, &[content("api.txt", "api\n")]).await;
+    let written = Arc::clone(fx.main.head());
+    let rewrite = concurrent_rewrite(&fork, &c).await;
+    merge_in_order(&mut fx, &[&written, &rewrite]).await;
+    let daemons = Arc::clone(fx.main.head());
+    merge_in_order(&mut fx, &[&written, &rewrite]).await;
+    let others = concurrent_bookmark(fx.main.head(), "two", &base).await;
+    merge_in_order(&mut fx, &[&daemons, &others]).await;
+    write(&y_root, "late.txt", "late\n");
+    assert_diverges(&fx, &mut y, &c).await;
+
+    // (c) the merge moved the commit: Reef rebased y onto x's commit, and
+    // another client described x's commit meanwhile, so the merge rebased
+    // y's commit again. Neither head has the commit the merge has.
+    let x_id = "00000000000000aa";
+    let mut fx = Fixture::new().await;
+    let (mut y, y_root, c) = busy_workspace(&mut fx, &[("a.txt", "a\n")]).await;
+    let base = fx.main.wc_change().unwrap().commit_id;
+    let (mut x, x_root, _) = fx
+        .create(&format!("reef-{x_id}"), StartPoint::NewOn(base))
+        .await;
+    write(&x_root, "from-x.txt", "x\n");
+    let onto = x
+        .snapshot("reef: snapshot workspace x")
+        .await
+        .unwrap()
+        .wc_commit;
+    fx.main.reload_at_head().await.unwrap();
+    let fork = Arc::clone(fx.main.head());
+    let request = RebaseRequest {
+        revision: c.as_str(),
+        onto: Some(onto.as_str()),
+        mode: RebaseMode::Source,
+        expected: None,
+        remote: None,
+    };
+    let scope = RevsetScope {
+        workspace: None,
+        user_email: "reef-test@example.com",
+        root: fx.main.workspace_root(),
+    };
+    let plan = rebase::plan(&fork, &request, &scope).await.unwrap();
+    let meta = OpMeta::new(OpKind::Rebase, "reef: rebase");
+    fx.main.rebase(&plan, &meta).await.unwrap();
+    let rebased = reef_lib::jj::view_wc_commit(fx.main.head(), &format!("reef-{Y}")).unwrap();
+    assert_ne!(rebased, c, "Reef's rebase moved y");
+    concurrent_describe(&fork, &onto).await;
+    merge_heads(&mut fx).await;
+    let merged = reef_lib::jj::view_wc_commit(fx.main.head(), &format!("reef-{Y}")).unwrap();
+    assert_ne!(merged, rebased, "the merge moved y again");
+    write(&y_root, "late.txt", "late\n");
+    assert_diverges(&fx, &mut y, &c).await;
+}
+
+/// `settings()`, with every operation stamped `stamp`: a jj client whose
+/// clock reads that, whatever the time.
+fn settings_at(stamp: &str) -> UserSettings {
+    use jj_lib::config::{ConfigLayer, ConfigSource};
+    let mut config = settings().config().clone();
+    let layer = format!("debug.operation-timestamp = {stamp:?}");
+    config.add_layer(ConfigLayer::parse(ConfigSource::User, &layer).unwrap());
+    UserSettings::from_config_and_home_dir(config, None).unwrap()
+}
+
+/// Another jj client with `settings`, loaded at the head of `main/`.
+async fn other_client(fx: &Fixture, settings: &UserSettings) -> Arc<ReadonlyRepo> {
+    let factories = (
+        default_backend_factories(),
+        default_working_copy_factories(),
+    );
+    let workspace = default_workspace_loader_factory()
+        .create(fx.main.workspace_root())
+        .unwrap()
+        .load(settings, &factories.0, &factories.1)
+        .unwrap();
+    workspace.repo_loader().load_at_head(None).await.unwrap()
+}
+
+/// `count` operations of another jj client on `at`, one after the other,
+/// that move no working copy; `main` is left at the last.
+async fn operations_on(fx: &mut Fixture, at: &Arc<ReadonlyRepo>, count: usize) {
+    let targets = [
+        fx.main.wc_change().unwrap().commit_id,
+        reef_lib::jj::view_wc_commit(at, &format!("reef-{Y}")).unwrap(),
+    ];
+    let mut at = Arc::clone(at);
+    for nth in 0..count {
+        at = concurrent_bookmark(&at, "elsewhere", &targets[nth % 2]).await;
+    }
+    fx.main.set_head(at);
+}
+
+/// The scene of a client that loaded the head too early: `stale` loaded it
+/// before `y` snapshots C; Reef's write then moves `y` to C2; `stale`
+/// commits a bookmark; the reload merges the two heads; `y`'s agent writes.
+/// Returns C and C2.
+async fn beside_a_stale_client(
+    fx: &mut Fixture,
+    (y, y_root): (&mut Repo, &Path),
+    stale: &Arc<ReadonlyRepo>,
+) -> (CommitIdHex, CommitIdHex) {
+    let base = fx.main.wc_change().unwrap().commit_id;
+    y.set_head(Arc::clone(fx.main.head()));
+    write(y_root, "b.txt", "b\n");
+    let snapshot = y.snapshot("reef: snapshot workspace y").await.unwrap();
+    let c = snapshot.wc_commit;
+    fx.main.reload_at_head().await.unwrap();
+    let c2 = write_on(fx, &c, &[content("api.txt", "api\n")]).await;
+    concurrent_bookmark(stale, "stale", &base).await;
+    merge_heads(fx).await;
+    write(y_root, "late.txt", "late\n");
+    (c, c2)
+}
+
+/// `y` carries its edits from C onto C2, the write's commit.
+async fn assert_carries(fx: &Fixture, y: &mut Repo, moved: (&CommitIdHex, &CommitIdHex)) {
+    let (committed, files) = carry_snapshot(fx, y, moved, None).await;
+    assert_eq!(files, 1, "the write's file");
+    for path in ["a.txt", "b.txt", "api.txt", "late.txt"] {
+        assert!(
+            file_in(&committed.repo, &committed.commit_id, path)
+                .await
+                .is_some(),
+            "{path} in the commit"
+        );
+    }
+}
+
+/// More operations than the walk judges (`FOLLOW_LIMIT`, 1,024).
+const PAST_THE_LIMIT: usize = 1100;
+
+// Review 9, R9-1: another jj client loaded the head, and more operations
+// than the walk judges were written before this workspace's last snapshot.
+// The client then commits beside Reef's write. Its operation is the only
+// one of those since the snapshot: the ones before count for nothing.
+#[tokio::test]
+async fn a_client_that_loaded_the_head_long_before_carries() {
+    let mut fx = Fixture::new().await;
+    let (mut y, y_root, _) = busy_workspace(&mut fx, &[("a.txt", "a\n")]).await;
+    let stale = Arc::clone(fx.main.head());
+    operations_on(&mut fx, &stale, PAST_THE_LIMIT).await;
+
+    let (c, c2) = beside_a_stale_client(&mut fx, (&mut y, &y_root), &stale).await;
+    assert_carries(&fx, &mut y, (&c, &c2)).await;
+}
+
+// ADR 0084: a follow that comes more operations after Reef's move than the
+// walk judges takes ADR 0018's fourth arm.
+#[tokio::test]
+async fn a_move_further_back_than_the_limit_diverges() {
+    let mut fx = Fixture::new().await;
+    let (mut y, y_root, c) = busy_workspace(&mut fx, &[("a.txt", "a\n")]).await;
+    write_on(&mut fx, &c, &[content("api.txt", "api\n")]).await;
+    let written = Arc::clone(fx.main.head());
+    operations_on(&mut fx, &written, PAST_THE_LIMIT).await;
+    write(&y_root, "late.txt", "late\n");
+
+    assert_diverges(&fx, &mut y, &c).await;
+}
+
+// Review 9, R9-2: the operations since the last snapshot do not depend on
+// what the clocks said. One client's clock is wrong, and it writes the
+// operation that the stale client loads the head at, or the stale client's
+// own clock is wrong.
+#[tokio::test]
+async fn a_wrong_clock_changes_no_carry() {
+    let (ahead, behind) = ("2030-01-01T00:00:00+00:00", "2001-01-01T00:00:00+00:00");
+    for (loaded_at, stale) in [
+        (Some(ahead), None),
+        (Some(behind), None),
+        (None, Some(ahead)),
+        (None, Some(behind)),
+        (Some(ahead), Some(behind)),
+    ] {
+        let mut fx = Fixture::new().await;
+        let (mut y, y_root, _) = busy_workspace(&mut fx, &[("a.txt", "a\n")]).await;
+        let base = fx.main.wc_change().unwrap().commit_id;
+        if let Some(stamp) = loaded_at {
+            let client = other_client(&fx, &settings_at(stamp)).await;
+            concurrent_bookmark(&client, "wrong-clock", &base).await;
+            fx.main.reload_at_head().await.unwrap();
+        }
+        let stale = match stale {
+            Some(stamp) => other_client(&fx, &settings_at(stamp)).await,
+            None => Arc::clone(fx.main.head()),
+        };
+
+        let (c, c2) = beside_a_stale_client(&mut fx, (&mut y, &y_root), &stale).await;
+        assert_carries(&fx, &mut y, (&c, &c2)).await;
+    }
+}
+
+// Review 9, R9-2: an operation that is read before the one that shows it
+// is before the last snapshot is before it all the same, and so is its
+// history. Two clients loaded the head too early: one at an operation
+// stamped ahead, which is read first, and one at the operation before it.
+#[tokio::test]
+async fn two_stale_clients_below_a_wrong_clock_carry() {
+    let mut fx = Fixture::new().await;
+    let (mut y, y_root, _) = busy_workspace(&mut fx, &[("a.txt", "a\n")]).await;
+    let base = fx.main.wc_change().unwrap().commit_id;
+    let below = Arc::clone(fx.main.head());
+    let client = other_client(&fx, &settings_at("2030-01-01T00:00:00+00:00")).await;
+    concurrent_bookmark(&client, "wrong-clock", &base).await;
+    fx.main.reload_at_head().await.unwrap();
+    let stale = Arc::clone(fx.main.head());
+
+    let (c, c2) = beside_a_stale_client(&mut fx, (&mut y, &y_root), &stale).await;
+    concurrent_bookmark(&below, "below", &base).await;
+    merge_heads(&mut fx).await;
+    assert_carries(&fx, &mut y, (&c, &c2)).await;
+}
+
+/// `count` operations of another client on the head, one after the other,
+/// with the head's view, stamped `ahead_ms` after it and a millisecond
+/// apart; `main` is left at the last. Written straight to the operation
+/// store, to keep thousands cheap.
+async fn operations_stamped_ahead(fx: &mut Fixture, count: usize, ahead_ms: i64) {
+    let head = Arc::clone(fx.main.head());
+    let mut data = head.operation().store_operation().clone();
+    "another client's operation".clone_into(&mut data.metadata.description);
+    data.metadata.attributes.clear();
+    let stamp = data.metadata.time.end.timestamp.0 + ahead_ms;
+    let mut last = head.op_id().clone();
+    for at in (stamp..).take(count) {
+        data.parents = vec![last];
+        data.metadata.time.start.timestamp.0 = at;
+        data.metadata.time.end.timestamp.0 = at;
+        last = head.op_store().write_operation(&data).await.unwrap();
+    }
+    let heads = head.loader().op_heads_store();
+    let replaced = std::slice::from_ref(head.op_id());
+    heads.update_op_heads(replaced, &last).await.unwrap();
+    fx.main.reload_at_head().await.unwrap();
+}
+
+// Tenth R3.11 review, R10-1: a clock that ran an hour fast stamped more
+// operations than the walk read views of (4,096 at the time), and a client
+// loaded the head at the last of them, before this workspace's last
+// snapshot. Each of them is read with its view before the operation that
+// shows it is before the snapshot: they cost reads, and the carry is the
+// same as with a right clock.
+#[tokio::test]
+async fn a_stretch_stamped_ahead_below_a_stale_client_carries() {
+    let mut fx = Fixture::new().await;
+    let (mut y, y_root, _) = busy_workspace(&mut fx, &[("a.txt", "a\n")]).await;
+    operations_stamped_ahead(&mut fx, 4200, 3_600_000).await;
+    let stale = Arc::clone(fx.main.head());
+    operations_on(&mut fx, &stale, 3).await;
+
+    let (c, c2) = beside_a_stale_client(&mut fx, (&mut y, &y_root), &stale).await;
+    assert_carries(&fx, &mut y, (&c, &c2)).await;
+}
+
+// Review 9, R9-2: every operation is written in the same millisecond, so
+// that jj orders them by id. Each round has other ids.
+#[tokio::test]
+async fn operations_in_one_millisecond_carry() {
+    for _ in 0..20 {
+        let mut fx = Fixture::with_settings(&settings_at("2026-01-01T00:00:00+00:00")).await;
+        let (mut y, y_root, _) = busy_workspace(&mut fx, &[("a.txt", "a\n")]).await;
+        let base = fx.main.wc_change().unwrap().commit_id;
+        concurrent_bookmark(fx.main.head(), "first", &base).await;
+        fx.main.reload_at_head().await.unwrap();
+        let stale = Arc::clone(fx.main.head());
+
+        let (c, c2) = beside_a_stale_client(&mut fx, (&mut y, &y_root), &stale).await;
+        assert_carries(&fx, &mut y, (&c, &c2)).await;
+    }
+}
+
+// Review 9, R9-2: the moves are followed in the order the log gives them,
+// not the order of their times. Reef writes twice, and the clock was set
+// back in between, so the first write is stamped after the second.
+#[tokio::test]
+async fn a_clock_set_back_between_two_writes_changes_no_carry() {
+    let mut fx = Fixture::new().await;
+    let (mut y, y_root, c) = busy_workspace(&mut fx, &[("a.txt", "a\n")]).await;
+    let ahead = settings_at("2030-01-01T00:00:00+00:00");
+    let mut early = Repo::open(fx.main.workspace_root(), &ahead).await.unwrap();
+    let meta = OpMeta::new(OpKind::Edit, "reef: edit");
+    let edit = [content("api.txt", "api\n")];
+    let written = early.edit_commit(&c, &edit, None, &meta).await.unwrap();
+    let c2 = written.expect("the edit changed the tree").commit_id;
+    fx.main.reload_at_head().await.unwrap();
+    let c3 = write_on(&mut fx, &c2, &[content("api2.txt", "api\n")]).await;
+    write(&y_root, "late.txt", "late\n");
+
+    let (committed, files) = carry_snapshot(&fx, &mut y, (&c, &c3), None).await;
+    assert_eq!(files, 2, "both writes' files");
+    for path in ["a.txt", "api.txt", "api2.txt", "late.txt"] {
+        assert!(
+            file_in(&committed.repo, &committed.commit_id, path)
+                .await
+                .is_some(),
+            "{path} in the commit"
+        );
+    }
+}
+
+// Review 9, R9-2: a wrong clock launders no move either. Another client's
+// rewrite of this workspace's commit beside Reef's write takes ADR 0018's
+// fourth arm, whatever its clock said and with every operation in one
+// millisecond.
+#[tokio::test]
+async fn a_wrong_clock_keeps_arm_four() {
+    let now = settings();
+    let stamps = [
+        (&now, Some("2030-01-01T00:00:00+00:00")),
+        (&now, Some("2001-01-01T00:00:00+00:00")),
+    ];
+    let one_millisecond = settings_at("2026-01-01T00:00:00+00:00");
+    let ties = std::iter::repeat_n((&one_millisecond, None), 8);
+    for (daemons, others) in stamps.into_iter().chain(ties) {
+        let mut fx = Fixture::with_settings(daemons).await;
+        let (mut y, y_root, c) = busy_workspace(&mut fx, &[("a.txt", "a\n")]).await;
+        let other = match others {
+            Some(stamp) => other_client(&fx, &settings_at(stamp)).await,
+            None => Arc::clone(fx.main.head()),
+        };
+        write_on(&mut fx, &c, &[content("api.txt", "api\n")]).await;
+        concurrent_rewrite(&other, &c).await;
+        merge_heads(&mut fx).await;
+        write(&y_root, "late.txt", "late\n");
+
+        assert_diverges(&fx, &mut y, &c).await;
+    }
 }
 
 // Issue #80: a carried snapshot whose check-out failed is merged again over
@@ -1062,34 +1826,33 @@ async fn carry_is_idempotent() {
         write(&y_root, "late.txt", "late\n");
 
         y.set_head(Arc::clone(fx.main.head()));
-        let carry = Carry {
-            from: c.clone(),
-            to: c2,
-            base: None,
-        };
         let pending = y
-            .begin_snapshot(Some(&c), Some(&carry), &IgnoreSources::default(), None)
+            .begin_snapshot(Some(&c), None, &IgnoreSources::default(), None)
             .await
             .unwrap();
         assert!(pending.carried());
         let plan = pending.plan().clone();
-        let committed = commit_snapshot(
-            fx.main.head(),
-            &plan,
-            &OpMeta::new(OpKind::Snapshot, "reef: snapshot workspace y"),
-        )
-        .await
-        .unwrap();
+        assert_eq!(plan.rewrite_of, c2);
+        let committed = commit_snapshot(fx.main.head(), &plan, &y_snapshot())
+            .await
+            .unwrap();
         // The check-out fails: nothing is checked out or saved.
         drop(pending);
         let conflicts = conflicted_paths(&committed.repo, &committed.commit_id, 10).unwrap();
         assert_eq!(conflicts.1, usize::from(conflict));
 
         y.set_head(Arc::clone(&committed.repo));
-        let again = Carry {
-            from: c.clone(),
-            to: committed.commit_id.clone(),
-            base: plan.carried.clone(),
+        // Its own commit, unexplained (a crash between commit and row): arm
+        // four, as before ADR 0084.
+        let pending = y
+            .begin_snapshot(Some(&c), None, &IgnoreSources::default(), None)
+            .await
+            .unwrap();
+        assert!(!pending.carried() && pending.plan().divergent);
+        drop(pending);
+        let again = Unfinished {
+            commit: committed.commit_id.clone(),
+            disk: plan.carried.clone().unwrap(),
         };
         let pending = y
             .begin_snapshot(Some(&c), Some(&again), &IgnoreSources::default(), None)
@@ -1124,24 +1887,16 @@ async fn carry_does_not_overwrite_an_edit_after_the_scan() {
     write(&y_root, "late.txt", "late\n");
 
     y.set_head(Arc::clone(fx.main.head()));
-    let carry = Carry {
-        from: c.clone(),
-        to: c2,
-        base: None,
-    };
     let mut pending = y
-        .begin_snapshot(Some(&c), Some(&carry), &IgnoreSources::default(), None)
+        .begin_snapshot(Some(&c), None, &IgnoreSources::default(), None)
         .await
         .unwrap();
     assert!(pending.carried());
     let plan = pending.plan().clone();
-    let committed = commit_snapshot(
-        fx.main.head(),
-        &plan,
-        &OpMeta::new(OpKind::Snapshot, "reef: snapshot workspace y"),
-    )
-    .await
-    .unwrap();
+    assert_eq!(plan.rewrite_of, c2);
+    let committed = commit_snapshot(fx.main.head(), &plan, &y_snapshot())
+        .await
+        .unwrap();
     // The agent edits the write's path between the scan and the check-out.
     write(&y_root, "a.txt", "agent's a, written later\n");
     let error = pending
@@ -1158,14 +1913,13 @@ async fn carry_does_not_overwrite_an_edit_after_the_scan() {
         "agent's a, written later\n"
     );
 
-    // The daemon's re-merge carry: the new edit meets the write's.
+    // The daemon's re-merge: the new edit meets the write's.
     fx.main.set_head(Arc::clone(&committed.repo));
-    let again = Carry {
-        from: c.clone(),
-        to: committed.commit_id.clone(),
-        base: plan.carried.clone(),
+    let again = Unfinished {
+        commit: committed.commit_id.clone(),
+        disk: plan.carried.clone().unwrap(),
     };
-    let (merged, _) = carry_snapshot(&fx, &mut y, &c, &again).await;
+    let (merged, _) = carry_snapshot(&fx, &mut y, (&c, &committed.commit_id), Some(&again)).await;
     assert_eq!(
         conflicted_paths(&merged.repo, &merged.commit_id, 10).unwrap(),
         (vec!["a.txt".to_owned()], 1)

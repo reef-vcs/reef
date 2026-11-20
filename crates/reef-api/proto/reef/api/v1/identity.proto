@@ -320,9 +320,11 @@ service IdentityService {
   rpc RemovePasskey(RemovePasskeyRequest) returns (RemovePasskeyResponse) {
     option (reef.api.v1.access) = ACCESS_WRITE;
   }
-  // Removes every live passkey of an identity and revokes every unexpired
-  // key they certified, from now (R3.43): the way back when a passkey is
-  // lost, or one was added that the person did not add. Logged loudly.
+  // Removes every live passkey of an identity and revokes, from now, every
+  // unexpired, unrevoked session key that any of its passkeys certified,
+  // passkeys removed earlier included (R3.43): the way back when a passkey
+  // is lost, or one was added that the person did not add. A key certified
+  // after the reset by a passkey it removed is refused. Logged loudly.
   //
   // Errors: NOT_FOUND with reason IDENTITY_NOT_FOUND (metadata `name`);
   // INVALID_ARGUMENT with reason INVALID_PASSKEY (metadata `field`
@@ -1132,7 +1134,9 @@ message ResetPasskeysRequest {
 message ResetPasskeysResponse {
   // The passkeys it removed; empty when the identity had none live.
   repeated Passkey removed = 1;
-  // The unexpired session keys those passkeys certified, now revoked.
+  // The session keys it revoked: every unexpired, unrevoked key that any of
+  // the identity's passkeys certified, removed ones included; empty when
+  // there were none.
   repeated string revoked_key_ids = 2;
 }
 

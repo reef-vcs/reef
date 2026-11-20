@@ -6,7 +6,7 @@ use reef_api::v1;
 use reef_lib::jj::assignment::AssignmentNotice;
 use reef_lib::jj::oplog::OpEntry;
 
-use super::{KIND_TREE, Reason, State};
+use super::{KIND_DEPENDENCY, KIND_TREE, Reason, State};
 use crate::daemon::AppState;
 use crate::db::{AssignmentEventRow, AssignmentRow, OwnerColumns, TierColumns};
 use crate::model::Timestamp;
@@ -66,6 +66,7 @@ pub fn reason_message(text: &str) -> v1::ConflictAssignmentReason {
         Some(Reason::Ask) => R::Ask,
         Some(Reason::Attempts) => R::Attempts,
         Some(Reason::Allowed) => R::Allowed,
+        Some(Reason::Withdrawn) => R::Withdrawn,
         None => R::Unspecified,
     }
 }
@@ -213,10 +214,10 @@ pub fn assignment_message(
         approval: row.approval,
         ..v1::ConflictAssignment::default()
     };
-    message.set_kind(if row.kind == KIND_TREE {
-        v1::ConflictKind::Tree
-    } else {
-        v1::ConflictKind::Unspecified
+    message.set_kind(match row.kind.as_str() {
+        KIND_TREE => v1::ConflictKind::Tree,
+        KIND_DEPENDENCY => v1::ConflictKind::MissingDependency,
+        _ => v1::ConflictKind::Unspecified,
     });
     message.set_state(state_message(&row.state));
     message.set_reason(reason_message(&row.reason));

@@ -76,6 +76,8 @@ pub(super) async fn rebase_change(
         mode,
         expected: request.expected_commit_id.clone(),
         remote: fetched_remote,
+        transitions: Vec::new(),
+        description: String::new(),
     };
     let (rewritten, operation) =
         write_change(state, &target, agent.clone(), write, OperationKind::Rebase).await?;

@@ -328,6 +328,13 @@ struct Inner {
     /// Test hook: writes waiting at the follow hold now.
     #[cfg(any(test, feature = "testing"))]
     held_follows: AtomicUsize,
+    /// Test hook: while [`Scheduler::hold_commits`]' guard holds the lock
+    /// for writing, the workspace's snapshots wait after their scan.
+    #[cfg(any(test, feature = "testing"))]
+    commit_hold: Mutex<Option<(WorkspaceId, Arc<tokio::sync::RwLock<()>>)>>,
+    /// Test hook: snapshots waiting at the commit hold now.
+    #[cfg(any(test, feature = "testing"))]
+    held_commits: AtomicUsize,
     /// Test hook: every snapshot fails before it scans.
     #[cfg(any(test, feature = "testing"))]
     fail_scans: AtomicBool,
@@ -464,6 +471,10 @@ impl Scheduler {
                 follow_hold: Arc::new(tokio::sync::RwLock::new(())),
                 #[cfg(any(test, feature = "testing"))]
                 held_follows: AtomicUsize::new(0),
+                #[cfg(any(test, feature = "testing"))]
+                commit_hold: Mutex::new(None),
+                #[cfg(any(test, feature = "testing"))]
+                held_commits: AtomicUsize::new(0),
                 #[cfg(any(test, feature = "testing"))]
                 fail_scans: AtomicBool::new(false),
                 #[cfg(any(test, feature = "testing"))]
@@ -768,9 +779,54 @@ impl Scheduler {
         }
     }
 
-    /// Test hook: while set, every snapshot fails after the scan hold and
-    /// after taking its carry, before it scans, with an I/O error, as on a
-    /// full disk.
+    /// Test hook: until the guard drops, every snapshot of `id` waits after
+    /// its scan and before it records anything, with its locks held: an
+    /// ancestor's snapshot can commit in between (#91).
+    #[cfg(any(test, feature = "testing"))]
+    pub async fn hold_commits(&self, id: WorkspaceId) -> CommitHold {
+        let lock = Arc::new(tokio::sync::RwLock::new(()));
+        let guard = Arc::clone(&lock).write_owned().await;
+        *self
+            .inner
+            .commit_hold
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some((id, lock));
+        CommitHold(guard)
+    }
+
+    /// Test hook: how many snapshots wait at [`Scheduler::hold_commits`]'
+    /// hold now.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn held_commits(&self) -> usize {
+        self.inner.held_commits.load(Ordering::SeqCst)
+    }
+
+    /// Where a snapshot of `id` waits while `Scheduler::hold_commits` (a
+    /// test hook) holds it. Blocks: called on the snapshot's blocking
+    /// thread.
+    pub(crate) fn commit_hold_point(&self, id: WorkspaceId) {
+        #[cfg(any(test, feature = "testing"))]
+        {
+            let lock = self
+                .inner
+                .commit_hold
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_ref()
+                .filter(|(held, _)| *held == id)
+                .map(|(_, lock)| Arc::clone(lock));
+            if let Some(lock) = lock {
+                self.inner.held_commits.fetch_add(1, Ordering::SeqCst);
+                drop(lock.blocking_read());
+                self.inner.held_commits.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        #[cfg(not(any(test, feature = "testing")))]
+        let _ = id;
+    }
+
+    /// Test hook: while set, every snapshot fails after the scan hold,
+    /// before it scans, with an I/O error, as on a full disk.
     #[cfg(any(test, feature = "testing"))]
     pub fn fail_scans(&self, fail: bool) {
         self.inner.fail_scans.store(fail, Ordering::SeqCst);
@@ -802,7 +858,7 @@ impl Scheduler {
     }
 
     /// Whether automatic snapshots of `ws` are paused.
-    pub(crate) fn is_paused(&self, ws: WorkspaceId) -> bool {
+    pub fn is_paused(&self, ws: WorkspaceId) -> bool {
         self.inner
             .lock_entries()
             .get(&ws)
@@ -996,6 +1052,15 @@ impl Scheduler {
 #[must_use = "dropping the guard lets the held snapshots scan at once"]
 #[derive(Debug)]
 pub struct ScanHold(
+    #[allow(dead_code, reason = "held for its drop")] tokio::sync::OwnedRwLockWriteGuard<()>,
+);
+
+/// Holds a workspace's snapshots between their scan and their commit; see
+/// [`Scheduler::hold_commits`].
+#[cfg(any(test, feature = "testing"))]
+#[must_use = "dropping the guard lets the held snapshots commit at once"]
+#[derive(Debug)]
+pub struct CommitHold(
     #[allow(dead_code, reason = "held for its drop")] tokio::sync::OwnedRwLockWriteGuard<()>,
 );
 

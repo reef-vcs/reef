@@ -599,6 +599,11 @@ fn heads(destination: &Destination) -> Vec<(String, Vec<StackMember>)> {
 /// One pass over `repo`'s proposals. Returns whether there is more to do.
 #[expect(clippy::too_many_lines, reason = "the pass's steps in order")]
 async fn pass(state: &Arc<AppState>, repo: RepoId) -> Result<bool, String> {
+    // A dependent whose dependency was just rewritten is carried before it
+    // is judged (R3.11), so a clean one is never told to propose again.
+    if let Err(error) = crate::lifecycle::carry::carry(state, repo, None).await {
+        tracing::warn!(%repo, error = %ErrorChain(&error), "cannot carry proposals before judging them");
+    }
     let proposals = state
         .db
         .open_proposals(repo)

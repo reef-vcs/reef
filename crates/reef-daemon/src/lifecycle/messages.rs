@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use reef_api::v1;
-use reef_lib::jj::lifecycle::{LifecycleState, TransitionCause};
+use reef_lib::jj::lifecycle::{DependencyEvent, LifecycleState, TransitionCause};
 use reef_lib::jj::oplog::OpEntry;
 
 use super::Actor;
@@ -100,7 +100,25 @@ pub fn cause_message(cause: TransitionCause) -> v1::TransitionCause {
         TransitionCause::Undo => v1::TransitionCause::Undo,
         TransitionCause::Observed => v1::TransitionCause::Observed,
         TransitionCause::Landing => v1::TransitionCause::Landing,
+        TransitionCause::Dependency => v1::TransitionCause::Dependency,
     }
+}
+
+/// A carry's dependency (R3.11) as a message; `None` without one.
+pub fn dependency_message(change: &str, event: &str) -> Option<v1::TransitionDependency> {
+    if change.is_empty() {
+        return None;
+    }
+    let event = match event.parse::<DependencyEvent>() {
+        Ok(DependencyEvent::Amended) => v1::DependencyEvent::Amended,
+        Ok(DependencyEvent::Landed) => v1::DependencyEvent::Landed,
+        Ok(DependencyEvent::Superseded) => v1::DependencyEvent::Superseded,
+        Err(_) => v1::DependencyEvent::Unspecified,
+    };
+    Some(v1::TransitionDependency {
+        change_id: change.to_owned(),
+        event: event.into(),
+    })
 }
 
 /// The cause a v1 value names; `None` for UNSPECIFIED or an unknown value.
@@ -111,6 +129,7 @@ pub fn cause_of(value: i32) -> Option<TransitionCause> {
         v1::TransitionCause::Undo => Some(TransitionCause::Undo),
         v1::TransitionCause::Observed => Some(TransitionCause::Observed),
         v1::TransitionCause::Landing => Some(TransitionCause::Landing),
+        v1::TransitionCause::Dependency => Some(TransitionCause::Dependency),
     }
 }
 
@@ -162,6 +181,11 @@ pub fn transition_message(row: &TransitionRow) -> v1::ChangeTransition {
             token_id: token.clone(),
             token_name: row.remote_token_name.clone().unwrap_or_default(),
         }),
+        dependency: dependency_message(
+            row.dependency_change_id.as_deref().unwrap_or_default(),
+            row.dependency_event.as_deref().unwrap_or_default(),
+        )
+        .map(Box::new),
     }
 }
 
@@ -181,6 +205,8 @@ pub fn operation_transitions(entry: &OpEntry) -> Vec<v1::ChangeTransition> {
             reason: record.reason,
             superseded_by: record.superseded_by,
             destination: record.destination,
+            dependency: dependency_message(&record.dependency, &record.dependency_event)
+                .map(Box::new),
             undoes_operation_id: record.undoes,
             operation_id: entry.id.to_string(),
             recorded_at: Some(timestamp(Timestamp::from(entry.end))),

@@ -354,7 +354,7 @@ pub(crate) struct Landing {
     pub(crate) outcome: String,
     /// For blocked and dequeued: `policy`, `conflicted`, `unlanded_parents`,
     /// `amended`, `destination`, `busy`, `failed`, `checks`,
-    /// `unavailable`, `empty` or `alone`.
+    /// `unavailable`, `empty`, `alone` or `dependency` (R3.11).
     pub(crate) reason: Option<String>,
     /// The batch it is, or was last, in (R3.14).
     pub(crate) batch_id: Option<String>,
@@ -740,6 +740,7 @@ fn next_words(landing: &Landing) -> String {
             landing.destination, landing.destination
         ),
         Some("unlanded_parents") => "A change below it in its stack did not land (its landing names it): fix that one, propose the stack again (`reef propose`), then land it again.".to_owned(),
+        Some("dependency") => "A change below it in its stack was declined or withdrawn (its message names it and the `reef rebase` that moves this change off it): move it off, or withdraw it.".to_owned(),
         Some("alone") => "It changes reef-policy.toml or reef-checks.toml, which lands on its own: once the changes below it have landed, propose it again (`reef propose`) and land it.".to_owned(),
         Some("amended") => "The change moved since it was proposed: `reef propose` it again, then land.".to_owned(),
         Some("destination") => "The destination bookmark is gone or conflicted: fix it, or propose for another with `reef propose --to`.".to_owned(),

@@ -611,6 +611,8 @@ async fn queued_is_reserved() {
         remote_token_name: None,
         created_at: reef_daemon::model::Timestamp::now(),
         recorded_at: None,
+        dependency_change_id: None,
+        dependency_event: None,
     };
     state.db.insert_pending_transition(&queued).unwrap();
     "queued".clone_into(&mut row.state);
@@ -695,6 +697,8 @@ async fn reads_wait_for_a_pending_transition() {
         remote_token_name: None,
         created_at,
         recorded_at: None,
+        dependency_change_id: None,
+        dependency_event: None,
     };
     let proposals = || async {
         client
@@ -911,6 +915,8 @@ async fn crash_between_row_and_operation() {
         remote_token_name: None,
         created_at: reef_daemon::model::Timestamp::now(),
         recorded_at: None,
+        dependency_change_id: None,
+        dependency_event: None,
     };
     let db = &daemon.handle.state().db;
     // One whose operation was written, one whose operation never was.
@@ -939,6 +945,8 @@ async fn crash_between_row_and_operation() {
         superseded_by: String::new(),
         destination: "main".to_owned(),
         undoes: String::new(),
+        dependency: String::new(),
+        dependency_event: String::new(),
     };
     let record = reef_lib::jj::lifecycle::TransitionRecord {
         id: written.id.clone(),
@@ -952,6 +960,8 @@ async fn crash_between_row_and_operation() {
         superseded_by: String::new(),
         destination: "main".to_owned(),
         undoes: String::new(),
+        dependency: String::new(),
+        dependency_event: String::new(),
     };
     tokio::task::spawn_blocking(move || {
         pollster::block_on(async {

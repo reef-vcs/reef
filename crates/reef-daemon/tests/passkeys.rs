@@ -14,6 +14,7 @@
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use hyper_util::client::legacy::Client as HttpClient;
@@ -1704,12 +1705,10 @@ async fn a_resolution_during_an_approve_is_busy() {
 // 9. A reset that commits after an approve has recorded its passkey's use
 // and before the approve's key is inserted: the insert is refused, so no
 // live key is left certified by the reset passkey, and the approval is
-// pending again. On one thread the approve's task runs only while the test
-// awaits, and inserts the key on that thread. Its read of the key before
-// the insert is made slow; the test waits for the use, then resets without
-// an await, so the reset commits before the insert can run. Reviews of
-// df9d1598, F1, and 62dd8618, F1.
-#[tokio::test(flavor = "current_thread")]
+// pending again. The approve is held between the two, the reset runs, and
+// the approve goes on. Reviews of df9d1598, F1, 62dd8618, F1, and
+// c64f1662, F2.
+#[tokio::test(flavor = "multi_thread")]
 async fn a_reset_during_an_approve_leaves_no_live_key() {
     use reef_daemon::identity::IdentityError;
     use reef_daemon::identity::approvals::Resolution;
@@ -1719,9 +1718,9 @@ async fn a_reset_during_an_approve_leaves_no_live_key() {
     create_identity(client, "alice").await;
     let page = ui(client).await;
     let mut passkey = Authenticator::new(Algorithm::EdDsa);
-    let registered = register(&page, &mut passkey, "alice", None).await.unwrap();
+    register(&page, &mut passkey, "alice", None).await.unwrap();
     let change = commit_on(client, &repo.id, "root()", &[("a.txt", "a\n")]).await;
-    let identities = &daemon.handle.state().identity;
+    let identities = Arc::clone(&daemon.handle.state().identity);
     let key = fresh_key();
     let key_id = key.public_key().id().to_string();
     let approval = request_approval(
@@ -1735,52 +1734,33 @@ async fn a_reset_during_an_approve_leaves_no_live_key() {
     .await
     .unwrap();
     let asserted = assertion(&mut passkey, &page.origin, &approval.challenge);
-    let db =
-        rusqlite::Connection::open(daemon.tmp.path().join("state").join("reef.sqlite3")).unwrap();
-    db.execute_batch(
-        "CREATE VIEW slow AS WITH RECURSIVE c(x) AS
-           (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 15000000) SELECT count(*) AS n FROM c;
-         ALTER TABLE identity_authorities RENAME TO identity_authorities_real;
-         CREATE VIEW identity_authorities AS SELECT * FROM identity_authorities_real
-           WHERE (SELECT n FROM slow) > 0;",
-    )
-    .unwrap();
-    let used = || -> bool {
-        db.query_row(
-            "SELECT last_used_at IS NOT NULL FROM passkeys WHERE id = ?1",
-            [&registered.id],
-            |row| row.get(0),
-        )
-        .unwrap()
-    };
-    let web = Channel::Web {
-        session: "0123456789abcdef".to_owned(),
-    };
-    let mut approving = Box::pin(identities.resolve_approval(
-        &web,
-        Some(&page.origin),
-        &approval.id,
-        Resolution::Approve(asserted),
-    ));
-    assert!(futures::poll!(approving.as_mut()).is_pending());
+    let hold = identities.hold_approves().await;
+    let approving = tokio::spawn({
+        let identities = Arc::clone(&identities);
+        let origin = page.origin.clone();
+        let id = approval.id.clone();
+        async move {
+            let web = Channel::Web {
+                session: "0123456789abcdef".to_owned(),
+            };
+            identities
+                .resolve_approval(&web, Some(&origin), &id, Resolution::Approve(asserted))
+                .await
+        }
+    });
     let deadline = Instant::now() + Duration::from_secs(30);
-    while !used() {
+    while identities.held_approves() == 0 {
         assert!(
             Instant::now() < deadline,
-            "the approve never used the passkey"
+            "the approve never reached the hold"
         );
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     let reset = identities
         .reset_passkeys("alice", "lost my laptop")
         .unwrap();
-    let approved = approving.await;
-    db.execute_batch(
-        "DROP VIEW identity_authorities;
-         ALTER TABLE identity_authorities_real RENAME TO identity_authorities;
-         DROP VIEW slow;",
-    )
-    .unwrap();
+    drop(hold);
+    let approved = approving.await.unwrap();
     assert_eq!(reset.removed.len(), 1, "the reset removed the passkey");
     assert!(
         reset.removed[0].last_used_at.is_some(),

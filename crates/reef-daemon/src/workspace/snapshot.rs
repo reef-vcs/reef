@@ -2,22 +2,25 @@
 //! scheduled, runs [`Manager::run_snapshot`] with the workspace's scan lock
 //! held.
 //!
-//! 1. (async) Take a scan permit; ask the repository thread for its head,
-//!    reloaded first if an operation was written outside the daemon. Take
-//!    the journal of paths reported since the last scan, which a watcher
-//!    snapshot or a synced read of a notify workspace narrows its scan to
-//!    (R1.30, R2.23, see [`crate::snapshot`]).
+//! 1. (async) Ask the repository thread for its head, reloaded first if an
+//!    operation was written outside the daemon. Take a scan permit, and the
+//!    journal of paths reported
+//!    since the last scan, which a watcher snapshot or a synced read of a
+//!    notify workspace narrows its scan to (R1.30, R2.23, see
+//!    [`crate::snapshot`]).
 //! 2. (blocking) Lock the jj handle, point it at that head, and
 //!    `begin_snapshot`: lock the working copy, check freshness, scan. If the
 //!    working copy is ahead of the head (the `jj` CLI ran on the registered
 //!    root), reload the repository thread at head and try once more.
 //! 3. (repository thread) If the scan changed anything, `commit_snapshot`;
-//!    its result becomes the thread's head.
+//!    its result becomes the thread's head. The workspaces its rebase of
+//!    descendants moved are queued to follow (#91, #202, ADR 0084).
 //! 4. (blocking) Update the row and index the operation as a local snapshot
 //!    (R1.16), then save the working-copy state at the new operation (or at
 //!    the head, when nothing was committed). A snapshot carried onto a
-//!    write's commit (issue #80, ADR 0039) first checks the new commit out,
-//!    so the row names it only once the files are its.
+//!    commit Reef moved the workspace to (issue #80, ADR 0039, ADR 0084)
+//!    first checks the new commit out, so the row names it only once the
+//!    files are its.
 //! 5. (async) Log; when the working-copy commit moved, check the mounted
 //!    stores' lockfiles against the commit (R1.20, on the repository
 //!    thread), so the answer to an explicit snapshot already carries the
@@ -39,7 +42,6 @@
 //! workspace whose journal was fresh reports any change the journal did not
 //! name, as a miss.
 
-use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, PoisonError};
@@ -49,8 +51,8 @@ use futures::FutureExt as _;
 use reef_lib::error::ErrorChain;
 use reef_lib::jj::snapshot::UntrackedReasonKind;
 use reef_lib::jj::{
-    Carry, ChangeIdHex, CommitIdHex, FullScanReason, IgnoreSources, OpKind, OpMeta, OperationIdHex,
-    ReadonlyRepo, Repo, ScannedTree, SnapshotCommit, SnapshotError, commit_snapshot,
+    ChangeIdHex, CommitIdHex, FullScanReason, IgnoreSources, OpKind, OpMeta, OperationIdHex,
+    ReadonlyRepo, Repo, ScannedTree, SnapshotCommit, SnapshotError, Unfinished, commit_snapshot,
 };
 use reef_lib::telemetry::elapsed_ms;
 use tracing::Instrument as _;
@@ -140,6 +142,10 @@ struct Ran {
     /// It was carried onto a write's commit; `conflict`: with a conflict.
     carried: bool,
     conflict: bool,
+    /// Other workspaces whose commit its rebase of descendants moved,
+    /// descendants first: each follows with a snapshot of its own (#91,
+    /// #202).
+    moved: Vec<WorkspaceId>,
 }
 
 /// Whether the snapshot wrote an operation.
@@ -311,7 +317,8 @@ impl Manager {
         } else {
             None
         };
-        if notify && walk.is_none() && peek.stale.is_none() && peek.empty && !entry.carry.is_set() {
+        if notify && walk.is_none() && peek.stale.is_none() && peek.empty && !entry.owes_snapshot()
+        {
             let head = self.workspace_head(&entry, true).await?;
             let at_view = reef_lib::jj::view_wc_commit(&head, &id.jj_workspace_name())
                 .is_some_and(|wc| wc.as_str() == record.commit_id);
@@ -428,7 +435,7 @@ impl Manager {
         }
         if !fallback && self.scheduler.is_notify(id) {
             let peek = self.scheduler.journals().peek(id);
-            if peek.stale.is_none() && peek.empty && !entry.carry.is_set() {
+            if peek.stale.is_none() && peek.empty && !entry.owes_snapshot() {
                 // A read's snapshot took the journal ahead of this event,
                 // which the debouncer held back (R2.23).
                 return Scheduled::Taken;
@@ -502,8 +509,17 @@ impl Manager {
             .workspace(id.as_hex())
             .agent(agent.unwrap_or_else(|| record.owner.clone()));
         // The head first: a permit is a scan slot, not held while the
-        // repository thread is busy.
-        let head = self.workspace_head(entry, true).await?;
+        // repository thread is busy. This snapshot does what a follow
+        // queued before that head would (#202), so the mark is cleared in
+        // the job that reads it; a commit that moves the workspace later
+        // queues another.
+        let slot = Arc::clone(entry);
+        let (head, ()) = self
+            .workspace_head_with(entry, true, move || {
+                slot.follow_pending.store(false, Ordering::Release);
+            })
+            .await?;
+        let unfinished = entry.unfinished();
         let permit = self.scheduler.acquire().await;
         self.scheduler.scan_hold_point().await;
         let scan_failure = self.scheduler.scan_failure();
@@ -523,17 +539,9 @@ impl Manager {
             let spec = entry.spec();
             let prefixes = trigger.prefixes().map(<[PathBuf]>::to_vec);
             let provenance = self.provenance.get().cloned();
+            let manager = self.scheduler.manager();
             tokio::task::spawn_blocking(move || {
-                refuse_symlinked_root(&entry.paths.root)?;
-                // An overlay whose mount is gone would scan as empty.
-                entry.backend.check_materialized(&entry.paths)?;
-                let jj = Arc::clone(&entry.jj);
-                let mut guard = jj.lock().unwrap_or_else(PoisonError::into_inner);
-                let repo = guard.as_mut().ok_or(ManagerError::NotLoaded(id))?;
-                // Under the jj lock and the scan lock: exactly this
-                // snapshot uses it.
-                let carry = entry.carry.take();
-                let pipeline = Pipeline {
+                let mut pipeline = Pipeline {
                     entry: &entry,
                     db: &db,
                     id,
@@ -543,27 +551,15 @@ impl Manager {
                     spec: &spec,
                     meta: &meta,
                     prefixes: prefixes.as_deref(),
-                    carry: carry.as_ref(),
-                    committed: Cell::new(false),
+                    unfinished,
                     fail_check_out,
                     provenance: provenance.as_deref(),
+                    manager,
                 };
-                let ran = match scan_failure {
-                    Some(source) => Err(BackendError::Io {
-                        op: "scan",
-                        path: entry.paths.root.clone(),
-                        source,
-                    }
-                    .into()),
-                    None => pipeline.run(repo, head, permit),
-                };
-                if ran.is_err()
-                    && !pipeline.committed.get()
-                    && let Some(carry) = carry
-                {
-                    // Unused: nothing was committed. A re-merge's carry
-                    // (see `record`) is set only after a commit.
-                    entry.carry.restore(carry);
+                let ran = pipeline.run(head, permit, scan_failure);
+                if ran.is_ok() {
+                    // The files are the row's commit's again.
+                    entry.set_unfinished(None);
                 }
                 ran
             })
@@ -639,6 +635,7 @@ impl Manager {
                 .await;
         }
         self.verify_stores(entry, &outcome, &record.commit_id).await;
+        self.follow_moved(ran.moved);
         self.scheduler.run_hooks(&outcome);
         // A full scan that succeeded saw every write made before it began;
         // a narrowed one, every path journaled when it took the journal
@@ -731,6 +728,75 @@ impl Manager {
 }
 
 impl Manager {
+    /// After a snapshot's commit, in the same repository-thread job: the
+    /// Reef workspaces other than `skip`, on other changes, whose
+    /// working-copy commit the commit's rebase of descendants moved,
+    /// descendants first, each marked as owed a follow. Those not marked
+    /// already are returned, to follow. A workspace a write has paused is
+    /// among them: its follow waits for the write, which may have read the
+    /// view before this commit. Nothing is handed to the workspace: its
+    /// snapshot reads who moved it from the operation log (ADR 0084).
+    /// Failures are logged; the workspace then follows at its next
+    /// snapshot.
+    pub(super) async fn moved_by(
+        &self,
+        before: &ReadonlyRepo,
+        committed: &SnapshotCommit,
+        skip: &str,
+    ) -> Vec<WorkspaceId> {
+        let moved = match reef_lib::jj::rewrite::moved_working_copies(before, &committed.repo, skip)
+            .await
+        {
+            Ok(moved) => moved,
+            Err(error) => {
+                tracing::warn!(error = %ErrorChain(&error), "cannot read the working copies a snapshot moved");
+                return Vec::new();
+            }
+        };
+        moved
+            .into_iter()
+            // Another workspace on the same change is ADR 0018's: it adopts,
+            // or diverges, at its own next snapshot.
+            .filter(|(_, now)| now.change_id != committed.change_id)
+            .filter_map(|(_, now)| now.workspace.strip_prefix("reef-")?.parse().ok())
+            .filter(|id| {
+                self.entry(*id)
+                    .is_some_and(|entry| !entry.follow_pending.swap(true, Ordering::AcqRel))
+            })
+            .collect()
+    }
+
+    /// Snapshots each workspace in `moved`, in order, after the snapshot
+    /// that moved them: an idle one checks its new tree out (#202), a busy
+    /// one carries its edits onto it (#91). Runs as its own task.
+    fn follow_moved(&self, moved: Vec<WorkspaceId>) {
+        if moved.is_empty() {
+            return;
+        }
+        let Some(manager) = self.scheduler.manager() else {
+            return;
+        };
+        let task = async move {
+            for id in moved {
+                // A snapshot of it that loaded a head since has followed.
+                let owed = manager
+                    .entry(id)
+                    .is_some_and(|entry| entry.follow_pending.swap(false, Ordering::AcqRel));
+                if !owed {
+                    continue;
+                }
+                let kind = SnapshotKind::Explicit;
+                if let Err(error) = manager
+                    .snapshot_with(id, kind, description(kind, id, None), None)
+                    .await
+                {
+                    tracing::info!(workspace_id = %id, error = %ErrorChain(&error), "cannot follow a rebased commit now; the workspace follows at its next snapshot");
+                }
+            }
+        };
+        tokio::spawn(task.instrument(tracing::Span::current()));
+    }
+
     /// Points the row, in the database and in memory, at the view's
     /// working-copy commit after an unchanged snapshot, if it moved: the
     /// workspace adopted another's rewrite of the shared commit, or the view
@@ -757,7 +823,7 @@ impl Manager {
 
 /// The blocking half of a snapshot, with the jj handle locked.
 struct Pipeline<'a> {
-    entry: &'a WorkspaceEntry,
+    entry: &'a Arc<WorkspaceEntry>,
     db: &'a Db,
     id: WorkspaceId,
     kind: SnapshotKind,
@@ -767,14 +833,15 @@ struct Pipeline<'a> {
     meta: &'a OpMeta,
     /// What to narrow the scan to; `None` scans everything.
     prefixes: Option<&'a [PathBuf]>,
-    /// What a write that moved the workspace handed this snapshot.
-    carry: Option<&'a Carry>,
-    /// Set once the snapshot's operation is committed.
-    committed: Cell<bool>,
+    /// The workspace's last carried commit, if its check-out failed.
+    unfinished: Option<Unfinished>,
     /// `Scheduler::fail_check_outs` (a test hook).
     fail_check_out: bool,
     /// Records each committed snapshot's provenance (R3.04).
     provenance: Option<&'a crate::provenance::Provenance>,
+    /// Queues the follows of the workspaces a commit's rebase of
+    /// descendants moves (#91, #202).
+    manager: Option<Arc<Manager>>,
 }
 
 impl Pipeline<'_> {
@@ -788,13 +855,13 @@ impl Pipeline<'_> {
     ) -> Result<reef_lib::jj::PendingSnapshot<'r>, SnapshotError> {
         fn scan<'r>(
             repo: &'r mut Repo,
-            (expected, carry): (Option<&CommitIdHex>, Option<&Carry>),
+            (expected, unfinished): (Option<&CommitIdHex>, Option<&Unfinished>),
             sources: &IgnoreSources<'_>,
             prefixes: Option<&[PathBuf]>,
         ) -> Result<reef_lib::jj::PendingSnapshot<'r>, SnapshotError> {
-            pollster::block_on(repo.begin_snapshot(expected, carry, sources, prefixes))
+            pollster::block_on(repo.begin_snapshot(expected, unfinished, sources, prefixes))
         }
-        let (expected, prefixes) = ((self.expected, self.carry), self.prefixes);
+        let (expected, prefixes) = ((self.expected, self.unfinished.as_ref()), self.prefixes);
         match permit.pool() {
             Some(pool) => pool.install(move || scan(repo, expected, sources, prefixes)),
             None => scan(repo, expected, sources, prefixes),
@@ -802,12 +869,29 @@ impl Pipeline<'_> {
     }
 
     /// Steps 2 to 4. The scan permit is released once the scan is done.
+    /// `scan_failure` is `Scheduler::fail_scans` (a test hook).
     fn run(
-        &self,
-        repo: &mut Repo,
+        &mut self,
         head: Arc<ReadonlyRepo>,
         permit: ScanPermit,
+        scan_failure: Option<std::io::Error>,
     ) -> Result<Ran, ManagerError> {
+        let root = &self.entry.paths.root;
+        refuse_symlinked_root(root)?;
+        // An overlay whose mount is gone would scan as empty.
+        self.entry.backend.check_materialized(&self.entry.paths)?;
+        let entry = Arc::clone(self.entry);
+        let mut guard = entry.jj.lock().unwrap_or_else(PoisonError::into_inner);
+        let repo = guard.as_mut().ok_or(ManagerError::NotLoaded(self.id))?;
+        if let Some(source) = scan_failure {
+            let path = root.clone();
+            return Err(BackendError::Io {
+                op: "scan",
+                path,
+                source,
+            }
+            .into());
+        }
         let sources = IgnoreSources {
             reefignore: Some(self.reefignore),
             excludes: &self.spec.excludes,
@@ -835,13 +919,7 @@ impl Pipeline<'_> {
             "working copy is ahead of the daemon's head ({:?}); reloading",
             behind.0
         );
-        let head = pollster::block_on(self.entry.repo.call_async(|head| {
-            async move {
-                head.reload().await?;
-                Ok::<_, ManagerError>(head.readonly())
-            }
-            .boxed_local()
-        }))??;
+        let head = self.reload()?;
         repo.set_head(head);
         let pending = self.begin(repo, &sources, &permit)?;
         drop(permit);
@@ -850,6 +928,17 @@ impl Pipeline<'_> {
             repo.set_head(new_head);
         }
         ran
+    }
+
+    /// The repository thread's head, reloaded.
+    fn reload(&self) -> Result<Arc<ReadonlyRepo>, ManagerError> {
+        pollster::block_on(self.entry.repo.call_async(move |head| {
+            async move {
+                head.reload().await?;
+                Ok::<_, ManagerError>(head.readonly())
+            }
+            .boxed_local()
+        }))?
     }
 
     /// Steps 3 and 4: commit if anything changed, update the row, and save
@@ -861,6 +950,9 @@ impl Pipeline<'_> {
         &self,
         mut pending: reef_lib::jj::PendingSnapshot<'_>,
     ) -> (Result<Ran, ManagerError>, Option<Arc<ReadonlyRepo>>) {
+        if let Some(manager) = &self.manager {
+            manager.scheduler.commit_hold_point(self.id);
+        }
         let adopted = pending.adopted();
         let mut updated_files = pending.updated_files();
         let millis =
@@ -900,6 +992,7 @@ impl Pipeline<'_> {
                     full_reason,
                     carried: false,
                     conflict: false,
+                    moved: Vec::new(),
                 })
                 .map_err(ManagerError::from);
             return (ran, None);
@@ -907,8 +1000,6 @@ impl Pipeline<'_> {
 
         let plan = pending.plan().clone();
         let recovered = plan.recover.is_some();
-        let carried = plan.carried.clone();
-        let conflict = carried.is_some() && !plan.tree_ids.is_resolved();
         let mut meta = self.meta.clone();
         if let Some(started) = &plan.started_on {
             // Issue #248: say so in the operation's description.
@@ -919,28 +1010,18 @@ impl Pipeline<'_> {
                 started.head
             );
         }
-        let committed = pollster::block_on(self.entry.repo.call_async(move |head| {
-            async move {
-                let committed = commit_snapshot(head.repo.head(), &plan, &meta).await;
-                if let Ok(committed) = &committed {
-                    // The next job starts from this operation (R1.03). A
-                    // reload is not needed: nothing else in the daemon
-                    // writes, and `refresh` catches anything outside it.
-                    head.adopt(Arc::clone(&committed.repo));
-                }
-                committed
-            }
-            .boxed_local()
-        }));
-        let committed = match committed {
-            Ok(Ok(committed)) => committed,
-            Ok(Err(error)) => return (Err(error.into()), None),
-            Err(error) => return (Err(error.into()), None),
+        let Committed {
+            commit: committed,
+            moved,
+            carried,
+        } = match self.commit(plan, meta) {
+            Ok(committed) => committed,
+            Err(error) => return (Err(error), None),
         };
-        self.committed.set(true);
+        let conflict = carried.is_some() && committed.tree_id.is_none();
         let started_on = committed.started_on.clone();
         let new_head = Some(Arc::clone(&committed.repo));
-        if pending.carried() {
+        if carried.is_some() {
             // The commit has the write's changes, which are not on disk yet:
             // the row moves to it only once they are.
             match self.check_out_carried(&mut pending, &committed, carried.clone()) {
@@ -966,12 +1047,70 @@ impl Pipeline<'_> {
             full_reason,
             carried: carried.is_some(),
             conflict,
+            moved,
         });
         (ran, new_head)
     }
 }
 
+/// What [`Pipeline::commit`] wrote.
+struct Committed {
+    commit: SnapshotCommit,
+    /// The other workspaces it moved, to follow (#91, #202).
+    moved: Vec<WorkspaceId>,
+    /// `Some(disk)`: the commit has files that are not on disk yet, the
+    /// tree the scan read being `disk`: the scan was carried onto a write's
+    /// commit, or merged onto an ancestor's rebase of its commit.
+    carried: Option<ScannedTree>,
+}
+
 impl Pipeline<'_> {
+    /// Step 3: commits `plan` on the repository thread, which adopts the
+    /// new head, and hands carries to the workspaces it moved (#91, #202).
+    /// When an ancestor's snapshot rebased the commit the plan rewrites
+    /// after the scan, the plan is merged onto the rebased commit
+    /// ([`onto_moved`](reef_lib::jj::snapshot::onto_moved)) rather than
+    /// diverging the change.
+    fn commit(
+        &self,
+        plan: reef_lib::jj::SnapshotPlan,
+        meta: OpMeta,
+    ) -> Result<Committed, ManagerError> {
+        let manager = self.manager.clone();
+        let name = self.id.jj_workspace_name();
+        let committed = pollster::block_on(self.entry.repo.call_async(move |head| {
+            async move {
+                let before = Arc::clone(head.repo.head());
+                let plan = match moved_to(&before, &plan, &name).await? {
+                    Some(to) => reef_lib::jj::snapshot::onto_moved(&before, &plan, &to).await?,
+                    None => plan,
+                };
+                let committed = commit_snapshot(&before, &plan, &meta).await?;
+                // The next job starts from this operation (R1.03). A reload
+                // is not needed: nothing else in the daemon writes, and
+                // `refresh` catches anything outside it.
+                head.adopt(Arc::clone(&committed.repo));
+                let mut moved = Vec::new();
+                if let Some(manager) = &manager {
+                    // In this job: a snapshot of a moved workspace that
+                    // loads this head clears the mark set here.
+                    moved = manager.moved_by(&before, &committed, &name).await;
+                }
+                Ok::<_, SnapshotError>(Committed {
+                    commit: committed,
+                    moved,
+                    carried: plan.carried,
+                })
+            }
+            .boxed_local()
+        }));
+        match committed {
+            Ok(Ok(committed)) => Ok(committed),
+            Ok(Err(error)) => Err(error.into()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     /// Records `committed`'s provenance (R3.04), which never fails the
     /// snapshot.
     fn record_provenance(&self, committed: &SnapshotCommit) {
@@ -1015,16 +1154,39 @@ impl Pipeline<'_> {
                 .map_err(ManagerError::from)
         };
         if checked_out.is_err()
-            && let Some(from) = self.expected
+            && let Some(disk) = base
         {
-            self.entry.carry.set(Carry {
-                from: from.clone(),
-                to: committed.commit_id.clone(),
-                base,
-            });
+            self.entry.set_unfinished(Some(Unfinished {
+                commit: committed.commit_id.clone(),
+                disk,
+            }));
         }
         checked_out
     }
+}
+
+/// The view's commit for workspace `name` at `head`, when Reef moved
+/// `plan.rewrite_of` there after the scan (an ancestor's snapshot that
+/// rebased it, a describe below it), read from the operation log (ADR
+/// 0084). `None` for a plan that diverges, recovers or starts a new change,
+/// when the view's commit is the plan's, and when the move is not Reef's
+/// (ADR 0018).
+async fn moved_to(
+    head: &ReadonlyRepo,
+    plan: &reef_lib::jj::SnapshotPlan,
+    name: &str,
+) -> Result<Option<CommitIdHex>, SnapshotError> {
+    if plan.divergent || plan.recover.is_some() || plan.started_on.is_some() {
+        return Ok(None);
+    }
+    let Some(now) = reef_lib::jj::repo::view_wc_commit(head, name) else {
+        return Ok(None);
+    };
+    if now == plan.rewrite_of {
+        return Ok(None);
+    }
+    let moved = reef_lib::jj::snapshot::moved_by_reef(head, name, &plan.rewrite_of).await?;
+    Ok(moved.then_some(now))
 }
 
 /// Refuses a root replaced by a symlink, which a scan would follow, taking

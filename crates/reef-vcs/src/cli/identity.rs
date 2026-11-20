@@ -105,7 +105,7 @@ enum PasskeyCommand {
         #[arg(long)]
         print_url: bool,
     },
-    /// Remove all of an identity's passkeys and revoke the unexpired keys they approved.
+    /// Remove all of an identity's passkeys and revoke the unexpired keys any of its passkeys approved.
     #[command(after_help = "Example: reef identity passkey reset alice --reason lost-laptop")]
     Reset {
         /// The identity's name or id.
@@ -573,14 +573,8 @@ async fn passkey(ctx: &Ctx, command: PasskeyCommand, advice: &AdviceCtx) -> Resu
                 removed: response.removed.iter().map(Passkey::from).collect(),
                 revoked_key_ids: response.revoked_key_ids,
             };
-            if !reset.removed.is_empty() || !reset.revoked_key_ids.is_empty() {
-                ctx.out.note(&format!(
-                    "reef: removed {} passkey{} and revoked {} key{}: no sign-off is verified with them again",
-                    reset.removed.len(),
-                    if reset.removed.len() == 1 { "" } else { "s" },
-                    reset.revoked_key_ids.len(),
-                    if reset.revoked_key_ids.len() == 1 { "" } else { "s" },
-                ));
+            if let Some(note) = reset_note(reset.removed.len(), reset.revoked_key_ids.len()) {
+                ctx.out.note(&note);
             }
             ctx.out.object(&Reset(reset))
         }
@@ -1279,6 +1273,30 @@ impl TextRender for OpenedPasskeys {
     }
 }
 
+/// The stderr note after `passkey reset`, naming only what it did: with
+/// no live passkeys, the keys it revoked were certified by passkeys removed
+/// earlier.
+fn reset_note(removed: usize, revoked: usize) -> Option<String> {
+    let passkeys = |n: usize| format!("{n} passkey{}", if n == 1 { "" } else { "s" });
+    let keys = |n: usize| format!("{n} key{}", if n == 1 { "" } else { "s" });
+    match (removed, revoked) {
+        (0, 0) => None,
+        (0, revoked) => Some(format!(
+            "reef: revoked {} from now, certified by passkeys removed earlier",
+            keys(revoked)
+        )),
+        (removed, 0) => Some(format!(
+            "reef: removed {}: no sign-off is verified with them again",
+            passkeys(removed)
+        )),
+        (removed, revoked) => Some(format!(
+            "reef: removed {} and revoked {} from now: no sign-off is verified with those passkeys again",
+            passkeys(removed),
+            keys(revoked)
+        )),
+    }
+}
+
 /// `passkey reset`: what it removed and revoked.
 #[derive(Serialize)]
 #[serde(transparent)]
@@ -1297,6 +1315,9 @@ impl TextRender for Reset {
                 passkey.label,
                 short(&passkey.fingerprint)
             )?;
+        }
+        if self.0.revoked_key_ids.is_empty() {
+            writeln!(w, "No unexpired keys to revoke.")?;
         }
         for key_id in &self.0.revoked_key_ids {
             writeln!(w, "revoked key {}", short(key_id))?;
@@ -1348,5 +1369,24 @@ mod passkey_tests {
             "the snippet loads as policy"
         );
         assert_eq!(passkeys_snippet(&[passkey("bob", &b, true)]), "");
+    }
+
+    #[test]
+    fn the_reset_note_names_only_what_happened() {
+        assert_eq!(reset_note(0, 0), None);
+        assert_eq!(
+            reset_note(0, 1).as_deref(),
+            Some("reef: revoked 1 key from now, certified by passkeys removed earlier")
+        );
+        assert_eq!(
+            reset_note(2, 0).as_deref(),
+            Some("reef: removed 2 passkeys: no sign-off is verified with them again")
+        );
+        assert_eq!(
+            reset_note(1, 3).as_deref(),
+            Some(
+                "reef: removed 1 passkey and revoked 3 keys from now: no sign-off is verified with those passkeys again"
+            )
+        );
     }
 }

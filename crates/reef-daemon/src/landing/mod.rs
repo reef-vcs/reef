@@ -18,10 +18,10 @@
 //! `land_batch` takes a list so that stacks (R3.10) and batches (R3.14)
 //! widen it; this ticket lands one change per landing.
 
-mod automatic;
+pub(crate) mod automatic;
 mod batch;
 mod history;
-mod instruct;
+pub(crate) mod instruct;
 pub mod messages;
 pub(crate) mod push;
 mod worker;
@@ -156,6 +156,8 @@ pub enum Reason {
     /// The change edits a policy file above the bottom of its stack
     /// (R3.10): it lands on its own, after the changes below it.
     Alone,
+    /// A change below it in its stack was declined or withdrawn (R3.11).
+    Dependency,
 }
 
 impl Reason {
@@ -173,6 +175,7 @@ impl Reason {
             Reason::Unavailable => "unavailable",
             Reason::Empty => "empty",
             Reason::Alone => "alone",
+            Reason::Dependency => "dependency",
         }
     }
 
@@ -190,6 +193,7 @@ impl Reason {
             Reason::Unavailable,
             Reason::Empty,
             Reason::Alone,
+            Reason::Dependency,
         ]
         .into_iter()
         .find(|reason| reason.as_str() == text)
@@ -210,6 +214,20 @@ pub enum LandingError {
         /// The head of the stack being landed, when the change is below it
         /// (R3.10): proposing the head proposes it.
         head: Option<String>,
+    },
+    /// A change below it in its stack was declined or withdrawn at its
+    /// current commit (R3.11).
+    #[error("change {change} below it was {state}; it cannot land on it")]
+    DependencyLeftReview {
+        /// The member that left review.
+        change: String,
+        /// `declined` or `withdrawn`.
+        state: LifecycleState,
+        /// The transition that took it out.
+        transition: String,
+        /// The `reef rebase` arguments that move the changes above it off
+        /// it: the member above it, and where to.
+        moves: (String, String),
     },
     /// The proposal's commit is not the change's visible one.
     #[error("change {change} moved from {commit}, the proposed commit, to {visible}")]
@@ -310,7 +328,8 @@ pub enum LandingError {
 impl Classify for LandingError {
     fn kind(&self) -> ErrorKind {
         match self {
-            Self::NotProposed { .. }
+            Self::DependencyLeftReview { .. }
+            | Self::NotProposed { .. }
             | Self::Amended { .. }
             | Self::DestinationNotLocal(_)
             | Self::DestinationNotFound(_)
@@ -355,6 +374,24 @@ impl Advise for LandingError {
                     ),
                 })
             }
+            Self::DependencyLeftReview {
+                change,
+                state,
+                moves: (above, onto),
+                ..
+            } => Some(Advice::run(
+                format!(
+                    "Change {change} below it was {state}. Move the changes above it off it, or withdraw this one; proposing the stack again would not put {change} back."
+                ),
+                [
+                    "reef",
+                    "rebase",
+                    above.as_str(),
+                    "--source",
+                    "--onto",
+                    onto.as_str(),
+                ],
+            )),
             Self::NotProposed { change, state, .. } if *state == LifecycleState::Queued => {
                 Some(Advice::run(
                     "It is already queued; follow its landing.",
@@ -419,6 +456,19 @@ impl LandingError {
     pub(crate) fn reason(&self) -> Option<(&'static str, Vec<(&'static str, String)>)> {
         use reef_api::error as reason;
         Some(match self {
+            Self::DependencyLeftReview {
+                change,
+                state,
+                transition,
+                ..
+            } => (
+                reason::DEPENDENCY_LEFT_REVIEW,
+                vec![
+                    ("change_id", change.clone()),
+                    ("state", state.as_str().to_owned()),
+                    ("transition_id", transition.clone()),
+                ],
+            ),
             Self::NotProposed { change, state, .. } => (
                 reason::NOT_PROPOSED,
                 vec![
@@ -1183,6 +1233,8 @@ pub(crate) fn transition_row(
         remote_token_name: who.remote.as_ref().map(|(_, name)| name.clone()),
         created_at: Timestamp::now(),
         recorded_at: None,
+        dependency_change_id: None,
+        dependency_event: None,
     }
 }
 
@@ -1423,7 +1475,10 @@ pub(crate) enum Gate {
 /// proposed at its visible commit, and its stack below it (R3.10) proposed
 /// for the same destination; each is judged in order, rebased onto the ones
 /// below ([`judge_slots`]).
-pub(crate) async fn decide(state: &AppState, request: &LandRequest) -> Result<Gate, LandingError> {
+pub(crate) async fn decide(
+    state: &Arc<AppState>,
+    request: &LandRequest,
+) -> Result<Gate, LandingError> {
     let repo = request.repo;
     let handle = state.manager.handle(repo)?;
     let info = {
@@ -1434,6 +1489,7 @@ pub(crate) async fn decide(state: &AppState, request: &LandRequest) -> Result<Ga
     };
     let change = info.change_id.as_str().to_owned();
     let commit = info.commit_id.clone();
+    carry_stack(state, repo, &info).await?;
     let row = state.db.lifecycle_row(repo, &change)?;
     let current = row
         .as_ref()
@@ -1665,7 +1721,7 @@ pub(crate) async fn judge_slots(
 /// The gate: [`decide`], then its writes: a refusal of a change landed alone
 /// is a blocked row, and a stack's passing prefix is queued in one operation
 /// with the rest blocked.
-async fn gate(state: &AppState, request: LandRequest) -> Result<LandOutcome, LandingError> {
+async fn gate(state: &Arc<AppState>, request: LandRequest) -> Result<LandOutcome, LandingError> {
     match decide(state, &request).await? {
         Gate::Queued(outcome) => Ok(*outcome),
         Gate::Judged(judgment) => write(state, request, *judgment).await,
@@ -1791,6 +1847,34 @@ fn queued_outcome(
     })
 }
 
+/// Carries `info`'s change and the members of its stack across the
+/// rewrites below them (R3.11) before the gate reads their rows: a
+/// dependent whose dependency was just rewritten is not refused as amended,
+/// and a declined member rebased by one still counts as declined. Only its
+/// own members, so no other proposal waiting for the carry follower delays
+/// them (S-247).
+async fn carry_stack(
+    state: &Arc<AppState>,
+    repo: RepoId,
+    info: &ChangeInfo,
+) -> Result<(), LandingError> {
+    let change = info.change_id.as_str();
+    let mut only = vec![change.to_owned()];
+    if let Some(destination) = state
+        .db
+        .lifecycle_row(repo, change)?
+        .and_then(|row| row.destination)
+        .filter(|destination| !destination.contains('@'))
+        && let Ok(members) = read_stack(state, repo, info, &destination).await
+    {
+        only.extend(members.iter().map(|member| member.change.to_string()));
+    }
+    if let Err(error) = crate::lifecycle::carry::carry(state, repo, Some(&only)).await {
+        tracing::warn!(error = %ErrorChain(&error), "cannot carry a stack before its landing; the gate reads it as it is");
+    }
+    Ok(())
+}
+
 /// `info`'s stack onto `destination`'s head (R3.10), read on the
 /// repository thread.
 async fn read_stack(
@@ -1829,6 +1913,43 @@ async fn read_stack(
             Err(LandingError::StackTooLarge { size, max })
         }
         Err(error) => Err(LandingError::Input(ErrorChain(&error).to_string())),
+    }
+}
+
+/// `DEPENDENCY_LEFT_REVIEW` for `change` of `members`, which left review
+/// (R3.11), with the `reef rebase` that moves the changes above it off it.
+fn left_review(
+    app: &AppState,
+    repo: RepoId,
+    members: &[land::StackMember],
+    (change, state, row): (String, LifecycleState, &crate::db::LifecycleRow),
+    destination: &str,
+) -> LandingError {
+    let links: Vec<crate::lifecycle::dependents::Link> = members
+        .iter()
+        .map(|member| crate::lifecycle::dependents::Link {
+            change: member.change.to_string(),
+            commit: member.commit.to_string(),
+            parents: member.parents.iter().map(ToString::to_string).collect(),
+        })
+        .collect();
+    let at = links
+        .iter()
+        .position(|link| link.change == change)
+        .unwrap_or_default();
+    LandingError::DependencyLeftReview {
+        moves: crate::lifecycle::dependents::move_off(&links, at, destination, |link| {
+            app.db
+                .lifecycle_row(repo, &link.change)
+                .ok()
+                .flatten()
+                .is_some_and(|row| {
+                    crate::lifecycle::dependents::left_review(&row, &link.commit).is_some()
+                })
+        }),
+        change,
+        state,
+        transition: crate::lifecycle::dependents::left_transition(app, repo, row),
     }
 }
 
@@ -1899,6 +2020,18 @@ async fn stack_slots(
                     });
                 }
                 None
+            }
+            (_, Some(row))
+                if crate::lifecycle::dependents::left_review(&row, member.commit.as_str())
+                    .is_some() =>
+            {
+                return Err(left_review(
+                    state,
+                    repo,
+                    &members,
+                    (change, current, &row),
+                    destination,
+                ));
             }
             _ => {
                 return Err(LandingError::NotProposed {

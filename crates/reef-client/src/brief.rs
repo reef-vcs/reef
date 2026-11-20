@@ -865,6 +865,7 @@ mod tests {
             step: None,
             lifecycle: None,
             conflicted_path_count: 0,
+            missing_dependency: None,
         }
     }
 

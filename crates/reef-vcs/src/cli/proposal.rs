@@ -496,7 +496,15 @@ fn transition_line(transition: &ChangeTransition) -> String {
         .as_deref()
         .filter(|cause| *cause != "request")
     {
-        words.push(format!("({cause})"));
+        match &transition.dependency {
+            // R3.11: carried across a rewrite of the change below.
+            Some(dependency) => words.push(format!(
+                "(carried: change {} {})",
+                short(&dependency.change_id_reverse_hex),
+                dependency.event.as_deref().unwrap_or("moved")
+            )),
+            None => words.push(format!("({cause})")),
+        }
     }
     let who = transition
         .agent
@@ -536,6 +544,24 @@ impl TextRender for Transitioned {
             if let Some(commit) = &lifecycle.commit_id {
                 pairs.push(("commit", commit.clone()));
             }
+        }
+        // R3.11: a supersede's dependents, moved onto the successor.
+        for moved in &self.moved {
+            let what = if moved.skipped.as_deref() == Some("rebase_refused") {
+                "left: the rebase was refused, so the supersede was recorded alone".to_owned()
+            } else if moved.skipped.is_some() {
+                "left: the successor descends from it".to_owned()
+            } else if moved.conflicted {
+                "moved, and conflicts there: its owner resolves it".to_owned()
+            } else if moved.carried {
+                "moved, proposal carried".to_owned()
+            } else {
+                "moved".to_owned()
+            };
+            pairs.push((
+                "dependent",
+                format!("{} {what}", short(&moved.change_id_reverse_hex)),
+            ));
         }
         if let Some(op) = &self.operation_id {
             pairs.push(("operation", short(op)));
