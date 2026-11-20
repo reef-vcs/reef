@@ -435,7 +435,7 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version-file: web/.node-version
-      - uses: sigstore/cosign-installer@v4.1.2   # no moving v4 tag
+      - uses: sigstore/cosign-installer@v4.1.3   # no moving v4 tag
       - name: Install reef
         run: |
           env HOME="$RUNNER_TEMP/reef-home" PATH=/usr/bin:/bin REEF_INSTALL_URL="file://$PWD/dist" sh install.sh </dev/null
@@ -660,7 +660,7 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           name: SHA256SUMS
-      - uses: sigstore/cosign-installer@v4.1.2   # no moving v4 tag
+      - uses: sigstore/cosign-installer@v4.1.3   # no moving v4 tag
       - run: |
           advice="publish it by hand: scripts/mcp-server-json.sh $VERSION SHA256SUMS >server.json, then mcp-publisher login github --token <an organization owner's token with read:org> and mcp-publisher publish"
           if ! scripts/mcp-server-json.sh "$VERSION" SHA256SUMS >server.json; then
