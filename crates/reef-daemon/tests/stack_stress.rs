@@ -5,14 +5,15 @@
 //! writes, snapshots, and describes and edits by change id, with the
 //! daemon's hold hooks (`Scheduler::hold_commits`, `hold_follows`,
 //! `hold_scans`) taken and released between them, so snapshots, writes and
-//! their follow-ups interleave in ways a timer never would. Another jj
-//! client on the registered root loads the head and commits later, so the
-//! daemon merges its operation with the ones it wrote meanwhile. Half the
-//! seeds end with the bottom change superseded by a new change, which
-//! rebases the workspaces above onto it while they write; in half of
-//! those a snapshot of the superseded change's workspace is held between
-//! its scan and its commit when the supersede starts. After each scene
-//! every workspace must hold, with no change divergent:
+//! their follow-ups interleave in ways a timer never would. Other jj
+//! clients on the registered root, one or two at a time, load the head and
+//! commit later, so the daemon merges their operations with the ones it
+//! wrote meanwhile: two operation heads, or three. Half the seeds end with
+//! the bottom change superseded by a new change, which rebases the
+//! workspaces above onto it while they write; in half of those a snapshot
+//! of the superseded change's workspace is held between its scan and its
+//! commit when the supersede starts. After each scene every workspace must
+//! hold, with no change divergent:
 //!
 //! - every file its agent wrote, with the bytes written, on disk and in
 //!   its change (no lost edit);
@@ -25,6 +26,18 @@
 //! too. So does a supersede that does not move the workspace above: the
 //! script gives it no reason to leave one (a divergent change, too many to
 //! move), and one left with no reason named is never right.
+//!
+//! A quarter of the seeds end the other way round: another jj client
+//! rewrites one workspace's commit while its agent has an edit no snapshot
+//! took, beside a write of Reef's elsewhere and a third client's bookmark.
+//! That move is not Reef's, so the workspace's change must come out
+//! divergent (ADR 0018), with every byte its agent wrote on disk and in
+//! its row's commit. A snapshot that carried the edit across the rewrite,
+//! through the merge of the three operation heads, fails the seed.
+//!
+//! A run of [`SEEDS`] seeds or more must have exercised each of these:
+//! merges of two and of three operation heads, supersedes, supersedes
+//! racing a held snapshot, and rewrites by another client.
 //!
 //! A seed's script is a function of the seed. Where a step lands against
 //! requests still running depends on the scheduler: a step that does not
@@ -114,12 +127,30 @@ struct Stack {
 /// What the seeds of one daemon exercised.
 #[derive(Default)]
 struct Covered {
-    /// Merges of two operation heads: another client's operation beside
-    /// the daemon's.
+    /// Merges of operation heads: other clients' operations beside the
+    /// daemon's.
     merges: usize,
+    /// Those of three heads or more.
+    wide_merges: usize,
     /// Supersedes, each of which moved the workspaces above.
     supersedes: usize,
+    /// Those that began while a snapshot of the superseded change's
+    /// workspace waited between its scan and its commit.
+    raced: usize,
+    /// Rewrites of a busy workspace's commit by another client, each of
+    /// which left its change divergent.
+    rewrites: usize,
     failures: Vec<(u64, String)>,
+}
+
+/// How a seed's last scene ends.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Ending {
+    Plain,
+    /// The bottom change is superseded part-way.
+    Supersede,
+    /// Another jj client rewrites a busy workspace's commit.
+    Rewrite,
 }
 
 impl Stack {
@@ -155,13 +186,16 @@ enum Step {
     Describe(usize),
     /// A file is added to the change of workspace `.0`, by change id.
     Add(usize),
-    /// Snapshots of workspace `.0` wait between scan and commit.
+    /// Snapshots of workspace `.0` wait between scan and commit. The
+    /// scheduler holds one workspace's at a time: a later hold takes over
+    /// from an earlier one for snapshots that have not reached it.
     HoldCommit(usize),
     /// Writes wait between their write and their follow-ups.
     HoldFollows,
     /// Snapshots wait before their scan.
     HoldScans,
-    /// Another jj client loads the head; it commits when released.
+    /// Another jj client loads the head, or two do; they commit when
+    /// released, one after the other.
     HoldOther,
     /// The oldest hold is released.
     Release,
@@ -188,6 +222,9 @@ struct Scene<'a> {
     holds: Vec<(Step, Box<dyn Any + Send>)>,
     /// The supersede has been asked for.
     superseding: bool,
+    /// It was asked for while a snapshot of the superseded change's
+    /// workspace waited at its commit.
+    raced: bool,
     tasks: Vec<(Step, JoinHandle<Result<Done, String>>)>,
     log: String,
 }
@@ -315,10 +352,13 @@ impl Scene<'_> {
                 self.holds.push((step, Box::new(hold)));
             }
             Step::HoldOther => {
-                let (root, on) = (self.repo.root.clone(), self.stack.base.clone());
-                let load = move || OtherClient::load(&root, &name, &on);
-                let other = tokio::task::spawn_blocking(load).await.unwrap();
-                self.holds.push((step, Box::new(other)));
+                let count = 1 + self.rng.below(2);
+                let bookmarks = (0..count).map(|nth| Outside::Bookmark {
+                    name: format!("{name}-{nth}"),
+                    commit: self.stack.base.clone(),
+                });
+                let others = OtherClient::load_all(&self.repo.root, bookmarks.collect()).await;
+                self.holds.push((step, Box::new(others)));
             }
             Step::Supersede => {
                 self.superseding = true;
@@ -335,30 +375,96 @@ impl Scene<'_> {
         }
     }
 
-    /// Runs the scene's script. With `supersede`, the bottom change is
-    /// superseded part-way, half the time while a snapshot of its workspace
-    /// waits between its scan and its commit.
-    async fn play(&mut self, supersede: bool) {
+    /// Runs the scene's script. With [`Ending::Supersede`], the bottom
+    /// change is superseded part-way, half the time while a snapshot of
+    /// its workspace waits between its scan and its commit. With
+    /// [`Ending::Rewrite`], returns the workspace whose commit another
+    /// client rewrote.
+    async fn play(&mut self, ending: Ending) -> Result<Option<usize>, String> {
         let steps = 6 + self.rng.below(6);
         let supersede_at = self.rng.below(steps);
         let racing_a_snapshot = self.rng.below(2) == 0;
         for nth in 0..steps {
-            if !supersede || nth != supersede_at {
+            if ending != Ending::Supersede || nth != supersede_at {
                 let step = self.pick();
                 self.run(step).await;
                 continue;
             }
             if racing_a_snapshot {
-                // The superseded change's commit moves under the supersede.
-                self.run(Step::Write(0)).await;
-                let held = |(step, _): &(Step, _)| matches!(step, Step::HoldCommit(_));
-                if !self.holds.iter().any(held) {
-                    self.run(Step::HoldCommit(0)).await;
-                }
-                self.run(Step::Snapshot(0)).await;
+                self.hold_a_snapshot_of_the_bottom().await?;
             }
             self.run(Step::Supersede).await;
         }
+        if ending != Ending::Rewrite {
+            return Ok(None);
+        }
+        self.rewrite_outside().await.map(Some)
+    }
+
+    /// Writes in the bottom workspace and starts a snapshot of it that
+    /// waits between its scan and its commit: the superseded change's
+    /// commit moves under the supersede that starts next. Every hold of
+    /// the scheduler's is released first, so that nothing keeps that
+    /// snapshot from its commit hold: another workspace's commit hold, a
+    /// scan hold, or a write that waits at its follow-ups with the
+    /// workspace locked.
+    async fn hold_a_snapshot_of_the_bottom(&mut self) -> Result<(), String> {
+        self.holds
+            .retain(|(step, _)| matches!(step, Step::HoldOther));
+        let scheduler = self.daemon.handle.state().manager.scheduler();
+        let begun = Instant::now();
+        let reached = async |what: &str, held: &dyn Fn() -> bool| {
+            while !held() {
+                if begun.elapsed() > FOLLOW {
+                    return Err(format!("{what}, after {FOLLOW:?}"));
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            Ok(())
+        };
+        reached("a released request still waits at its hold", &|| {
+            self.held() == 0
+        })
+        .await?;
+        self.run(Step::HoldCommit(0)).await;
+        self.run(Step::Write(0)).await;
+        self.run(Step::Snapshot(0)).await;
+        reached("the snapshot to race never reached its commit", &|| {
+            scheduler.held_commits() == 1
+        })
+        .await?;
+        self.raced = true;
+        Ok(())
+    }
+
+    /// Another jj client rewrites the commit of a workspace whose agent
+    /// has an edit no snapshot took, beside a write of Reef's that leaves
+    /// that commit alone and a third client's bookmark; returns the
+    /// workspace. Every request finishes first: one by change id must not
+    /// find the change divergent.
+    async fn rewrite_outside(&mut self) -> Result<usize, String> {
+        self.finish().await?;
+        let at = self.rng.below(self.stack.members.len());
+        writeln!(self.log, "  Rewrite({at})").unwrap();
+        let name = format!("{}-outside", self.tag);
+        let outside = vec![
+            Outside::Empty {
+                workspace: self.stack.members[at].ws.id.clone(),
+            },
+            Outside::Bookmark {
+                name: name.clone(),
+                commit: self.stack.base.clone(),
+            },
+        ];
+        let others = OtherClient::load_all(&self.repo.root, outside).await;
+        let target = edit_files_request::Target::NewOn(self.stack.base.clone());
+        let (client, repo) = (&self.daemon.client, self.repo.id.clone());
+        add(client, repo, target, &format!("beside/{name}.txt"), &name).await?;
+        self.run(Step::Write(at)).await;
+        tokio::task::spawn_blocking(move || drop(others))
+            .await
+            .unwrap();
+        Ok(at)
     }
 
     /// Releases every hold and waits for every request.
@@ -596,6 +702,57 @@ async fn check(client: &Client, repo: &SyntheticRepo, stack: &Stack) -> Result<(
     Ok(())
 }
 
+/// The end state after another client rewrote workspace `at`'s commit
+/// under an edit of its agent's: its change is divergent, and no workspace
+/// lost a byte its agent wrote.
+async fn check_rewritten(
+    client: &Client,
+    repo: &SyntheticRepo,
+    stack: &Stack,
+    at: usize,
+) -> Result<(), String> {
+    for member in &stack.members {
+        let snapshot = client.snapshot_workspace(&repo.id, &member.ws.id, "").await;
+        snapshot.map_err(|error| format!("the closing snapshot failed: {error:?}"))?;
+    }
+    let request = v1::ListChangesRequest {
+        repo: repo.id.clone(),
+        revset: "mutable()".to_owned(),
+        skip_snapshot: true,
+        ..v1::ListChangesRequest::default()
+    };
+    let changes = client.list_changes(request).await.map_err(text)?;
+    let change = &stack.members[at].ws.change_id;
+    let commits = changes
+        .iter()
+        .filter_map(|entry| entry.change.as_ref())
+        .filter(|entry| entry.change_id == *change)
+        .count();
+    if commits < 2 {
+        return Err(format!(
+            "workspace {at} carried its edit across another client's rewrite: its change {change} has {commits} commit"
+        ));
+    }
+    for (at, member) in stack.members.iter().enumerate() {
+        let commit = row(client, repo, &member.ws).await.commit_id;
+        for (path, contents) in &member.written {
+            let disk = on_disk(&member.ws, path);
+            if disk.as_ref() != Some(contents) {
+                return Err(format!(
+                    "workspace {at} lost {path} on disk: {disk:?}, not {contents:?}"
+                ));
+            }
+            let stored = committed(client, repo, &commit, path).await?;
+            if stored.as_ref() != Some(contents) {
+                return Err(format!(
+                    "workspace {at} lost {path} in its commit {commit}: {stored:?}, not {contents:?}"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn create(client: &Client, repo: &SyntheticRepo, at: usize, on: Option<String>) -> Member {
     let request = CreateWorkspaceRequest {
         repo: repo.id.clone(),
@@ -612,14 +769,24 @@ async fn create(client: &Client, repo: &SyntheticRepo, at: usize, on: Option<Str
     }
 }
 
-/// One seed: a stack, then [`SCENES`] scenes, each checked. In half the
-/// seeds the last scene supersedes the bottom change part-way. Returns
-/// whether it did.
-async fn seed(daemon: &TestDaemon, repo: &SyntheticRepo, seed: u64) -> Result<bool, String> {
+/// One seed: a stack, then [`SCENES`] scenes, each checked. The last scene
+/// ends as the seed's [`Ending`] says. Returns the ending, and whether a
+/// supersede raced a held snapshot.
+async fn seed(
+    daemon: &TestDaemon,
+    repo: &SyntheticRepo,
+    seed: u64,
+) -> Result<(Ending, bool), String> {
     let client = &daemon.client;
     let mut rng = Rng(seed);
     let depth = 2 + rng.below(2);
-    let supersedes = rng.below(2) == 0;
+    let ending = match rng.below(4) {
+        0 | 1 => Ending::Supersede,
+        2 => Ending::Rewrite,
+        _ => Ending::Plain,
+    };
+    let supersedes = ending == Ending::Supersede;
+    let mut raced = false;
     let mut stack = Stack {
         base: String::new(),
         members: Vec::new(),
@@ -676,15 +843,18 @@ async fn seed(daemon: &TestDaemon, repo: &SyntheticRepo, seed: u64) -> Result<bo
             counter: scene * 100,
             holds: Vec::new(),
             superseding: false,
+            raced: false,
             tasks: Vec::new(),
             log: String::new(),
         };
-        scene.play(last && supersedes).await;
+        let played = scene.play(if last { ending } else { Ending::Plain }).await;
         let finished = scene.finish().await;
+        raced |= scene.raced;
         log.push_str(&scene.log);
-        let checked = match finished {
-            Ok(()) => check(client, repo, &stack).await,
-            Err(error) => Err(error),
+        let checked = match (played, finished) {
+            (Err(error), _) | (_, Err(error)) => Err(error),
+            (Ok(Some(rewritten)), Ok(())) => check_rewritten(client, repo, &stack, rewritten).await,
+            (Ok(None), Ok(())) => check(client, repo, &stack).await,
         };
         if let Err(error) = checked {
             failure = Some(error);
@@ -702,30 +872,42 @@ async fn seed(daemon: &TestDaemon, repo: &SyntheticRepo, seed: u64) -> Result<bo
     }
     match failure {
         Some(error) => Err(format!("{error}\n{log}")),
-        None => Ok(supersedes),
+        None => Ok((ending, raced)),
     }
 }
 
-/// How many operations of `repo` merge two operation heads.
-async fn merges(client: &Client, repo: &SyntheticRepo) -> usize {
+/// How many operations of `repo` merge operation heads, and how many of
+/// those merge three or more.
+async fn merges(client: &Client, repo: &SyntheticRepo) -> (usize, usize) {
     let request = v1::ListOperationsRequest {
         repo: repo.id.clone(),
         ..v1::ListOperationsRequest::default()
     };
     let operations = client.list_operations_limited(request, 0).await.unwrap();
-    operations
-        .items
-        .iter()
-        .filter(|operation| operation.parent_ids.len() > 1)
-        .count()
+    let merging = |heads: usize| {
+        let wide = |operation: &&v1::Operation| operation.parent_ids.len() >= heads;
+        operations.items.iter().filter(wide).count()
+    };
+    (merging(2), merging(3))
+}
+
+/// What another jj client does.
+enum Outside {
+    /// Sets bookmark `name` on `commit`.
+    Bookmark { name: String, commit: String },
+    /// Rewrites the working-copy commit of Reef workspace `workspace` to
+    /// its parent's tree, and rebases its descendants. A rewrite that kept
+    /// the tree would leave the working copy fresh, as jj reads it.
+    Empty { workspace: String },
 }
 
 /// A transaction of another jj client on the registered root, loaded at
-/// the head now, that sets bookmark `name` on `commit`.
-fn bookmark_set(root: &Path, name: &str, commit: &str) -> jj_lib::transaction::Transaction {
+/// the head now, that does `what`.
+fn outside_tx(root: &Path, what: &Outside) -> jj_lib::transaction::Transaction {
     use jj_lib::default_backend_factories::{
         default_backend_factories, default_working_copy_factories, default_workspace_loader_factory,
     };
+    use jj_lib::repo::Repo as _;
     let workspace = default_workspace_loader_factory()
         .create(root)
         .unwrap()
@@ -737,44 +919,65 @@ fn bookmark_set(root: &Path, name: &str, commit: &str) -> jj_lib::transaction::T
         .unwrap();
     let repo = pollster::block_on(workspace.repo_loader().load_at_head(None)).unwrap();
     let mut tx = repo.start_transaction();
-    tx.repo_mut().set_local_bookmark_target(
-        jj_lib::ref_name::RefName::new(name),
-        jj_lib::op_store::RefTarget::normal(
-            jj_lib::backend::CommitId::try_from_hex(commit).unwrap(),
+    match what {
+        Outside::Bookmark { name, commit } => tx.repo_mut().set_local_bookmark_target(
+            jj_lib::ref_name::RefName::new(name),
+            jj_lib::op_store::RefTarget::normal(
+                jj_lib::backend::CommitId::try_from_hex(commit).unwrap(),
+            ),
         ),
-    );
+        Outside::Empty { workspace } => {
+            let name = format!("reef-{workspace}");
+            let name = jj_lib::ref_name::WorkspaceName::new(&name);
+            let commit = repo.view().get_wc_commit_id(name).unwrap();
+            let commit = pollster::block_on(repo.store().get_commit_async(commit)).unwrap();
+            let parent = repo.store().get_commit_async(&commit.parent_ids()[0]);
+            let parent = pollster::block_on(parent).unwrap();
+            let emptied = tx
+                .repo_mut()
+                .rewrite_commit(&commit)
+                .set_tree(parent.tree())
+                .write();
+            pollster::block_on(emptied).unwrap();
+            pollster::block_on(tx.repo_mut().rebase_descendants()).unwrap();
+        }
+    }
     tx
 }
 
 /// Sets the `main` bookmark from outside the daemon, as `jj bookmark set`.
 async fn bookmark_main(repo: &SyntheticRepo, commit: &str) {
-    let (root, commit) = (repo.root.clone(), commit.to_owned());
+    let root = repo.root.clone();
+    let bookmark = Outside::Bookmark {
+        name: "main".to_owned(),
+        commit: commit.to_owned(),
+    };
     let set = move || {
-        let tx = bookmark_set(&root, "main", &commit);
+        let tx = outside_tx(&root, &bookmark);
         pollster::block_on(tx.commit("bookmark set")).unwrap();
     };
     tokio::task::spawn_blocking(set).await.unwrap();
 }
 
 /// Another jj client on the registered root: it loaded the head when made,
-/// and commits a bookmark when dropped. Its operation is concurrent with
-/// every operation the daemon wrote in between, so the daemon's next load
-/// merges the two operation heads.
+/// and commits when dropped. Its operation is concurrent with every
+/// operation the daemon wrote in between, so the daemon's next load merges
+/// the operation heads.
 struct OtherClient {
     go: std::sync::mpsc::Sender<()>,
     done: Option<std::thread::JoinHandle<()>>,
 }
 
 impl OtherClient {
-    fn load(root: &Path, name: &str, commit: &str) -> Self {
-        let (root, name, commit) = (root.to_owned(), name.to_owned(), commit.to_owned());
+    fn load(root: &Path, what: Outside) -> Self {
+        let root = root.to_owned();
         let (go, told) = std::sync::mpsc::channel();
         let (tell, loaded) = std::sync::mpsc::channel();
         let done = std::thread::spawn(move || {
-            let tx = bookmark_set(&root, &name, &commit);
+            let tx = outside_tx(&root, &what);
             tell.send(()).unwrap();
             if told.recv().is_ok() {
-                pollster::block_on(tx.commit("another client's bookmark")).unwrap();
+                pollster::block_on(tx.commit("another client's operation")).unwrap();
             }
         });
         loaded.recv().unwrap();
@@ -782,6 +985,17 @@ impl OtherClient {
             go,
             done: Some(done),
         }
+    }
+
+    /// One client for each of `what`, all loaded at the head now. Dropped
+    /// together, they commit in that order.
+    async fn load_all(root: &Path, what: Vec<Outside>) -> Vec<Self> {
+        let root = root.to_owned();
+        let load = move || {
+            let load = |what| Self::load(&root, what);
+            what.into_iter().map(load).collect()
+        };
+        tokio::task::spawn_blocking(load).await.unwrap()
     }
 }
 
@@ -817,28 +1031,52 @@ async fn a_stack_survives_random_interleavings() {
         let mut covered = Covered::default();
         for seed_number in (first..first + seeds).filter(|seed| seed % jobs == job) {
             match seed(&daemon, &repo, seed_number).await {
-                Ok(superseded) => covered.supersedes += usize::from(superseded),
+                Ok((ending, raced)) => {
+                    covered.supersedes += usize::from(ending == Ending::Supersede);
+                    covered.raced += usize::from(raced);
+                    covered.rewrites += usize::from(ending == Ending::Rewrite);
+                }
                 Err(error) => covered.failures.push((seed_number, error)),
             }
         }
-        covered.merges = merges(&daemon.client, &repo).await;
+        (covered.merges, covered.wide_merges) = merges(&daemon.client, &repo).await;
         daemon.stop().await;
         covered
     });
     let covered = futures::future::join_all(runs).await;
     let count = |of: fn(&Covered) -> usize| covered.iter().map(of).sum::<usize>();
-    let (merged, supersedes) = (count(|job| job.merges), count(|job| job.supersedes));
+    let exercised = [
+        ("merges of operation heads", count(|job| job.merges)),
+        (
+            "merges of three heads or more",
+            count(|job| job.wide_merges),
+        ),
+        ("supersedes", count(|job| job.supersedes)),
+        ("supersedes racing a held snapshot", count(|job| job.raced)),
+        ("rewrites by another client", count(|job| job.rewrites)),
+    ];
     let mut failures: Vec<(u64, String)> =
         covered.into_iter().flat_map(|job| job.failures).collect();
     failures.sort();
+    let counts: Vec<String> = exercised
+        .iter()
+        .map(|(what, count)| format!("{count} {what}"))
+        .collect();
     println!(
-        "stack stress: {seeds} seeds from {first}, {} failed, in {:?}; {merged} merges of operation heads, {supersedes} supersedes",
+        "stack stress: {seeds} seeds from {first}, {} failed, in {:?}; {}",
         failures.len(),
-        begun.elapsed()
+        begun.elapsed(),
+        counts.join(", ")
     );
     let report: Vec<String> = failures
         .iter()
         .map(|(seed, error)| format!("seed {seed}: {error}"))
         .collect();
     assert!(failures.is_empty(), "{}", report.join("\n"));
+    // A shorter run reproduces a seed: it need not cover everything.
+    if seeds >= SEEDS {
+        for (what, count) in exercised {
+            assert!(count > 0, "the run exercised no {what}");
+        }
+    }
 }

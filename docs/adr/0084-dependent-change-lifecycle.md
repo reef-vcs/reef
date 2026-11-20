@@ -26,16 +26,23 @@ jj already rebases a change's descendants in the operation that rewrites it, kee
    - **After the scan**, when the working copy is stale and has edits. A is the commit the workspace's row names. If Reef moved it, the snapshot records [0039](0039-carrying-edits-through-a-write.md)'s three-way merge as a rewrite of the view's commit. If not, it diverges ([0018](0018-snapshot-staleness-and-divergence.md)).
    - **In the repository-thread job that commits**, when the view's commit is no longer the one the scan planned to rewrite. A is the planned commit. If Reef moved it, the job rewrites the view's commit with the three-way merge of the rebased tree and the scanned tree over the planned commit's tree. The check-out then writes the ancestor's files, after checking that each file it overwrites still holds, byte for byte, what the scan read; after a watcher's narrowed scan that includes the files the scan itself recorded.
 
-   The answer is a function of the head the snapshot holds (`reef_lib::jj::snapshot::followed`). It walks the operations back from that head to the one whose view has A for the workspace. Every operation on the way that moved the workspace's commit must be one Reef wrote, by its `reef.kind`. It must also have kept the workspace on its change, or put it on a new empty change on that change (a landing, [0071](0071-rebasing-and-following-trunk.md)). The tree does not matter: a describe, or an ancestor that adds a descendant's own file with the same bytes, is a move like any other. These moves are not Reef's, and the snapshot diverges as before:
+   The answer is a function of the head the snapshot holds (`reef_lib::jj::snapshot::followed`), and it does not depend on the shape of the operation log. It reads every operation **since A**: each operation in the head's history that is in the history of no operation whose view has A for the workspace. Among them, an operation with one parent whose view has another commit for the workspace than its parent's **moved** it. Reef moved the workspace from A to the view's commit when both of these hold:
+   - **Every move since A is Reef's.** The operation is one Reef wrote, by its `reef.kind`. It kept the workspace on its change, or put it on a new empty change on that change (a landing, [0071](0071-rebasing-and-following-trunk.md)). The tree does not matter: a describe, or an ancestor that adds a descendant's own file with the same bytes, is a move like any other.
+   - **The moves lead from A to the view's commit**, each one starting at a commit that A or an earlier move reached.
+
+   These moves are not Reef's, and the snapshot diverges as before:
    - another jj client's operation;
    - another workspace's snapshot of the same change, told by its `reef.workspace` ([0018](0018-snapshot-staleness-and-divergence.md));
    - the workspace's own snapshot, when its row was never written (a crash between the commit and the row);
    - a move further back than 1,024 operations, or than the operations garbage collection kept.
 
-   **A merge of two operation heads moves nothing itself: the walk goes on at the side the merge took the commit from.** A jj client that runs on the registered root while the daemon writes leaves two operation heads, and the daemon's next load merges them ([0018](0018-snapshot-staleness-and-divergence.md), arm 2). jj merges a workspace's working-copy commit as it merges anything: each side's commit against the commit at the two sides' closest common ancestor. The walk reads the same three commits and follows the merge the same way:
-   - **One side moved the commit, and the merge has that side's commit.** The walk goes on at that side. The other side never moved the commit, whatever else it did, so it is not read. A move on the side the walk takes is judged like any other: another client's rewrite there still diverges.
-   - **Neither side moved it.** The walk goes on at the first side, and at the second if the first does not reach A. A reaches the view's commit along at least one of them, by Reef's moves only.
-   - **Anything else diverges.** That is both sides moving the commit (another client rewrote it while Reef moved it), a merge whose commit neither side has (the merge rebased it over another client's rewrite), sides with more than one closest common ancestor, and a merge of more than two heads.
+   **A merge of operation heads is no move, whatever its shape.** A jj client that runs on the registered root while the daemon writes leaves an operation head beside the daemon's, and the daemon's next load merges the heads ([0018](0018-snapshot-staleness-and-divergence.md), arm 2). Two clients leave three heads, merged in one operation. A second jj process that merges the same heads leaves two merges, and the merge of those has two closest common ancestors. None of this is read: the operations on every head are since A or they are not, and each move among them is judged where it was written. A client that loaded the head before A was written and committed afterwards is since A too. Its head has an older commit for the workspace, and it moved nothing.
+
+   Two shapes with a merge in them diverge. Each is another client's move:
+   - **Another client moved the workspace's commit on any head.** This holds even when Reef moved it on another head and the merge kept Reef's commit. jj keeps the commit of the head it merges into when two heads moved it, so which commit the view has is an accident of the order of the heads. The slot [0039](0039-carrying-edits-through-a-write.md) used carried in the one order and diverged in the other. The change is divergent in both, because the client's rewrite stays a visible commit of it, so a carry would not have kept it whole. Reading every head gives one answer for both orders.
+   - **The merge left the workspace on a commit that no head has.** The merge rebased Reef's commit over another client's rewrite of a commit below it. No move leads to that commit. The slot diverged here too: it named the commit Reef's move made.
+
+   Operations are read newest first by end time, as jj itself orders them, until every operation left to read is in the history of one with A. A clock that ran backwards can only add operations to those judged, which can only diverge.
 
    Two things stay in memory, and each has one owner. The follow mark is set by the commit that moves a workspace and cleared by the next job that loads a head for that workspace's snapshot, both on the repository thread. It only saves a second follow. The commit of a carried snapshot whose check-out failed is kept by the workspace with the tree that snapshot scanned, and read by the workspace's next snapshot under its own scan lock. It measures the edits from that tree, so they are not taken twice, when the walk finds that commit written by the workspace's own snapshot with no undo after it.
 
@@ -101,13 +108,30 @@ The seventh review found what that test could not see: it ran no other jj client
 | The supersede refused the rebase because the superseded commit had moved, and left the workspaces above | 21 |
 | The supersede named no dependent and left the workspaces above | 1 |
 
-With the merge rule in decision 1 and decision 6's reading by change id, seeds 1 to 600 pass, in 11 minutes on four daemons. That run merged operation heads 803 times and superseded 317 times. Each run prints both counts, so a run that exercised neither is visible.
+With a rule for a merge of two heads and decision 6's reading by change id (628642f7), seeds 1 to 600 passed, in 11 minutes on four daemons. That run merged operation heads 803 times and superseded 317 times.
+
+The eighth review found the next shape. That rule followed one line back through the log and chose a side at each merge. It refused a merge of three heads, which two jj clients beside one write of the daemon's leave, and a merge of two merges with two closest common ancestors. The slot, which never read the log, had carried in both. Seven rounds had each fixed one shape of a mechanism, in the slot and then in the walk, so this round tested the walk's premise instead: that the answer has to be found along one line through the graph. It does not. Whether only Reef moved the commit is a property of the set of operations since A, and decision 1 now reads that set. The rule has no case for a merge, so there is no shape left to add.
+
+The stress test changed with it, because it could not have failed on those shapes or on the opposite fault:
+
+- Other clients load the head one or two at a time, so the daemon merges three heads.
+- A quarter of the seeds end with another client rewriting the commit of a workspace whose agent has an edit that no snapshot took, beside a write of the daemon's elsewhere and a third client's bookmark. That change must come out divergent, with the agent's bytes on disk and in its row's commit. A walk that carried across another client's move, through the merge, fails the seed.
+- A supersede that is meant to race a snapshot of the superseded change's workspace releases every hold first and waits until that snapshot is at its commit hold. Before, another workspace's commit hold let the snapshot commit at once.
+- A run of 12 seeds or more fails unless it merged two heads, merged three or more, superseded, superseded while a snapshot was held, and had a commit rewritten by another client.
+
+| Code | Seeds 1 to 120 that fail |
+| --- | --- |
+| The walk along one line (628642f7) | 15, each a change that diverged at a merge of three heads. In six of them the script's next write by change id then failed as ambiguous, and in one a supersede was refused |
+| The set of operations since A | 0 |
+| The set, with another client's operation counted as Reef's (seeds 1 to 40) | 12 of the 13 seeds that end with another client's rewrite |
+
+Seeds 1 to 600 pass on the set, in 11 minutes on four daemons. That run merged operation heads 1,161 times, 479 of them of three heads or more, superseded 308 times, 158 of them while a snapshot was held, and had 156 commits rewritten by another client.
 
 Reading the change alone, without asking who moved it, is not enough: with that one condition removed, six tests fail, among them `stale_diverges_when_dirty` in `reef-lib` and in the daemon, which hold [0018](0018-snapshot-staleness-and-divergence.md)'s rule for two workspaces on one change.
 
 The regression tests of all six reviews pass against the derived carry with their assertions unchanged. The unit tests of the slot and of the function that built carries went with them.
 
-**What it costs.** One operation and one view are read per operation since the move, only for a snapshot that is stale with edits or whose commit moved under its scan. A follow runs right after the move, so the walk is a few operations long.
+**What it costs.** One operation and one view are read per operation since A, on every head, only for a snapshot that is stale with edits or whose commit moved under its scan. A follow runs right after the move, so that is a few operations. A client that loaded the head before A was written costs one more operation, without its view, for each operation between its load and A.
 
 **What else changes.**
 

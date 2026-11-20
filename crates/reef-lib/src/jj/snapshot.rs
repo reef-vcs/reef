@@ -47,6 +47,7 @@
 //! keeps the tree it was locked with: `Repo::recorded_tree` reads the
 //! recorded one from disk.
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -462,10 +463,9 @@ impl PendingSnapshot<'_> {
         &mut self,
         merged: &MergedTree,
     ) -> Result<Option<PathBuf>, BackendError> {
-        let stamped: std::collections::HashSet<&Path> =
-            self.stamps.iter().map(|(path, _)| path.as_path()).collect();
+        let stamped: HashSet<&Path> = self.stamps.iter().map(|(path, _)| path.as_path()).collect();
         let store = self.scanned.store();
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = HashSet::new();
         let mut diff = self.scanned.diff(merged, &EverythingMatcher);
         while let Some(entry) = diff.next().await {
             let before = entry.values?.before;
@@ -1338,21 +1338,23 @@ struct Followed {
 /// Whether Reef moved workspace `name`'s working-copy commit from `from`
 /// to the commit `repo`'s view has for it, so that edits made on `from`
 /// belong on that commit (ADR 0039, ADR 0084). Read from the operation
-/// log, newest first, back to an operation whose view has `from`: every
-/// operation on the way that moved the commit must be one Reef wrote, and
-/// must have kept the workspace on its change, or put it on a new empty
-/// change on it (a landing, ADR 0071). These moves are not Reef's, and
-/// give `None`, ADR 0018's divergence:
+/// log: every operation since `from` ([`Walk::moves`]) that moved the
+/// commit must be one Reef wrote, and must have kept the workspace on its
+/// change, or put it on a new empty change on it (a landing, ADR 0071);
+/// and those moves must lead from `from` to the view's commit. The shape of
+/// the log does not matter: operations that ran beside each other, and the
+/// merges of their heads, are read like any others. These moves are not
+/// Reef's, and give `None`, ADR 0018's divergence:
 ///
-/// - another jj client's operation;
+/// - another jj client's operation, whichever commit a merge then kept;
+/// - a merge of operation heads that left the workspace on a commit none
+///   of the heads had (it rebased the commit over another client's
+///   rewrite): no move leads to that commit;
 /// - another workspace's snapshot of the same change (ADR 0018);
 /// - this workspace's own snapshot, other than `unfinished`'s (a crash
 ///   between its commit and its row), or `unfinished`'s under a later undo;
 /// - a move further back than [`FOLLOW_LIMIT`] operations, or than the
 ///   operations the store still has.
-///
-/// A merge of two operations moves nothing itself. The walk goes on at the
-/// side the merge took the commit from ([`Walk::through_merge`]).
 async fn followed(
     repo: &ReadonlyRepo,
     name: &WorkspaceName,
@@ -1365,23 +1367,40 @@ async fn followed(
         from,
         unfinished,
     };
-    let mut left = FOLLOW_LIMIT;
-    let mut paths = vec![(repo.operation().clone(), Trail::default())];
-    while let Some((op, trail)) = paths.pop() {
-        if let Some(base) = walk.path(op, trail, &mut paths, &mut left).await? {
-            return Ok(Some(Followed { base }));
+    let Some(moves) = walk.moves().await? else {
+        return Ok(None);
+    };
+    let mut trail = Trail::default();
+    for step in &moves {
+        if !walk.reefs_move(step, &mut trail).await? {
+            return Ok(None);
         }
     }
-    Ok(None)
+    let mut reached = HashSet::from([from]);
+    for step in moves.iter().rev() {
+        if reached.contains(&step.was) {
+            reached.insert(&step.now);
+        }
+    }
+    let to = repo.view().get_wc_commit_id(name);
+    let led = to.is_some_and(|to| reached.contains(to));
+    Ok(led.then_some(Followed { base: trail.base }))
 }
 
-/// What one path of [`followed`]'s walk has crossed.
+/// An operation that moved the workspace's commit.
+struct Move {
+    op: Operation,
+    was: CommitId,
+    now: CommitId,
+}
+
+/// What the moves newer than the one [`Walk::reefs_move`] judges included.
 #[derive(Clone, Debug, Default)]
 struct Trail {
-    /// The tree the workspace's [`Unfinished`] snapshot scanned, once the
-    /// path crossed that snapshot.
+    /// The tree the workspace's [`Unfinished`] snapshot scanned, once that
+    /// snapshot was among them.
     base: Option<ScannedTree>,
-    /// The path crossed an undo.
+    /// An undo was among them.
     undone: bool,
 }
 
@@ -1403,114 +1422,79 @@ fn kept<T>(read: Result<T, OpStoreError>) -> Result<Option<T>, OpStoreError> {
 }
 
 impl Walk<'_> {
-    /// The workspace's working-copy commit after `op`.
-    async fn commit_at(&self, op: &Operation) -> Result<Option<CommitId>, SnapshotError> {
-        Ok(op.view().await?.get_wc_commit_id(self.name).cloned())
-    }
-
-    /// Walks back from `op` to an operation whose view has `from`, reading
-    /// at most `left` operations. `Some(base)` when every move on the way
-    /// was Reef's; `None` when one was not. A merge that either side
-    /// explains adds the second side to `paths`, to walk if this path
-    /// fails.
-    async fn path(
-        &self,
-        mut op: Operation,
-        mut trail: Trail,
-        paths: &mut Vec<(Operation, Trail)>,
-        left: &mut usize,
-    ) -> Result<Option<Option<ScannedTree>>, SnapshotError> {
-        let Some(mut now) = self.commit_at(&op).await? else {
-            return Ok(None);
+    /// The operations since `from` that moved the workspace's commit,
+    /// newest first: those with one parent whose view has another commit
+    /// for it. An operation is since `from` when it is in the head's
+    /// history and in the history of no operation there whose view has
+    /// `from` for the workspace. So an operation of another client that
+    /// loaded the head before `from` was written, and committed later, is
+    /// one. `None` when the workspace was added or forgotten since, and
+    /// when the operations cannot be read back to `from`: there are more
+    /// than [`FOLLOW_LIMIT`] of them, or the store no longer has one.
+    ///
+    /// Operations are read newest first by end time, as jj orders them
+    /// (`jj_lib::op_walk`), until every one left to read is in the history
+    /// of an operation with `from`. A clock that ran backwards can only add
+    /// operations to those judged.
+    async fn moves(&self) -> Result<Option<Vec<Move>>, SnapshotError> {
+        let newest = |queue: &Vec<Operation>| {
+            let end = |at: &usize| (queue[*at].metadata().time.end, queue[*at].id().clone());
+            (0..queue.len()).max_by_key(end)
         };
-        loop {
-            if now == *self.from {
-                return Ok(Some(trail.base));
+        let mut commits: HashMap<OperationId, Option<CommitId>> = HashMap::new();
+        let mut commit_at = async |op: &Operation| -> Result<Option<CommitId>, SnapshotError> {
+            if let Some(commit) = commits.get(op.id()) {
+                return Ok(commit.clone());
             }
-            if *left == 0 {
+            let commit = op.view().await?.get_wc_commit_id(self.name).cloned();
+            commits.insert(op.id().clone(), commit.clone());
+            Ok(commit)
+        };
+        let mut queue = vec![self.repo.operation().clone()];
+        let mut read = HashSet::new();
+        // In the history of an operation whose view has `from`.
+        let mut before = HashSet::new();
+        let mut moves = Vec::new();
+        while queue.iter().any(|op| !before.contains(op.id()))
+            && let Some(at) = newest(&queue)
+        {
+            let op = queue.swap_remove(at);
+            if !read.insert(op.id().clone()) {
+                continue;
+            }
+            if read.len() > FOLLOW_LIMIT {
                 return Ok(None);
             }
-            *left -= 1;
             let Some(parents) = kept(op.parents().await)? else {
                 return Ok(None);
             };
-            let parent = match parents.as_slice() {
-                [parent] => parent.clone(),
-                [first, second] => {
-                    let Some(sides) = self.through_merge(&now, first, second).await? else {
-                        return Ok(None);
-                    };
-                    let (next, other) = sides;
-                    paths.extend(other.map(|other| (other, trail.clone())));
-                    op = next;
-                    continue;
+            let since =
+                !before.contains(op.id()) && commit_at(&op).await?.as_ref() != Some(self.from);
+            // A merge of heads is no move: `followed` checks that the
+            // moves lead to the commit it kept.
+            if since && let [parent] = parents.as_slice() {
+                match (commit_at(parent).await?, commit_at(&op).await?) {
+                    (was, now) if was == now => {}
+                    (Some(was), Some(now)) => moves.push(Move {
+                        op: op.clone(),
+                        was,
+                        now,
+                    }),
+                    _ => return Ok(None),
                 }
-                _ => return Ok(None),
-            };
-            let Some(was) = self.commit_at(&parent).await? else {
-                return Ok(None);
-            };
-            if was != now && !self.reefs_move(&op, (&was, &now), &mut trail).await? {
-                return Ok(None);
             }
-            now = was;
-            op = parent;
+            if !since {
+                before.extend(op.parent_ids().iter().cloned());
+            }
+            queue.extend(parents);
         }
+        Ok(Some(moves))
     }
 
-    /// Where the walk goes on from a merge of `first` and `second` whose
-    /// view has `now` for the workspace. jj merges the working-copy commit
-    /// of each side over the one at the sides' common ancestor, so:
-    ///
-    /// - one side moved it and the merge took that side's: that side;
-    /// - neither side moved it: either side, the second if the first does
-    ///   not reach `from`;
-    /// - both sides moved it, the merge made a commit neither side has (it
-    ///   rebased the commit), or the sides have more than one closest
-    ///   common ancestor: `None`. So is a merge of more than two
-    ///   operations, at the caller.
-    ///
-    /// A side that moved the commit is walked like any other operations, so
-    /// another client's move on it still gives `None`.
-    async fn through_merge(
-        &self,
-        now: &CommitId,
-        first: &Operation,
-        second: &Operation,
-    ) -> Result<Option<(Operation, Option<Operation>)>, SnapshotError> {
-        let ancestors =
-            jj_lib::op_walk::closest_common_ancestors([first.clone()], [second.clone()]);
-        let Some(ancestors) = kept(ancestors.await)? else {
-            return Ok(None);
-        };
-        let [ancestor] = ancestors.as_slice() else {
-            return Ok(None);
-        };
-        let Some(view) = kept(ancestor.view().await)? else {
-            return Ok(None);
-        };
-        let before = view.get_wc_commit_id(self.name);
-        let now = Some(now);
-        let firsts = self.commit_at(first).await?;
-        let seconds = self.commit_at(second).await?;
-        let moved = (firsts.as_ref() != before, seconds.as_ref() != before);
-        Ok(match moved {
-            (false, false) if now == before => Some((first.clone(), Some(second.clone()))),
-            (true, false) if now == firsts.as_ref() => Some((first.clone(), None)),
-            (false, true) if now == seconds.as_ref() => Some((second.clone(), None)),
-            _ => None,
-        })
-    }
-
-    /// Whether `op`, which moved the workspace's commit from `was` to
-    /// `now`, is a move of Reef's that kept the workspace's edits in their
-    /// change.
-    async fn reefs_move(
-        &self,
-        op: &Operation,
-        (was, now): (&CommitId, &CommitId),
-        trail: &mut Trail,
-    ) -> Result<bool, SnapshotError> {
+    /// Whether `step` is a move of Reef's that kept the workspace's edits
+    /// in their change.
+    async fn reefs_move(&self, step: &Move, trail: &mut Trail) -> Result<bool, SnapshotError> {
+        let Move { op, was, now } = step;
         let class = super::oplog::classify(&super::oplog::entry(op));
         let mover = class
             .workspace_id

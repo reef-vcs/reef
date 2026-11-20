@@ -25,7 +25,8 @@ use jj_lib::settings::UserSettings;
 use reef_lib::error::{Classify as _, ErrorKind};
 use reef_lib::jj::diff::conflicted_paths;
 use reef_lib::jj::files::{self, Edit, EditAction};
-use reef_lib::jj::revset::RevisionError;
+use reef_lib::jj::rebase::{self, RebaseMode, RebaseRequest};
+use reef_lib::jj::revset::{RevisionError, RevsetScope};
 use reef_lib::jj::settings::user_settings_with_max_new_file_size;
 use reef_lib::jj::settings::{Identity, user_settings};
 use reef_lib::jj::workspace::CommitLookupError;
@@ -1122,22 +1123,28 @@ async fn a_snapshot_below_carries() {
     }
 }
 
-/// Another jj client's operation on `at`, a bookmark set on `commit`,
+/// Another jj client's operation on `at`, bookmark `name` set on `commit`,
 /// concurrent with whatever `main` wrote since `at`: `main`'s next reload
-/// merges the two operation heads.
-async fn concurrent_bookmark(at: &Arc<ReadonlyRepo>, commit: &CommitIdHex) {
+/// merges the operation heads. Returns the repository at that operation.
+async fn concurrent_bookmark(
+    at: &Arc<ReadonlyRepo>,
+    name: &str,
+    commit: &CommitIdHex,
+) -> Arc<ReadonlyRepo> {
     let mut tx = at.start_transaction();
     tx.repo_mut().set_local_bookmark_target(
-        jj_lib::ref_name::RefName::new("concurrent"),
+        jj_lib::ref_name::RefName::new(name),
         jj_lib::op_store::RefTarget::normal(CommitId::try_from_hex(commit.as_str()).unwrap()),
     );
-    tx.commit("another client's bookmark").await.unwrap();
+    tx.commit(format!("another client's bookmark {name}"))
+        .await
+        .unwrap()
 }
 
 /// Another jj client's rewrite of `commit` on `at`, which empties its
 /// tree, concurrent with whatever `main` wrote since `at`. It moves every
-/// working copy on the commit.
-async fn concurrent_rewrite(at: &Arc<ReadonlyRepo>, commit: &CommitIdHex) {
+/// working copy on the commit. Returns the repository at that operation.
+async fn concurrent_rewrite(at: &Arc<ReadonlyRepo>, commit: &CommitIdHex) -> Arc<ReadonlyRepo> {
     let id = CommitId::try_from_hex(commit.as_str()).unwrap();
     let old = at.store().get_commit_async(&id).await.unwrap();
     let mut tx = at.start_transaction();
@@ -1148,7 +1155,39 @@ async fn concurrent_rewrite(at: &Arc<ReadonlyRepo>, commit: &CommitIdHex) {
         .await
         .unwrap();
     tx.repo_mut().rebase_descendants().await.unwrap();
-    tx.commit("another client's rewrite").await.unwrap();
+    tx.commit("another client's rewrite").await.unwrap()
+}
+
+/// Another jj client's new description of `commit` on `at`, concurrent
+/// with whatever `main` wrote since `at`. It keeps the commit's tree.
+async fn concurrent_describe(at: &Arc<ReadonlyRepo>, commit: &CommitIdHex) {
+    let id = CommitId::try_from_hex(commit.as_str()).unwrap();
+    let old = at.store().get_commit_async(&id).await.unwrap();
+    let mut tx = at.start_transaction();
+    tx.repo_mut()
+        .rewrite_commit(&old)
+        .set_description("another client's")
+        .write()
+        .await
+        .unwrap();
+    tx.repo_mut().rebase_descendants().await.unwrap();
+    tx.commit("another client's describe").await.unwrap();
+}
+
+/// Points `main` at the merge of `heads`, as jj merges operation heads:
+/// each one in turn into the first.
+async fn merge_in_order(fx: &mut Fixture, heads: &[&Arc<ReadonlyRepo>]) {
+    let operations = heads.iter().map(|head| head.operation().clone()).collect();
+    let attributes = Vec::<(String, String)>::new();
+    let (merged, _) = fx
+        .main
+        .head()
+        .loader()
+        .merge_operations(operations, None, None, attributes)
+        .await
+        .unwrap();
+    assert_eq!(merged.operation().parent_ids().len(), heads.len());
+    fx.main.set_head(merged);
 }
 
 /// Reloads `main` at head, which merges two operation heads.
@@ -1203,7 +1242,7 @@ async fn a_merge_beside_a_snapshot_below_carries() {
     let meta = OpMeta::new(OpKind::Snapshot, "reef: snapshot workspace x").workspace(x_id);
     let x_snapshot = commit_snapshot(&fork, pending.plan(), &meta).await.unwrap();
     pending.finish(&x_snapshot.op_id).await.unwrap();
-    concurrent_bookmark(&fork, &below).await;
+    concurrent_bookmark(&fork, "concurrent", &below).await;
     merge_heads(&mut fx).await;
     let rebased = reef_lib::jj::view_wc_commit(fx.main.head(), &format!("reef-{Y}")).unwrap();
     assert_ne!(rebased, c);
@@ -1239,7 +1278,7 @@ async fn a_merge_with_a_side_older_than_the_last_snapshot_carries() {
     assert_ne!(c, c0);
     fx.main.reload_at_head().await.unwrap();
     let c2 = write_on(&mut fx, &c, &[content("api.txt", "api\n")]).await;
-    concurrent_bookmark(&fork, &c0).await;
+    concurrent_bookmark(&fork, "concurrent", &c0).await;
     merge_heads(&mut fx).await;
     write(&y_root, "late.txt", "late\n");
 
@@ -1266,7 +1305,7 @@ async fn a_merge_after_the_write_carries() {
     let base = fx.main.wc_change().unwrap().commit_id;
     fx.create("reef-00000000000000cc", StartPoint::NewOn(base.clone()))
         .await;
-    concurrent_bookmark(&fork, &base).await;
+    concurrent_bookmark(&fork, "concurrent", &base).await;
     merge_heads(&mut fx).await;
     write(&y_root, "late.txt", "late\n");
 
@@ -1334,9 +1373,160 @@ async fn a_merge_keeps_arm_four_for_moves_that_are_not_reefs() {
     let meta = OpMeta::new(OpKind::Snapshot, "reef: snapshot workspace x").workspace(x_id);
     let x_snapshot = commit_snapshot(&fork, pending.plan(), &meta).await.unwrap();
     pending.finish(&x_snapshot.op_id).await.unwrap();
-    concurrent_bookmark(&fork, &base).await;
+    concurrent_bookmark(&fork, "concurrent", &base).await;
     merge_heads(&mut fx).await;
     assert_diverges(&fx, &mut y, &shared).await;
+}
+
+// Review 8, R8-1: two other jj clients ran beside Reef's write, and the
+// reload merges three operation heads in one operation. Neither client
+// moved this workspace's commit: the move is still Reef's.
+#[tokio::test]
+async fn a_merge_of_three_heads_carries() {
+    let mut fx = Fixture::new().await;
+    let (mut y, y_root, c) = busy_workspace(&mut fx, &[("a.txt", "a\n")]).await;
+    let fork = Arc::clone(fx.main.head());
+    let base = fx.main.wc_change().unwrap().commit_id;
+    let c2 = write_on(&mut fx, &c, &[content("api.txt", "api\n")]).await;
+    concurrent_bookmark(&fork, "one", &base).await;
+    concurrent_bookmark(&fork, "two", &base).await;
+    fx.main.reload_at_head().await.unwrap();
+    assert_eq!(fx.main.head().operation().parent_ids().len(), 3);
+    write(&y_root, "late.txt", "late\n");
+
+    let (committed, files) = carry_snapshot(&fx, &mut y, (&c, &c2), None).await;
+    assert_eq!(files, 1, "the write's file");
+    for path in ["a.txt", "api.txt", "late.txt"] {
+        assert!(
+            file_in(&committed.repo, &committed.commit_id, path)
+                .await
+                .is_some(),
+            "{path} in the commit"
+        );
+    }
+}
+
+// Review 8, R8-1: a criss-cross. Reef's write and another client's
+// operation are merged twice, by the daemon and by another jj process, and
+// the next reload merges the two merges, which have two closest common
+// ancestors. Only Reef moved this workspace's commit.
+#[tokio::test]
+async fn a_criss_cross_merge_carries() {
+    let mut fx = Fixture::new().await;
+    let (mut y, y_root, c) = busy_workspace(&mut fx, &[("a.txt", "a\n")]).await;
+    let fork = Arc::clone(fx.main.head());
+    let base = fx.main.wc_change().unwrap().commit_id;
+    let c2 = write_on(&mut fx, &c, &[content("api.txt", "api\n")]).await;
+    let written = Arc::clone(fx.main.head());
+    let other = concurrent_bookmark(&fork, "one", &base).await;
+    merge_heads(&mut fx).await;
+    // Another jj process merged the same two heads, and wrote on top.
+    let daemons = Arc::clone(fx.main.head());
+    merge_in_order(&mut fx, &[&written, &other]).await;
+    concurrent_bookmark(fx.main.head(), "two", &base).await;
+    fx.main.set_head(daemons);
+    merge_heads(&mut fx).await;
+    write(&y_root, "late.txt", "late\n");
+
+    let (committed, files) = carry_snapshot(&fx, &mut y, (&c, &c2), None).await;
+    assert_eq!(files, 1, "the write's file");
+    for path in ["a.txt", "api.txt", "late.txt"] {
+        assert!(
+            file_in(&committed.repo, &committed.commit_id, path)
+                .await
+                .is_some(),
+            "{path} in the commit"
+        );
+    }
+}
+
+// Review 8, R8-1: no shape of merge launders a move that is not Reef's.
+// ADR 0018's fourth arm stands when another client moved this workspace's
+// commit on any of the merged heads, whichever commit the merge kept, and
+// when the merge itself moved it.
+#[tokio::test]
+async fn a_merge_of_many_heads_keeps_arm_four() {
+    // (a) three heads: Reef's write, a bookmark, and another client's
+    // rewrite. jj keeps the commit of the head it merges into, so each
+    // order is tried: Reef's commit kept, and the other client's.
+    for reefs_first in [true, false] {
+        let mut fx = Fixture::new().await;
+        let (mut y, y_root, c) = busy_workspace(&mut fx, &[("a.txt", "a\n")]).await;
+        let fork = Arc::clone(fx.main.head());
+        let base = fx.main.wc_change().unwrap().commit_id;
+        let c2 = write_on(&mut fx, &c, &[content("api.txt", "api\n")]).await;
+        let written = Arc::clone(fx.main.head());
+        let bookmark = concurrent_bookmark(&fork, "one", &base).await;
+        let rewrite = concurrent_rewrite(&fork, &c).await;
+        let heads = if reefs_first {
+            [&written, &bookmark, &rewrite]
+        } else {
+            [&rewrite, &bookmark, &written]
+        };
+        merge_in_order(&mut fx, &heads).await;
+        let kept = reef_lib::jj::view_wc_commit(fx.main.head(), &format!("reef-{Y}")).unwrap();
+        assert_eq!(kept == c2, reefs_first, "the merge kept its first head's");
+        write(&y_root, "late.txt", "late\n");
+        assert_diverges(&fx, &mut y, &c).await;
+    }
+
+    // (b) a criss-cross of Reef's write and another client's rewrite.
+    let mut fx = Fixture::new().await;
+    let (mut y, y_root, c) = busy_workspace(&mut fx, &[("a.txt", "a\n")]).await;
+    let fork = Arc::clone(fx.main.head());
+    let base = fx.main.wc_change().unwrap().commit_id;
+    write_on(&mut fx, &c, &[content("api.txt", "api\n")]).await;
+    let written = Arc::clone(fx.main.head());
+    let rewrite = concurrent_rewrite(&fork, &c).await;
+    merge_in_order(&mut fx, &[&written, &rewrite]).await;
+    let daemons = Arc::clone(fx.main.head());
+    merge_in_order(&mut fx, &[&written, &rewrite]).await;
+    let others = concurrent_bookmark(fx.main.head(), "two", &base).await;
+    merge_in_order(&mut fx, &[&daemons, &others]).await;
+    write(&y_root, "late.txt", "late\n");
+    assert_diverges(&fx, &mut y, &c).await;
+
+    // (c) the merge moved the commit: Reef rebased y onto x's commit, and
+    // another client described x's commit meanwhile, so the merge rebased
+    // y's commit again. Neither head has the commit the merge has.
+    let x_id = "00000000000000aa";
+    let mut fx = Fixture::new().await;
+    let (mut y, y_root, c) = busy_workspace(&mut fx, &[("a.txt", "a\n")]).await;
+    let base = fx.main.wc_change().unwrap().commit_id;
+    let (mut x, x_root, _) = fx
+        .create(&format!("reef-{x_id}"), StartPoint::NewOn(base))
+        .await;
+    write(&x_root, "from-x.txt", "x\n");
+    let onto = x
+        .snapshot("reef: snapshot workspace x")
+        .await
+        .unwrap()
+        .wc_commit;
+    fx.main.reload_at_head().await.unwrap();
+    let fork = Arc::clone(fx.main.head());
+    let request = RebaseRequest {
+        revision: c.as_str(),
+        onto: Some(onto.as_str()),
+        mode: RebaseMode::Source,
+        expected: None,
+        remote: None,
+    };
+    let scope = RevsetScope {
+        workspace: None,
+        user_email: "reef-test@example.com",
+        root: fx.main.workspace_root(),
+    };
+    let plan = rebase::plan(&fork, &request, &scope).await.unwrap();
+    let meta = OpMeta::new(OpKind::Rebase, "reef: rebase");
+    fx.main.rebase(&plan, &meta).await.unwrap();
+    let rebased = reef_lib::jj::view_wc_commit(fx.main.head(), &format!("reef-{Y}")).unwrap();
+    assert_ne!(rebased, c, "Reef's rebase moved y");
+    concurrent_describe(&fork, &onto).await;
+    merge_heads(&mut fx).await;
+    let merged = reef_lib::jj::view_wc_commit(fx.main.head(), &format!("reef-{Y}")).unwrap();
+    assert_ne!(merged, rebased, "the merge moved y again");
+    write(&y_root, "late.txt", "late\n");
+    assert_diverges(&fx, &mut y, &c).await;
 }
 
 // Issue #80: a carried snapshot whose check-out failed is merged again over

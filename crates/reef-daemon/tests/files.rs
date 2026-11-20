@@ -2274,16 +2274,16 @@ async fn an_ancestor_commit_between_an_edit_and_its_follow_is_followed() {
 }
 
 /// Another jj client on the registered root. It loads the head when made
-/// and commits a bookmark on its working-copy commit when told, so its
-/// operation is concurrent with every operation the daemon wrote in
-/// between, and the daemon's next load merges the two operation heads.
+/// and commits bookmark `name` on its working-copy commit when told, so
+/// its operation is concurrent with every operation the daemon wrote in
+/// between, and the daemon's next load merges the operation heads.
 struct OtherClient {
     go: std::sync::mpsc::Sender<()>,
     done: std::thread::JoinHandle<()>,
 }
 
 impl OtherClient {
-    fn load(root: &Path) -> Self {
+    fn load(root: &Path, name: &'static str) -> Self {
         use jj_lib::default_backend_factories::{
             default_backend_factories, default_working_copy_factories,
             default_workspace_loader_factory,
@@ -2305,7 +2305,7 @@ impl OtherClient {
             let mut tx = repo.start_transaction();
             let on = repo.view().wc_commit_ids().values().next().unwrap().clone();
             tx.repo_mut().set_local_bookmark_target(
-                jj_lib::ref_name::RefName::new("other-client"),
+                jj_lib::ref_name::RefName::new(name),
                 jj_lib::op_store::RefTarget::normal(on),
             );
             tell.send(()).unwrap();
@@ -2328,12 +2328,14 @@ impl OtherClient {
     }
 }
 
-/// Whether the daemon merged two operation heads.
-async fn merged_operations(client: &Client, repo: &SyntheticRepo) -> bool {
+/// The most operation heads the daemon merged in one operation.
+async fn merged_heads(client: &Client, repo: &SyntheticRepo) -> usize {
     operations(client, repo, OperationFilter::default())
         .await
         .iter()
-        .any(|operation| operation.parent_ids.len() > 1)
+        .map(|operation| operation.parent_ids.len())
+        .max()
+        .unwrap()
 }
 
 /// Waits for `ws`'s row to be on its change's one visible commit, with
@@ -2365,7 +2367,7 @@ async fn a_descendant_carries_across_a_merge_with_another_clients_operation() {
     let (x, y) = stacked(client, &repo).await;
     write(&y, "y-late.txt", "late\n");
     write(&x, "x2.txt", "x2\n");
-    let other = OtherClient::load(&repo.root);
+    let other = OtherClient::load(&repo.root, "other-client");
     held_at_commit(&daemon, &repo, &x, other.commit())
         .await
         .unwrap();
@@ -2381,7 +2383,7 @@ async fn a_descendant_carries_across_a_merge_with_another_clients_operation() {
             "{path} in Y's commit"
         );
     }
-    assert!(merged_operations(client, &repo).await);
+    assert_eq!(merged_heads(client, &repo).await, 2);
     daemon.stop().await;
 }
 
@@ -2396,7 +2398,7 @@ async fn a_write_carries_across_a_merge_with_another_clients_operation() {
     let w = create(client, &repo, "w@test", None).await;
     write(&w, "one.txt", "one\n");
     snapshot(client, &repo, &w).await;
-    let other = OtherClient::load(&repo.root);
+    let other = OtherClient::load(&repo.root, "other-client");
     let request = rewrite(&repo, None, &w.change_id, vec![content("api.txt", "api\n")]);
     let edit = {
         let client = client.clone();
@@ -2418,7 +2420,81 @@ async fn a_write_carries_across_a_merge_with_another_clients_operation() {
             "{path} in the commit"
         );
     }
-    assert!(merged_operations(client, &repo).await);
+    assert_eq!(merged_heads(client, &repo).await, 2);
+    daemon.stop().await;
+}
+
+// Eighth R3.11 review, R8-1: two other jj clients commit beside X's
+// snapshot, and the daemon's next load merges three operation heads in one
+// operation. Y still carries its edit onto the commit X's snapshot rebased.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_descendant_carries_across_a_merge_of_three_operation_heads() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let (x, y) = stacked(client, &repo).await;
+    write(&y, "y-late.txt", "late\n");
+    write(&x, "x2.txt", "x2\n");
+    let others = [
+        OtherClient::load(&repo.root, "one"),
+        OtherClient::load(&repo.root, "two"),
+    ];
+    let commit = async {
+        for other in others {
+            other.commit().await;
+        }
+    };
+    held_at_commit(&daemon, &repo, &x, commit).await.unwrap();
+
+    follows(client, &repo, &y, "x2.txt").await;
+    snapshot(client, &repo, &y).await;
+    follows(client, &repo, &y, "x2.txt").await;
+    let y_row = get(client, &repo, &y).await;
+    for path in ["x.txt", "x2.txt", "y.txt", "y-late.txt"] {
+        assert!(read(&y, path).is_some(), "{path} on disk");
+        assert!(
+            file(client, &repo, &y_row.commit_id, path).await.is_some(),
+            "{path} in Y's commit"
+        );
+    }
+    assert_eq!(merged_heads(client, &repo).await, 3);
+    daemon.stop().await;
+}
+
+// Eighth R3.11 review, R8-1: issue #80's plain case beside two other jj
+// clients: one commit, as without them.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_write_carries_across_a_merge_of_three_operation_heads() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let w = create(client, &repo, "w@test", None).await;
+    write(&w, "one.txt", "one\n");
+    snapshot(client, &repo, &w).await;
+    let others = [
+        OtherClient::load(&repo.root, "one"),
+        OtherClient::load(&repo.root, "two"),
+    ];
+    let request = rewrite(&repo, None, &w.change_id, vec![content("api.txt", "api\n")]);
+    let edit = {
+        let client = client.clone();
+        async move { client.edit_files(request).await }
+    };
+    let late = || {
+        write(&w, "late.txt", "late\n");
+        others.into_iter().for_each(OtherClient::commit_now);
+    };
+    at_follow_hold(&daemon, edit, late).await.unwrap();
+
+    follows(client, &repo, &w, "api.txt").await;
+    snapshot(client, &repo, &w).await;
+    follows(client, &repo, &w, "api.txt").await;
+    let row = get(client, &repo, &w).await;
+    for path in ["one.txt", "api.txt", "late.txt"] {
+        assert!(
+            file(client, &repo, &row.commit_id, path).await.is_some(),
+            "{path} in the commit"
+        );
+    }
+    assert_eq!(merged_heads(client, &repo).await, 3);
     daemon.stop().await;
 }
 
