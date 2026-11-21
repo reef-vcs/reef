@@ -99,3 +99,4 @@ This index is maintained by hand. Every PR that adds an ADR or changes a status 
 | [0085](0085-verified-human-presence.md) | Verified human presence: passkeys, pinned by policy, one touch per sign-off | accepted |
 | [0086](0086-reviewing-from-the-web-ui.md) | Reviewing from the web UI: the proposal view's writes and their record | accepted |
 | [0087](0087-adopting-only-what-came-from-the-last-snapshot.md) | Adopting only what came from the last snapshot | accepted |
+| [0089](0089-another-clients-undo-keeps-a-workspaces-files.md) | Another client's undo keeps a workspace's files | accepted |

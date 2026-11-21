@@ -1,0 +1,38 @@
+# 0089. Another client's undo keeps a workspace's files
+
+- Status: accepted
+- Date: 2026-11-20
+- Ticket: [#357](https://github.com/reef-vcs/reef/issues/357) ([brief](../dev-tickets/phase-3/issue-357-foreign-undo.md))
+- Amends: [0087](0087-adopting-only-what-came-from-the-last-snapshot.md) (decision 1: who wrote a move now matters), [0084](0084-dependent-change-lifecycle.md) (a move counts only when its own operation's history reached its start)
+
+## Context
+
+[0087](0087-adopting-only-what-came-from-the-last-snapshot.md) lets a clean, stale workspace check out the view's commit when the operations since its last snapshot A moved the workspace there from A, whoever wrote them. Its Consequences record what that leaves open: an undo, an operation restore, an abandon or a move that starts at A still takes A's files off disk.
+
+Issue #357 shows that another jj client does exactly that. At the registered root, `jj undo --allow-cross-workspace`, `jj op restore`, `jj op revert` and `jj abandon` each put an agent's workspace on a commit without the files its last snapshot recorded, and its next snapshot removed them from the directory. Nothing said so: the row was not divergent, and the files lived on only in the operation log.
+
+`jj undo` reached a busy workspace too. The jj CLI describes its undo as `undo: restore to operation <id>`, which is also what Reef's early `Repo::undo_last` wrote, and `oplog::classify` read that description as Reef's undo when the `reef.kind` attribute was missing. The carry ([0084](0084-dependent-change-lifecycle.md)) then treated the jj CLI's undo as Reef's move and merged the workspace's edits onto the undone commit, which removed A's files from disk.
+
+The #344 review found a second gap (R4-1). The walk's `leads` kept one set of reached commits across operations that ran beside each other, so a move counted when a move on another branch of the operation graph had reached its start. With Reef's undo of A on one head and a stale client's describe of the commit before A on the other, the merge-parent order decided whether the file stayed.
+
+## Decision
+
+1. **Another jj client's move counts only when it rewrote the commit.** A move in an operation Reef did not write counts toward a clean workspace's adopt only when its operation recorded the new commit as a rewrite of the old one: the old commit is among the predecessors jj recorded for it there, following commits the operation wrote and rewrote again (`reef_lib::jj::snapshot::origins`). A describe, a rebase, a squash or a split records one; an undo, an operation restore, an operation revert and an abandon record none. A merge of operation heads is another client's operation in this sense, and its rebase records predecessors, so [0087](0087-adopting-only-what-came-from-the-last-snapshot.md) decision 2 holds unchanged. Reef's own moves count as before: the daemon's undo and abandon, `reef move`, a landing, another workspace's snapshot of the shared change.
+2. **A move counts only when its start was reached in its own operation's history.** `leads` keeps, for each operation since A, the commits reached by its end: an operation before A reached A only, an operation reached what its parents reached, and a move adds its commit when the set it starts from holds the commit it left. The view's commit must be in the head operation's set. The order the walk lists operations in no longer matters, and the carry uses the same rule.
+3. **Only `reef.kind` says an undo is Reef's.** `classify` no longer reads `undo: restore to operation` as Reef's undo. Every undo the daemon writes is `reef: undo operation <id>` with `reef.kind = undo`, and `Repo::undo_last` (a spike's API, used by tests) sets the attribute too. The jj CLI's undo now classifies as external: a busy workspace diverges under it as it does under `jj op restore`, and `reef op log` and the web UI's activity feed show it as another client's.
+4. Everything else takes ADR [0018](0018-snapshot-staleness-and-divergence.md)'s fourth arm, as [0087](0087-adopting-only-what-came-from-the-last-snapshot.md) decision 3 says: the snapshot rewrites A, the change is marked divergent with attention `divergent`, and the directory stays as it is.
+
+## Consequences
+
+- No other jj client's operation takes a file a workspace's last snapshot recorded off its disk. A person who runs `jj undo` at the root over an agent's snapshot gets a divergent change with both commits visible, and resolves it by abandoning the one to drop.
+- A person or agent who wants a workspace to leave its snapshot asks Reef: `reef undo`, `reef abandon` and `reef move` are followed as before.
+- After another client's abandon of A, the fourth arm rewrites A, which the abandon had hidden: the change comes back with one visible commit, and the row says divergent though nothing else is visible in the change. The files are safe; the row's word is wrong until the next move. The row's divergence is computed from the arm taken, not from the visible commits, as in #359.
+- In R4-1's shape a clean workspace now diverges in both merge orders: the stale client's describe started at a commit only the undo beside it reached.
+- `reef op log` and the activity feed report the jj CLI's `jj undo` as external, where they said undo. Operations Reef wrote before `reef.kind` existed (before R2.03) with that description read as external too.
+- The walk reads no more operations than before. `leads` now keeps a set per operation since A, shared between an operation and its one parent until a move or a merge adds to it.
+
+## Alternatives considered
+
+- **Refusing to adopt after any undo.** Reef's own undo of a snapshot is a request to leave it, made through Reef, and an agent that undoes its last write expects its files to follow.
+- **Requiring that A be in the view commit's evolution, read from the whole operation log** (jj's `evolution::walk_predecessors`). It answers a wider question than needed: a rewrite recorded in another operation since A is already a move of its own, judged where it was written. Reading the predecessors of the one operation that made the move is local and cannot be reordered.
+- **Keeping the description fallback for undo and reading `reef.kind` only in the snapshot path.** The fallback misattributes the jj CLI's undo everywhere it is read, so it goes.

@@ -4,6 +4,7 @@
 - Date: 2026-11-20
 - Ticket: [#344](https://github.com/reef-vcs/reef/issues/344) ([brief](../dev-tickets/phase-3/issue-344-adopt-clock-skew.md))
 - Amends: [0018](0018-snapshot-staleness-and-divergence.md) (decision 3), [0084](0084-dependent-change-lifecycle.md) (the walk also runs for every clean, stale snapshot)
+- Amended by: [0089](0089-another-clients-undo-keeps-a-workspaces-files.md) (decision 1: another jj client's move counts only when it rewrote the commit, and a move only when its own operation's history reached its start)
 
 ## Context
 
