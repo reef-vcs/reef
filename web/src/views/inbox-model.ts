@@ -6,10 +6,12 @@
 // It reads live, as the proposal page does: nothing is read until the
 // operation stream is live, then a read follows any operation of a kind the
 // last response names (`refresh_operations`: comments, transitions,
-// landings, conflicts, workspaces; never a snapshot alone) in a repository
-// read, and any change to a presence entry of a kind it names
-// (`refresh_presence`: proposals' statuses and workspaces' attention, which
-// move with no operation). Reads are paced (live/paced.ts), one in flight.
+// landings, conflicts, workspaces; never a snapshot alone), and any change to
+// a presence entry of a kind it names (`refresh_presence`: proposals'
+// statuses and workspaces' attention, which move with no operation), in the
+// tab's repository, or in any repository on the home page, so one registered
+// after the page opened shows too. Reads are paced (live/paced.ts), one in
+// flight.
 //
 // A digest keeps the base its visit started from: later reads send it as
 // `digest_from`, so marking it seen (the page does once it was on screen,
@@ -108,7 +110,10 @@ export class InboxModel {
   private readonly good = new Map<string, InboxSection>();
   private readonly answered = new Set<string>();
   private readonly marked = new Map<string, bigint>();
-  /** Repository ids read, once known; every repository's operations ask until then. */
+  /**
+   * On a repository's tab, that repository's id once read; null on the home
+   * page, which reads every repository, one registered since included.
+   */
   private repoIds: Set<string> | null = null;
   private operationKinds: ReadonlySet<OperationKind> | null = null;
   private presenceKinds: readonly PresenceKind[] = [PresenceKind.AUTOMATIC, PresenceKind.ATTENTION];
@@ -282,7 +287,7 @@ export class InboxModel {
       }
       return this.good.get(section.repoId) ?? section;
     });
-    this.repoIds = new Set(sections.map((section) => section.repoId));
+    if (this.repo !== undefined) this.repoIds = new Set(sections.map((section) => section.repoId));
     this.operationKinds = new Set(response.refreshOperations);
     if (response.refreshPresence.length > 0) this.presenceKinds = response.refreshPresence;
     this.signature = this.presenceSignature();

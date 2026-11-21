@@ -82,6 +82,12 @@ impl Page {
         )
     }
 
+    /// The session as the daemon records it: the first 16 hex digits of
+    /// its token's digest.
+    fn session_id(&self) -> String {
+        blake3::hash(self.token.as_bytes()).to_hex()[..16].to_owned()
+    }
+
     fn inbox(&self) -> v1::inbox_service_client::InboxServiceClient<Web> {
         v1::inbox_service_client::InboxServiceClient::with_origin(
             self.service(),
@@ -591,5 +597,40 @@ async fn a_web_mark_is_the_default_persons() {
     assert!(
         read.sections[0].landed.as_ref().unwrap().from_mark,
         "the socket reads the mark the page set: both are the default person's"
+    );
+
+    // S-253: the row names the session that moved the mark, and only a move
+    // changes it.
+    let state = daemon.handle.state();
+    let person = state.identity.default_id().unwrap().to_owned();
+    let id = repo.id.parse().unwrap();
+    let row = || {
+        state
+            .db
+            .inbox_marks(&person, &[id])
+            .unwrap()
+            .remove(&id)
+            .unwrap()
+    };
+    assert_eq!(
+        row().web_session,
+        Some(page.session_id()),
+        "a web mark records its session"
+    );
+    proposals(&daemon, &repo, 1).await;
+    let mark = |seq| v1::MarkInboxSeenRequest {
+        marks: vec![v1::InboxMark {
+            repo: repo.id.clone(),
+            seq,
+        }],
+    };
+    let through = client.mark_inbox_seen(mark(1_000)).await.unwrap().marks[0].seq;
+    assert!(through > 0);
+    assert_eq!(row().web_session, None, "the socket moved it last");
+    page.inbox().mark_inbox_seen(mark(through)).await.unwrap();
+    assert_eq!(
+        row().web_session,
+        None,
+        "a web mark that moves nothing records nothing"
     );
 }

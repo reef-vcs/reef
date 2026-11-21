@@ -54,10 +54,10 @@ function live() {
         }),
       );
     },
-    status: (id: string, ms: number) => {
+    status: (id: string, ms: number, repo = REPO) => {
       presence.applyFrame(
         presenceFrame([
-          { id, kind: PresenceKind.AUTOMATIC, repoId: REPO, updatedAt: timestampFromMs(ms) },
+          { id, kind: PresenceKind.AUTOMATIC, repoId: repo, updatedAt: timestampFromMs(ms) },
         ]),
       );
     },
@@ -149,12 +149,50 @@ describe("the inbox", () => {
     await waitFor(() => {
       expect(daemon.reads.length).toBe(3);
     });
+  });
+
+  it("on the home page, reads on an operation of a repository its last read did not return", async () => {
+    const daemon = new InboxDaemon();
+    const stream = await open(daemon);
+    daemon.sections = [
+      section(REPO),
+      section(OTHER, { needsYouNow: [helpItem("h1", 1_000, OTHER)], needsYouNowTotal: 1 }),
+    ];
+    await act(() => {
+      stream.push(OperationKind.COMMENT, OTHER);
+    });
+    await waitFor(() => {
+      expect(daemon.reads.length).toBe(2);
+    });
+  });
+
+  it("on the home page, reads on a status entry of a repository its last read did not return", async () => {
+    const daemon = new InboxDaemon();
+    const stream = await open(daemon);
+    await act(() => {
+      stream.status("auto1", 1, OTHER);
+    });
+    await waitFor(() => {
+      expect(daemon.reads.length).toBe(2);
+    });
+  });
+
+  it("on a repository's tab, reads on nothing of another repository", async () => {
+    const daemon = new InboxDaemon();
+    const stream = await open(daemon, REPO);
     await act(async () => {
       stream.push(OperationKind.COMMENT, OTHER);
+      stream.status("auto1", 1, OTHER);
       await settle(20);
     });
     await pause(300);
-    expect(daemon.reads.length).toBe(3);
+    expect(daemon.reads.length).toBe(1);
+    await act(() => {
+      stream.status("auto2", 1);
+    });
+    await waitFor(() => {
+      expect(daemon.reads.length).toBe(2);
+    });
   });
 
   it("answers a help request in place, and says so when it leaves", async () => {

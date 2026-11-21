@@ -108,15 +108,11 @@ impl InboxHandler {
         Ok(repos)
     }
 
-    /// One repository's section; a failure is its `error`.
-    async fn section(
-        &self,
-        repo: RepoId,
-        workspaces: Vec<v1::Workspace>,
-        base: DigestBase,
-        base_seen: Timestamp,
-    ) -> v1::InboxSection {
-        match self.read_section(repo, workspaces, base, base_seen).await {
+    /// One repository's section, its digest from the page's kept base
+    /// `from` when it has one; any failure to read the repository is its
+    /// `error`, so the other sections still return.
+    async fn section(&self, repo: RepoId, viewer: &Viewer, from: Option<i64>) -> v1::InboxSection {
+        match self.read_section(repo, viewer, from).await {
             Ok(section) => section,
             Err(error) => v1::InboxSection {
                 repo_id: repo.as_hex(),
@@ -132,12 +128,13 @@ impl InboxHandler {
     async fn read_section(
         &self,
         repo: RepoId,
-        workspaces: Vec<v1::Workspace>,
-        base: DigestBase,
-        base_seen: Timestamp,
+        viewer: &Viewer,
+        from: Option<i64>,
     ) -> Result<v1::InboxSection, Status> {
         let state = &self.state;
         let hex = repo.as_hex();
+        let (base, base_seen) = self.base(repo, viewer, from)?;
+        let workspaces = self.attention(&hex).await?;
         let proposals = self.proposals(&hex).await?;
         let help = self
             .comments(v1::ListCommentsRequest {
@@ -194,6 +191,56 @@ impl InboxHandler {
                 .collect(),
             landed: Some(inbox::digest(base, base_seen, landed, &subjects)),
             error: None,
+        })
+    }
+
+    /// Where `repo`'s digest starts, and since when: the page's kept base
+    /// `from`, else the viewer's mark, else the newest transition a day ago.
+    fn base(
+        &self,
+        repo: RepoId,
+        viewer: &Viewer,
+        from: Option<i64>,
+    ) -> Result<(DigestBase, Timestamp), Status> {
+        let db = &self.state.db;
+        let mark = match viewer {
+            Viewer::Identity(id) => db.inbox_marks(id, &[repo]).map_err(status)?.remove(&repo),
+            Viewer::Nobody => None,
+        };
+        let default_since = Timestamp(Timestamp::now().0 - inbox::DIGEST_DEFAULT_MS);
+        Ok(match (from, mark) {
+            (Some(seq), Some(mark)) if seq == mark.seq => (
+                DigestBase {
+                    seq,
+                    from_mark: true,
+                },
+                mark.seen_at,
+            ),
+            (Some(seq), _) => {
+                let at = db.transition_time(repo, seq).map_err(status)?;
+                let base = DigestBase {
+                    seq,
+                    from_mark: false,
+                };
+                (base, at.unwrap_or(default_since))
+            }
+            (None, Some(mark)) => (
+                DigestBase {
+                    seq: mark.seq,
+                    from_mark: true,
+                },
+                mark.seen_at,
+            ),
+            (None, None) => {
+                let seq = db.transition_seq_at(repo, default_since).map_err(status)?;
+                (
+                    DigestBase {
+                        seq,
+                        from_mark: false,
+                    },
+                    default_since,
+                )
+            }
         })
     }
 
@@ -298,31 +345,29 @@ impl InboxHandler {
             .collect())
     }
 
-    /// Active workspaces needing attention, by repository.
-    async fn attention(&self) -> Result<HashMap<String, Vec<v1::Workspace>>, Status> {
-        let workspaces = super::workspaces::WorkspacesService::new(Arc::clone(&self.state));
-        let mut by_repo: HashMap<String, Vec<v1::Workspace>> = HashMap::new();
+    /// `repo`'s active workspaces needing attention, page by page.
+    async fn attention(&self, repo: &str) -> Result<Vec<v1::Workspace>, Status> {
+        let handler = super::workspaces::WorkspacesService::new(Arc::clone(&self.state));
+        let mut workspaces = Vec::new();
         let mut token = String::new();
         loop {
-            let page = workspaces
+            let page = handler
                 .list_workspaces(Request::new(v1::ListWorkspacesRequest {
+                    repo: repo.to_owned(),
                     states: vec![v1::WorkspaceState::Active.into()],
-                    page_size: 1000,
+                    page_size: PAGE,
                     page_token: token,
                     ..v1::ListWorkspacesRequest::default()
                 }))
                 .await?
                 .into_inner();
-            for workspace in page.workspaces {
-                if workspace.attention() != v1::Attention::Unspecified {
-                    by_repo
-                        .entry(workspace.repo_id.clone())
-                        .or_default()
-                        .push(workspace);
-                }
-            }
+            workspaces.extend(
+                page.workspaces
+                    .into_iter()
+                    .filter(|workspace| workspace.attention() != v1::Attention::Unspecified),
+            );
             if page.next_page_token.is_empty() {
-                return Ok(by_repo);
+                return Ok(workspaces);
             }
             token = page.next_page_token;
         }
@@ -369,56 +414,9 @@ impl InboxService for InboxHandler {
             }
             from.insert(id, i64::try_from(mark.seq).unwrap_or(i64::MAX));
         }
-        let marks = match &viewer {
-            Viewer::Identity(id) => self.state.db.inbox_marks(id, &repos).map_err(status)?,
-            Viewer::Nobody => HashMap::new(),
-        };
-        let mut attention = self.attention().await?;
-        let now = Timestamp::now();
-        let default_since = Timestamp(now.0 - inbox::DIGEST_DEFAULT_MS);
         let mut sections = Vec::with_capacity(repos.len());
         for repo in repos {
-            let mark = marks.get(&repo);
-            let (base, base_seen) = match (from.get(&repo), mark) {
-                (Some(seq), Some(mark)) if *seq == mark.seq => (
-                    DigestBase {
-                        seq: *seq,
-                        from_mark: true,
-                    },
-                    mark.seen_at,
-                ),
-                (Some(seq), _) => {
-                    let at = self.state.db.transition_time(repo, *seq).map_err(status)?;
-                    let base = DigestBase {
-                        seq: *seq,
-                        from_mark: false,
-                    };
-                    (base, at.unwrap_or(default_since))
-                }
-                (None, Some(mark)) => (
-                    DigestBase {
-                        seq: mark.seq,
-                        from_mark: true,
-                    },
-                    mark.seen_at,
-                ),
-                (None, None) => {
-                    let seq = self
-                        .state
-                        .db
-                        .transition_seq_at(repo, default_since)
-                        .map_err(status)?;
-                    (
-                        DigestBase {
-                            seq,
-                            from_mark: false,
-                        },
-                        default_since,
-                    )
-                }
-            };
-            let workspaces = attention.remove(&repo.as_hex()).unwrap_or_default();
-            sections.push(self.section(repo, workspaces, base, base_seen).await);
+            sections.push(self.section(repo, &viewer, from.get(&repo).copied()).await);
         }
         Ok(Response::new(GetInboxResponse {
             sections,
@@ -435,6 +433,7 @@ impl InboxService for InboxHandler {
         let Viewer::Identity(identity) = viewer(&self.state, &request) else {
             return Err(status(InboxError::IdentityRequired));
         };
+        let channel = super::identity::channel_of(&self.state, &request);
         let request = request.into_inner();
         if request.marks.is_empty() || request.marks.len() > MAX_REPOS {
             return Err(Status::invalid_argument(format!(
@@ -460,14 +459,28 @@ impl InboxService for InboxHandler {
         let now = Timestamp::now();
         let mut marks = Vec::with_capacity(resolved.len());
         for (repo, seq) in resolved {
-            let stands = self
+            let moved = self
                 .state
                 .db
-                .advance_inbox_mark(&identity, repo, seq, now)
+                .advance_inbox_mark(&identity, repo, seq, now, channel.web_session())
                 .map_err(status)?;
+            if moved.moved() {
+                // A web write's audit (S-253): the row keeps the last
+                // session that moved the mark; the log keeps every move.
+                tracing::info!(
+                    target: "reef_daemon::inbox::audit",
+                    identity_id = %identity,
+                    repo_id = %repo,
+                    from_seq = moved.from,
+                    to_seq = moved.to,
+                    channel = channel.name(),
+                    web_session = channel.web_session().unwrap_or_default(),
+                    "inbox mark moved"
+                );
+            }
             marks.push(v1::InboxMark {
                 repo: repo.as_hex(),
-                seq: stands.unsigned_abs(),
+                seq: moved.to.unsigned_abs(),
             });
         }
         Ok(Response::new(MarkInboxSeenResponse { marks }))

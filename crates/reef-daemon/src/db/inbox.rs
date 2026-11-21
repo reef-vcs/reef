@@ -2,7 +2,7 @@
 //! repository, and the landings since a base.
 //!
 //! A mark is the newest `lifecycle_transitions.seq` a person has seen. It
-//! only moves forward, in one statement, so two tabs marking at once
+//! only moves forward, in one transaction, so two tabs marking at once
 //! converge and a repeat changes nothing.
 
 use std::collections::HashMap;
@@ -13,12 +13,31 @@ use super::{Db, DbError};
 use crate::model::{RepoId, Timestamp};
 
 /// One person's mark on one repository.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InboxMarkRow {
     /// The newest transition seen.
     pub seq: i64,
     /// When the mark last moved.
     pub seen_at: Timestamp,
+    /// The web UI session that last moved it; `None` for the socket or the
+    /// remote listener.
+    pub web_session: Option<String>,
+}
+
+/// Where a mark stood before a move, and where it stands after.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MarkMove {
+    /// The seq before; `None` for a person's first mark on the repository.
+    pub from: Option<i64>,
+    /// The seq after.
+    pub to: i64,
+}
+
+impl MarkMove {
+    /// Whether the mark moved (a first mark always does).
+    pub fn moved(&self) -> bool {
+        self.from.is_none_or(|from| from < self.to)
+    }
 }
 
 /// Where a digest starts: after a transition seq, which is a person's mark,
@@ -69,7 +88,8 @@ impl Db {
     ) -> Result<HashMap<RepoId, InboxMarkRow>, DbError> {
         self.with(|conn| {
             let mut statement = conn.prepare_cached(
-                "SELECT seq, seen_at FROM inbox_marks WHERE identity_id = ?1 AND repo_id = ?2",
+                "SELECT seq, seen_at, web_session FROM inbox_marks
+                 WHERE identity_id = ?1 AND repo_id = ?2",
             )?;
             let mut found = HashMap::new();
             for repo in repos {
@@ -78,6 +98,7 @@ impl Db {
                         Ok(InboxMarkRow {
                             seq: row.get(0)?,
                             seen_at: Timestamp(row.get(1)?),
+                            web_session: row.get(2)?,
                         })
                     })
                     .optional()?;
@@ -91,28 +112,41 @@ impl Db {
 
     /// Moves `identity`'s mark on `repo` to `seq`, never backward and never
     /// past the repository's newest committed transition, and returns where
-    /// it stands. `seen_at` moves only with the mark.
+    /// it stood and stands. `seen_at` and `web_session`, the web UI session
+    /// the call came through, move only with the mark.
     pub fn advance_inbox_mark(
         &self,
         identity: &str,
         repo: RepoId,
         seq: i64,
         at: Timestamp,
-    ) -> Result<i64, DbError> {
-        self.with(|conn| {
-            conn.query_row(
-                "INSERT INTO inbox_marks(identity_id, repo_id, seq, seen_at)
+        web_session: Option<&str>,
+    ) -> Result<MarkMove, DbError> {
+        self.in_transaction(|tx| {
+            let from = tx
+                .query_row(
+                    "SELECT seq FROM inbox_marks WHERE identity_id = ?1 AND repo_id = ?2",
+                    params![identity, repo],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let to = tx.query_row(
+                "INSERT INTO inbox_marks(identity_id, repo_id, seq, seen_at, web_session)
                  SELECT ?1, ?2, max(0, min(?3, coalesce(
                      (SELECT max(seq) FROM lifecycle_transitions
-                      WHERE repo_id = ?2 AND status = 'committed'), 0))), ?4
+                      WHERE repo_id = ?2 AND status = 'committed'), 0))), ?4, ?5
                  ON CONFLICT(identity_id, repo_id) DO UPDATE SET
                      seen_at = CASE WHEN excluded.seq > inbox_marks.seq
                                     THEN excluded.seen_at ELSE inbox_marks.seen_at END,
+                     web_session = CASE WHEN excluded.seq > inbox_marks.seq
+                                        THEN excluded.web_session
+                                        ELSE inbox_marks.web_session END,
                      seq = max(inbox_marks.seq, excluded.seq)
                  RETURNING seq",
-                params![identity, repo, seq, at.0],
+                params![identity, repo, seq, at.0, web_session],
                 |row| row.get(0),
-            )
+            )?;
+            Ok(MarkMove { from, to })
         })
     }
 
