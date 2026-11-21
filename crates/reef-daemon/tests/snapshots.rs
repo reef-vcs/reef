@@ -822,8 +822,7 @@ async fn a_clean_workspace_keeps_its_files_over_reefs_import_of_a_deleted_branch
     assert_keeps(&daemon, &repo, &ws, &[]).await;
 }
 
-// Issue #368: the same with an edit since the last snapshot. The import
-// left the snapshot's change, so nothing is carried onto the new commit.
+// Issue #368: the same with an edit since the last snapshot.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_busy_workspace_keeps_its_files_over_reefs_import_of_a_deleted_branch() {
     let (daemon, repo) = colocated_fixture().await;

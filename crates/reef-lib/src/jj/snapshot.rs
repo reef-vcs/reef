@@ -1450,17 +1450,20 @@ fn leads(ops: &[Operation], moves: &[Move], from: &CommitId, to: Option<&CommitI
 /// Whether the commit `repo`'s view has for workspace `name` came from
 /// `from`, the commit the workspace last snapshotted (#344): the operations
 /// since `from` moved the workspace there from `from` ([`leads`]). A move
-/// another jj client wrote counts only when it rewrote the commit it
-/// started at ([`origins`]), as a describe or a rebase does, and so does a
-/// merge of operation heads that rebased the workspace's commit. Checking
+/// another jj client wrote, or Reef's import of git refs, counts only when
+/// it rewrote the commit it started at ([`origins`]), as a describe, a
+/// rebase or an import of a git-side amend does, and so does a merge of
+/// operation heads that rebased the workspace's commit. Checking
 /// the commit out then follows a decision someone made about `from`: an
 /// operation that had `from` rewrote it (and may have dropped files, as
 /// `jj restore` does), or Reef moved the workspace off it on purpose (an
 /// undo, an abandon, `reef move`).
 ///
 /// False for another client's `jj undo`, `jj op restore`, `jj op revert`
-/// or `jj abandon` of `from` (#357): each puts the workspace on a commit made from nothing
-/// of `from`'s, and checking it out would take `from`'s files off disk.
+/// or `jj abandon` of `from` (#357), and for an import of git refs that
+/// abandoned `from` because git no longer reaches it (#368): each puts the
+/// workspace on a commit made from nothing of `from`'s, and checking it
+/// out would take `from`'s files off disk.
 ///
 /// False for a commit another jj client made from an older commit, having
 /// loaded the head before `from` was written, that the merge of its
@@ -1487,7 +1490,7 @@ async fn came_from(
     let Some(Since { ops, mut moves }) = walk.moves().await? else {
         return Ok(false);
     };
-    moves.retain(|step| reefs(&step.op) || origins(&step.op, &step.now).contains(&step.was));
+    moves.retain(|step| reef_decided(&step.op) || origins(&step.op, &step.now).contains(&step.was));
     Ok(leads(
         &ops,
         &moves,
@@ -1496,10 +1499,13 @@ async fn came_from(
     ))
 }
 
-/// Whether Reef wrote `op` ([`super::oplog::classify`]).
-fn reefs(op: &Operation) -> bool {
+/// Whether Reef wrote `op` ([`super::oplog::classify`]), other than an
+/// import of git refs.
+fn reef_decided(op: &Operation) -> bool {
     let class = super::oplog::classify(&super::oplog::entry(op));
-    class.kind.is_some_and(|kind| kind != OpKind::External)
+    class
+        .kind
+        .is_some_and(|kind| !matches!(kind, OpKind::External | OpKind::ImportRefs))
 }
 
 /// The operations since a commit ([`Walk::moves`]), and the moves among
