@@ -1353,8 +1353,8 @@ struct Followed {
 /// change, or put it on a new empty change on it (a landing, ADR 0071);
 /// and those moves must lead from `from` to the view's commit. The shape of
 /// the log does not matter: operations that ran beside each other, and the
-/// merges of their heads, are read like any others. These moves are not
-/// Reef's, and give `None`, ADR 0018's divergence:
+/// merges of their heads, are read like any others. These moves do not
+/// count, and give `None`, ADR 0018's divergence:
 ///
 /// - another jj client's operation, whichever commit a merge then kept;
 /// - Reef's import of git refs that did not record the move as a rewrite
