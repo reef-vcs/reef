@@ -18,13 +18,15 @@ use jj_lib::default_backend_factories::{
     default_backend_factories, default_working_copy_factories, default_workspace_loader_factory,
 };
 use jj_lib::object_id::{HexPrefix, ObjectId as _, PrefixResolution};
-use jj_lib::ref_name::WorkspaceName;
+use jj_lib::op_store::RefTarget;
+use jj_lib::ref_name::{RefName, WorkspaceName};
 use jj_lib::repo::{ReadonlyRepo, Repo as _};
 use jj_lib::repo_path::RepoPathBuf;
 use jj_lib::settings::UserSettings;
 use reef_lib::error::{Classify as _, ErrorKind};
 use reef_lib::jj::diff::conflicted_paths;
 use reef_lib::jj::files::{self, Edit, EditAction};
+use reef_lib::jj::land::LandTarget;
 use reef_lib::jj::rebase::{self, RebaseMode, RebaseRequest};
 use reef_lib::jj::revset::{RevisionError, RevsetScope};
 use reef_lib::jj::settings::user_settings_with_max_new_file_size;
@@ -1133,8 +1135,8 @@ async fn concurrent_bookmark(
 ) -> Arc<ReadonlyRepo> {
     let mut tx = at.start_transaction();
     tx.repo_mut().set_local_bookmark_target(
-        jj_lib::ref_name::RefName::new(name),
-        jj_lib::op_store::RefTarget::normal(CommitId::try_from_hex(commit.as_str()).unwrap()),
+        RefName::new(name),
+        RefTarget::normal(CommitId::try_from_hex(commit.as_str()).unwrap()),
     );
     tx.commit(format!("another client's bookmark {name}"))
         .await
@@ -1875,24 +1877,176 @@ async fn a_clean_workspace_follows_reefs_undo_of_its_snapshot() {
     let snapshot = y.snapshot("reef: snapshot workspace y").await.unwrap();
     fx.main.reload_at_head().await.unwrap();
     reefs_undo(&mut fx, &snapshot.op_id).await;
+    let now = reef_lib::jj::view_wc_commit(fx.main.head(), &format!("reef-{Y}")).unwrap();
+    assert_eq!(now, c, "the undo put y back on C");
 
-    y.set_head(Arc::clone(fx.main.head()));
-    let pending = y
-        .begin_snapshot(
-            Some(&snapshot.wc_commit),
-            None,
-            &IgnoreSources::default(),
-            None,
-        )
-        .await
-        .unwrap();
-    assert!(pending.adopted());
-    assert_eq!(pending.wc_commit(), Some(&c));
-    pending.finish(&fx.main.op_id()).await.unwrap();
+    assert_follows(&fx, &mut y, &snapshot.wc_commit).await;
     assert!(
         !y_root.join("two.txt").exists(),
         "the undo took two.txt away"
     );
+}
+
+/// `y`, clean with `last` its last snapshot, checks out the commit `main`'s
+/// view has for it.
+async fn assert_follows(fx: &Fixture, y: &mut Repo, last: &CommitIdHex) {
+    let now = reef_lib::jj::view_wc_commit(fx.main.head(), &format!("reef-{Y}")).unwrap();
+    assert_ne!(&now, last, "something moved y");
+    y.set_head(Arc::clone(fx.main.head()));
+    let pending = y
+        .begin_snapshot(Some(last), None, &IgnoreSources::default(), None)
+        .await
+        .unwrap();
+    assert!(pending.adopted(), "y checks out the view's commit");
+    assert_eq!(pending.wc_commit(), Some(&now));
+    pending.finish(&fx.main.op_id()).await.unwrap();
+}
+
+// #357 review, F7: one client emptied `y`'s last snapshot while another,
+// loaded at the same head, set a bookmark. The merge of the two heads has
+// both in its history, so the rewrite counts whichever head comes first.
+#[tokio::test]
+async fn a_clean_workspace_follows_a_rewrite_on_either_side_of_a_merge() {
+    for rewrite_first in [true, false] {
+        let mut fx = Fixture::new().await;
+        let (mut y, y_root, _, c2, _) = snapshotted_twice(&mut fx).await;
+        let at = Arc::clone(fx.main.head());
+        let emptied = concurrent_rewrite(&at, &c2).await;
+        let base = fx.main.wc_change().unwrap().commit_id;
+        let bookmarked = concurrent_bookmark(&at, "other", &base).await;
+        let heads = if rewrite_first {
+            [&emptied, &bookmarked]
+        } else {
+            [&bookmarked, &emptied]
+        };
+        merge_in_order(&mut fx, &heads).await;
+
+        assert_follows(&fx, &mut y, &c2).await;
+        assert!(!y_root.join("two.txt").exists(), "the rewrite emptied it");
+    }
+}
+
+// #357 review round 2: a fork inside the operations since `y`'s last
+// snapshot. One client described C2; on its operation, another emptied the
+// described commit and a third set a bookmark. The rewrite starts at a
+// commit only the fork's set holds, so it counts in either merge order.
+#[tokio::test]
+async fn a_clean_workspace_follows_a_rewrite_after_a_fork_since_its_snapshot() {
+    for rewrite_first in [true, false] {
+        let mut fx = Fixture::new().await;
+        let (mut y, y_root, _, c2, _) = snapshotted_twice(&mut fx).await;
+        let described = concurrent_describe(fx.main.head(), &c2).await;
+        let c2_described = reef_lib::jj::view_wc_commit(&described, &format!("reef-{Y}")).unwrap();
+        let emptied = concurrent_rewrite(&described, &c2_described).await;
+        let base = fx.main.wc_change().unwrap().commit_id;
+        let bookmarked = concurrent_bookmark(&described, "other", &base).await;
+        let heads = if rewrite_first {
+            [&emptied, &bookmarked]
+        } else {
+            [&bookmarked, &emptied]
+        };
+        merge_in_order(&mut fx, &heads).await;
+
+        assert_follows(&fx, &mut y, &c2).await;
+        assert!(!y_root.join("two.txt").exists(), "the rewrite emptied it");
+    }
+}
+
+// #357 review, F8: `jj op revert` of `y`'s last snapshot, as the jj CLI
+// writes it: the snapshot's parent merged over it, with no commit
+// rewritten. A clean `y` keeps two.txt.
+#[tokio::test]
+async fn a_clean_workspace_keeps_its_snapshot_over_an_op_revert() {
+    let mut fx = Fixture::new().await;
+    let (mut y, y_root, c, c2, before) = snapshotted_twice(&mut fx).await;
+    let snapshot = Arc::clone(fx.main.head());
+    let mut tx = snapshot.start_transaction();
+    tx.repo_mut().merge(&snapshot, &before).await.unwrap();
+    tx.repo_mut().rebase_descendants().await.unwrap();
+    let description = format!("revert operation {}", snapshot.op_id().hex());
+    fx.main.set_head(tx.commit(description).await.unwrap());
+    let now = reef_lib::jj::view_wc_commit(fx.main.head(), &format!("reef-{Y}")).unwrap();
+    assert_eq!(now, c, "the revert put y back on C");
+
+    assert_keeps(&fx, &mut y, &y_root, &c2).await;
+}
+
+// #357 review, F8: Reef's own moves count though they rewrite nothing.
+// Its abandon of `y`'s last snapshot puts `y` on a new empty commit.
+#[tokio::test]
+async fn a_clean_workspace_follows_reefs_abandon_of_its_snapshot() {
+    let mut fx = Fixture::new().await;
+    let (mut y, y_root, _, c2, _) = snapshotted_twice(&mut fx).await;
+    let meta = OpMeta::new(OpKind::Abandon, format!("reef: abandon commit {c2}"));
+    fx.main.abandon_commit(&c2, &meta).await.unwrap();
+
+    assert_follows(&fx, &mut y, &c2).await;
+    assert!(
+        !y_root.join("two.txt").exists(),
+        "the abandon took two.txt away"
+    );
+}
+
+// #357 review, F8: `reef move` puts a new change on `main`'s commit in
+// `y`'s place.
+#[tokio::test]
+async fn a_clean_workspace_follows_reefs_move_off_its_snapshot() {
+    let mut fx = Fixture::new().await;
+    let (mut y, y_root, _, c2, _) = snapshotted_twice(&mut fx).await;
+    let base = fx.main.wc_change().unwrap().commit_id;
+    let meta = OpMeta::new(OpKind::MoveWorkspace, format!("reef: move workspace {Y}")).workspace(Y);
+    fx.main
+        .move_pointer(&format!("reef-{Y}"), StartPoint::NewOn(base), &meta)
+        .await
+        .unwrap();
+
+    assert_follows(&fx, &mut y, &c2).await;
+    assert!(
+        !y_root.join("two.txt").exists(),
+        "the move took two.txt away"
+    );
+}
+
+// #357 review, F8: a landing of `y`'s last snapshot onto `main`, which
+// another workspace moved on, gives `y` a new empty commit on the rebased
+// snapshot.
+#[tokio::test]
+async fn a_clean_workspace_follows_a_landing_of_its_snapshot() {
+    let mut fx = Fixture::new().await;
+    let base = fx.main.wc_change().unwrap().commit_id;
+    let (mut x, x_root, _) = fx
+        .create("reef-00000000000000aa", StartPoint::NewOn(base))
+        .await;
+    write(&x_root, "trunk.txt", "trunk\n");
+    let trunk = x
+        .snapshot("reef: snapshot workspace x")
+        .await
+        .unwrap()
+        .wc_commit;
+    fx.main.reload_at_head().await.unwrap();
+    let mut tx = fx.main.head().start_transaction();
+    tx.repo_mut().set_local_bookmark_target(
+        RefName::new("main"),
+        RefTarget::normal(CommitId::try_from_hex(trunk.as_str()).unwrap()),
+    );
+    fx.main.set_head(tx.commit("bookmark main").await.unwrap());
+    let (mut y, y_root, _, c2, _) = snapshotted_twice(&mut fx).await;
+    let target = LandTarget {
+        change: y.wc_change().unwrap().change_id,
+        commit: c2.clone(),
+        bookmark: "main".to_owned(),
+    };
+    let meta = OpMeta::new(OpKind::Land, format!("reef: land change {}", target.change));
+    let landed = fx.main.land(&target, &trunk, &meta).await.unwrap();
+    assert!(landed.rebased);
+    assert_eq!(landed.new_working_copies, [format!("reef-{Y}")]);
+
+    assert_follows(&fx, &mut y, &c2).await;
+    assert!(
+        y_root.join("two.txt").is_file(),
+        "the landed commit has two.txt"
+    );
+    assert!(y_root.join("trunk.txt").is_file(), "and main's file");
 }
 
 /// `settings()`, with every operation stamped `stamp`: a jj client whose

@@ -1403,21 +1403,36 @@ fn leads(ops: &[Operation], moves: &[Move], from: &CommitId, to: Option<&CommitI
     for step in moves {
         by_op.entry(step.op.id()).or_default().push(step);
     }
-    // The commits reached by each operation's end. One before `from`
-    // reached `from` only.
+    // Each operation's child that the loop below reaches last: the first in
+    // `ops`. It takes the operation's set, so a run of moves grows one set.
+    let mut last = HashMap::new();
+    for op in ops {
+        for parent in op.parent_ids() {
+            last.entry(parent).or_insert(op.id());
+        }
+    }
+    // The commits reached by each operation's end, until its last child.
+    // One before `from` reached `from` only.
     let before = Rc::new(HashSet::from([from]));
     let mut reached: HashMap<&OperationId, Rc<HashSet<&CommitId>>> = HashMap::new();
     for op in ops.iter().rev() {
-        let mut parents = op
-            .parent_ids()
-            .iter()
-            .map(|id| reached.get(id).unwrap_or(&before));
-        let mut here = Rc::clone(parents.next().unwrap_or(&before));
-        for other in parents {
-            if !Rc::ptr_eq(&here, other) {
-                Rc::make_mut(&mut here).extend(other.iter().copied());
+        let mut here: Option<Rc<HashSet<&CommitId>>> = None;
+        for parent in op.parent_ids() {
+            let theirs = if last.get(parent) == Some(&op.id()) {
+                reached.remove(parent)
+            } else {
+                reached.get(parent).cloned()
+            };
+            let theirs = theirs.unwrap_or_else(|| Rc::clone(&before));
+            match &mut here {
+                None => here = Some(theirs),
+                Some(here) if !Rc::ptr_eq(here, &theirs) => {
+                    Rc::make_mut(here).extend(theirs.iter().copied());
+                }
+                Some(_) => {}
             }
         }
+        let mut here = here.unwrap_or_else(|| Rc::clone(&before));
         let steps = by_op.get(op.id()).into_iter().flatten();
         let now: Vec<&CommitId> = steps
             .filter(|step| here.contains(&step.was))
@@ -1443,8 +1458,8 @@ fn leads(ops: &[Operation], moves: &[Move], from: &CommitId, to: Option<&CommitI
 /// `jj restore` does), or Reef moved the workspace off it on purpose (an
 /// undo, an abandon, `reef move`).
 ///
-/// False for another client's `jj undo`, `jj op restore` or `jj abandon`
-/// of `from` (#357): each puts the workspace on a commit made from nothing
+/// False for another client's `jj undo`, `jj op restore`, `jj op revert`
+/// or `jj abandon` of `from` (#357): each puts the workspace on a commit made from nothing
 /// of `from`'s, and checking it out would take `from`'s files off disk.
 ///
 /// False for a commit another jj client made from an older commit, having

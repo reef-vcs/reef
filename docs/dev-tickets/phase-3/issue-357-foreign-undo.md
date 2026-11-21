@@ -52,6 +52,7 @@ Two mistakes, one per path.
   - a busy `y` under the jj CLI undo: diverges, two.txt and the new edit on disk;
   - R4-1: Reef's undo of the snapshot on one head, a stale client's describe of the commit before it on the other, merged in both orders: whichever commit the merge keeps, a clean `y` adopts it only when it is the undo's;
   - another client's describe of A still adopts (`a_clean_workspace_follows_a_clients_rewrite_of_its_snapshot`, kept), and Reef's undo still adopts.
+  - review round 1 (F7, F8): another client's rewrite of A on either side of a merge with an unrelated head still adopts (fails when a merge takes only its first parent's set); `jj op revert` keeps two.txt; Reef's abandon, `reef move` and a landing onto a moved `main` still adopt (each fails when Reef's moves also need a recorded rewrite).
 - `reef-lib` (`tests/jj_reads.rs`): the classify table's `undo: restore to operation` row becomes external.
 - `reef-daemon` (`tests/snapshots.rs`): the CLI reproduction as a test, with another client writing the jj CLI's undo through jj-lib: after the next snapshot two.txt is on disk, the row is divergent with attention `divergent`.
 - Mutations, each must fail a committed test: counting every foreign move again; the classify fallback back; one `reached` set again.
