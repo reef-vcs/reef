@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 
 use common::{SyntheticRepo, TestDaemon, op_id, test_settings};
 use jj_lib::backend::CommitId;
+use jj_lib::object_id::ObjectId as _;
 use jj_lib::repo::Repo as _;
 use jj_lib::repo_path::RepoPathBuf;
 use reef_api::v1::{
@@ -600,26 +601,30 @@ async fn a_clean_workspace_keeps_its_file_over_an_older_rewrite() {
     );
 }
 
+/// The registered root as another jj client loads it.
+fn jj_workspace(root: &Path) -> jj_lib::workspace::Workspace {
+    use jj_lib::default_backend_factories::{
+        default_backend_factories, default_working_copy_factories, default_workspace_loader_factory,
+    };
+    default_workspace_loader_factory()
+        .create(root)
+        .unwrap()
+        .load(
+            &test_settings(),
+            &default_backend_factories(),
+            &default_working_copy_factories(),
+        )
+        .unwrap()
+}
+
 /// `jj undo --allow-cross-workspace` at the registered root, as the jj CLI
 /// writes it: the view of `op`'s parent restored, described as the jj CLI
 /// describes it, with no `reef.*` attributes.
 async fn jj_undo(repo: &SyntheticRepo, op: &str) {
-    use jj_lib::default_backend_factories::{
-        default_backend_factories, default_working_copy_factories, default_workspace_loader_factory,
-    };
-    use jj_lib::object_id::ObjectId as _;
     use jj_lib::op_store::OperationId;
     let (root, op) = (repo.root.clone(), op.to_owned());
     tokio::task::spawn_blocking(move || {
-        let workspace = default_workspace_loader_factory()
-            .create(&root)
-            .unwrap()
-            .load(
-                &test_settings(),
-                &default_backend_factories(),
-                &default_working_copy_factories(),
-            )
-            .unwrap();
+        let workspace = jj_workspace(&root);
         let loader = workspace.repo_loader();
         let head = pollster::block_on(loader.load_at_head(None)).unwrap();
         let undone =
@@ -851,17 +856,29 @@ async fn a_busy_workspace_stays_on_its_change_over_reefs_import_of_a_deleted_bra
     assert_unchanged(&daemon, &repo, &ws, &now, &["w/three.txt"]).await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_stacked_workspace_keeps_the_change_below_over_reefs_import_of_a_deleted_branch() {
-    let (daemon, repo) = colocated_fixture().await;
-    let (lower, _hold, [_, last]) = snapshotted_twice(&daemon, &repo).await;
+/// Two workspaces, one on a change above the other's.
+struct Stacked {
+    /// On a change with `w/one.txt` snapshotted, then `w/two.txt`.
+    lower: Workspace,
+    /// On a new change on `lower`'s last snapshot, with `w/b.txt`
+    /// snapshotted.
+    upper: Workspace,
+    /// `lower`'s two snapshots' commits.
+    snapshots: [String; 2],
+    /// `upper`'s commit.
+    above: String,
+    _holds: [PauseGuard; 2],
+}
+
+async fn stacked(daemon: &TestDaemon, repo: &SyntheticRepo) -> Stacked {
+    let (lower, hold_lower, snapshots) = snapshotted_twice(daemon, repo).await;
     let upper = create(
-        &daemon,
-        &repo,
-        Some(create_workspace_request::Start::NewOn(last.clone())),
+        daemon,
+        repo,
+        Some(create_workspace_request::Start::NewOn(snapshots[1].clone())),
     )
     .await;
-    let _hold_upper = daemon
+    let hold_upper = daemon
         .handle
         .state()
         .manager
@@ -873,18 +890,206 @@ async fn a_stacked_workspace_keeps_the_change_below_over_reefs_import_of_a_delet
         .snapshot_workspace(&repo.id, &upper.id, "")
         .await
         .unwrap();
-    let above = inspect(&daemon, &repo, &upper).await.commit_id;
-    on_a_deleted_branch(&daemon, &repo, &last).await;
-
-    for ws in [&upper, &lower] {
-        daemon
-            .client
-            .snapshot_workspace(&repo.id, &ws.id, "")
-            .await
-            .unwrap();
+    let above = inspect(daemon, repo, &upper).await.commit_id;
+    Stacked {
+        lower,
+        upper,
+        snapshots,
+        above,
+        _holds: [hold_lower, hold_upper],
     }
-    assert_unchanged(&daemon, &repo, &upper, &above, &["w/b.txt"]).await;
-    assert_unchanged(&daemon, &repo, &lower, &last, &[]).await;
+}
+
+impl Stacked {
+    /// Reef snapshots the upper workspace, then the lower.
+    async fn snapshot(&self, daemon: &TestDaemon, repo: &SyntheticRepo) {
+        for ws in [&self.upper, &self.lower] {
+            daemon
+                .client
+                .snapshot_workspace(&repo.id, &ws.id, "")
+                .await
+                .unwrap();
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stacked_workspace_keeps_the_change_below_over_reefs_import_of_a_deleted_branch() {
+    let (daemon, repo) = colocated_fixture().await;
+    let stack = stacked(&daemon, &repo).await;
+    let last = &stack.snapshots[1];
+    on_a_deleted_branch(&daemon, &repo, last).await;
+
+    stack.snapshot(&daemon, &repo).await;
+    assert_unchanged(&daemon, &repo, &stack.upper, &stack.above, &["w/b.txt"]).await;
+    assert_unchanged(&daemon, &repo, &stack.lower, last, &[]).await;
+}
+
+/// Another jj client's operation at the registered root, as the jj CLI
+/// writes one: `edit` in a transaction on the head, the descendants of
+/// what it rewrote or abandoned rebased, committed with `description` and
+/// no `reef.*` attributes if it changed anything.
+async fn another_client(
+    repo: &SyntheticRepo,
+    description: &'static str,
+    edit: impl FnOnce(&mut jj_lib::repo::MutableRepo) + Send + 'static,
+) {
+    let root = repo.root.clone();
+    tokio::task::spawn_blocking(move || {
+        let workspace = jj_workspace(&root);
+        let head = pollster::block_on(workspace.repo_loader().load_at_head(None)).unwrap();
+        let mut tx = head.start_transaction();
+        edit(tx.repo_mut());
+        if !tx.repo().has_changes() {
+            return;
+        }
+        pollster::block_on(tx.repo_mut().rebase_descendants()).unwrap();
+        pollster::block_on(tx.commit(description)).unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+/// The jj CLI's import of git refs, which `jj` runs before every command
+/// in a colocated repository: with jj's own rules, so nothing pins Reef's
+/// workspaces.
+async fn jj_cli_import(repo: &SyntheticRepo) {
+    another_client(repo, "import git refs", |repo| {
+        let git = jj_lib::git::GitSettings::from_settings(repo.base_repo().settings()).unwrap();
+        let options = jj_lib::git::GitImportOptions {
+            abandon_unreachable_commits: git.abandon_unreachable_commits,
+            record_synthetic_predecessors: git.record_synthetic_predecessors,
+            remote_auto_track_bookmarks: std::collections::HashMap::new(),
+        };
+        pollster::block_on(jj_lib::git::import_refs(repo, &options)).unwrap();
+    })
+    .await;
+}
+
+fn commit_of(repo: &jj_lib::repo::MutableRepo, hex: &str) -> jj_lib::commit::Commit {
+    let id = CommitId::try_from_hex(hex).unwrap();
+    pollster::block_on(repo.store().get_commit_async(&id)).unwrap()
+}
+
+/// Who imports git refs after git moved them.
+#[derive(Clone, Copy)]
+enum Importer {
+    Reef,
+    JjCli,
+}
+
+impl Importer {
+    async fn import(self, daemon: &TestDaemon, repo: &SyntheticRepo) {
+        match self {
+            Importer::Reef => reefs_import(daemon, repo).await,
+            Importer::JjCli => jj_cli_import(repo).await,
+        }
+    }
+}
+
+/// [`stacked`] workspaces, `git branch review <last>` at the root and an
+/// import by `importer`, then `move_branch`, `w/c.txt` written in the
+/// upper workspace when `busy`, and `importer`'s import again, and Reef's
+/// snapshots of both workspaces. Asserts that the upper workspace keeps
+/// the lower change's files and its own, and diverges.
+async fn stacked_over(
+    importer: Importer,
+    move_branch: impl FnOnce(&Path, &[String; 2]),
+    busy: bool,
+) {
+    let (daemon, repo) = colocated_fixture().await;
+    let stack = stacked(&daemon, &repo).await;
+    git(&repo.root, &[], &["branch", "review", &stack.snapshots[1]]);
+    importer.import(&daemon, &repo).await;
+    move_branch(&repo.root, &stack.snapshots);
+    let more: &[&str] = if busy {
+        write(&stack.upper, "w/c.txt", "c\n");
+        &["w/b.txt", "w/c.txt"]
+    } else {
+        &["w/b.txt"]
+    };
+    importer.import(&daemon, &repo).await;
+
+    stack.snapshot(&daemon, &repo).await;
+    assert_keeps(&daemon, &repo, &stack.upper, more).await;
+    assert_keeps(&daemon, &repo, &stack.lower, &[]).await;
+}
+
+fn delete_branch(root: &Path, _: &[String; 2]) {
+    git(root, &[], &["branch", "-D", "review"]);
+}
+
+fn move_branch_back(root: &Path, [first, _]: &[String; 2]) {
+    git(root, &[], &["branch", "-f", "review", first]);
+}
+
+// Issue #381: the git branch on the lower workspace's last snapshot is
+// deleted, and the next `jj` command at the root imports it with jj's own
+// rules, which abandon that snapshot and rebase the upper workspace's
+// commit off it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stacked_workspace_keeps_the_change_below_over_the_jj_clis_import_of_a_deleted_branch() {
+    stacked_over(Importer::JjCli, delete_branch, false).await;
+}
+
+// Issue #380: the git branch on the lower workspace's last snapshot is
+// moved back to its first. Reef's import records the last snapshot as
+// rewritten into the first and rebases the upper workspace's commit onto
+// it, without the last snapshot's file.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stacked_workspace_keeps_the_change_below_over_reefs_import_of_a_branch_moved_back() {
+    stacked_over(Importer::Reef, move_branch_back, false).await;
+}
+
+// Issue #380: the same with an edit in the upper workspace since its
+// snapshot. Nothing is carried onto the rebase.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_busy_stacked_workspace_keeps_the_change_below_over_reefs_import_of_a_branch_moved_back()
+{
+    stacked_over(Importer::Reef, move_branch_back, true).await;
+}
+
+// Issue #380: the same, imported by the jj CLI.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stacked_workspace_keeps_the_change_below_over_the_jj_clis_import_of_a_branch_moved_back()
+{
+    stacked_over(Importer::JjCli, move_branch_back, false).await;
+}
+
+/// [`stacked`] workspaces, and a git amend of the lower workspace's last
+/// snapshot imported by `importer`. Asserts that the upper workspace
+/// follows the amend.
+async fn stacked_over_a_git_amend(importer: Importer) {
+    let (daemon, repo) = colocated_fixture().await;
+    let stack = stacked(&daemon, &repo).await;
+    git(&repo.root, &[], &["branch", "review", &stack.snapshots[1]]);
+    importer.import(&daemon, &repo).await;
+    git_amend(&repo.root, "review", "w/two.txt", "amended\n");
+    importer.import(&daemon, &repo).await;
+
+    stack.snapshot(&daemon, &repo).await;
+    let row = inspect(&daemon, &repo, &stack.upper).await;
+    assert_ne!(row.commit_id, stack.above, "the upper workspace moved");
+    for (path, contents) in [("w/two.txt", "amended\n"), ("w/b.txt", "b\n")] {
+        assert_eq!(
+            std::fs::read_to_string(Path::new(&stack.upper.path).join(path)).unwrap(),
+            contents,
+            "{path} on disk"
+        );
+    }
+    assert!(!row.divergent, "the upper change has not diverged");
+}
+
+// A git amend of the snapshot below is a rewrite of it: the workspace
+// above follows it, whoever imports.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stacked_workspace_follows_reefs_import_of_a_git_amend_below() {
+    stacked_over_a_git_amend(Importer::Reef).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stacked_workspace_follows_the_jj_clis_import_of_a_git_amend_below() {
+    stacked_over_a_git_amend(Importer::JjCli).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1037,6 +1242,53 @@ async fn a_busy_workspace_carries_its_edit_over_a_git_amend_of_its_snapshot() {
         "the edit is in the workspace's commit"
     );
     assert!(!row.divergent, "and the change has not diverged");
+}
+
+// Another client's `jj rebase -r` of the upper workspace's own commit onto
+// the lower change's parent is a decision about that commit: the upper
+// workspace follows it, and the lower change's files leave its disk.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stacked_workspace_follows_another_clients_rebase_of_its_change() {
+    let (daemon, repo) = colocated_fixture().await;
+    let stack = stacked(&daemon, &repo).await;
+    let above = stack.above.clone();
+    another_client(&repo, "rebase commit", move |repo| {
+        let commit = commit_of(repo, &above);
+        let below = commit_of(repo, &commit.parent_ids()[0].hex());
+        let base = below.parent_ids().to_vec();
+        pollster::block_on(jj_lib::rewrite::rebase_commit(repo, commit, base)).unwrap();
+    })
+    .await;
+
+    stack.snapshot(&daemon, &repo).await;
+    let row = inspect(&daemon, &repo, &stack.upper).await;
+    assert_ne!(row.commit_id, stack.above, "the upper workspace moved");
+    let upper = Path::new(&stack.upper.path);
+    assert!(upper.join("w/b.txt").is_file(), "its own file stays");
+    assert!(
+        !upper.join("w/two.txt").exists(),
+        "the lower change's files left with the rebase"
+    );
+    assert!(!row.divergent, "and the change has not diverged");
+}
+
+// Another client's `jj abandon` of the lower workspace's last snapshot
+// rebases the upper workspace's commit off it. That is no decision about
+// the upper commit: it keeps the lower change's files and diverges.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stacked_workspace_keeps_the_change_below_over_another_clients_abandon_of_it() {
+    let (daemon, repo) = colocated_fixture().await;
+    let stack = stacked(&daemon, &repo).await;
+    let last = stack.snapshots[1].clone();
+    another_client(&repo, "abandon commit", move |repo| {
+        let commit = commit_of(repo, &last);
+        repo.record_abandoned_commit(&commit);
+    })
+    .await;
+
+    stack.snapshot(&daemon, &repo).await;
+    assert_keeps(&daemon, &repo, &stack.upper, &["w/b.txt"]).await;
+    assert_keeps(&daemon, &repo, &stack.lower, &[]).await;
 }
 
 // 8. The daemon sees the outside operation when it refreshes its head
