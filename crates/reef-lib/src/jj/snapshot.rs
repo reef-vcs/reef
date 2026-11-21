@@ -1438,9 +1438,10 @@ fn leads(ops: &[Operation], moves: &[Move], from: &CommitId, to: Option<&CommitI
 /// another jj client wrote counts only when it rewrote the commit it
 /// started at ([`origins`]), as a describe or a rebase does, and so does a
 /// merge of operation heads that rebased the workspace's commit. Checking
-/// the commit out then loses nothing of the workspace's own: an operation
-/// that had `from` rewrote it, or Reef moved the workspace off it on
-/// purpose (an undo, an abandon, `reef move`).
+/// the commit out then follows a decision someone made about `from`: an
+/// operation that had `from` rewrote it (and may have dropped files, as
+/// `jj restore` does), or Reef moved the workspace off it on purpose (an
+/// undo, an abandon, `reef move`).
 ///
 /// False for another client's `jj undo`, `jj op restore` or `jj abandon`
 /// of `from` (#357): each puts the workspace on a commit made from nothing

@@ -24,11 +24,12 @@ The #344 review found a second gap (R4-1). The walk's `leads` kept one set of re
 
 ## Consequences
 
-- No other jj client's operation takes a file a workspace's last snapshot recorded off its disk. A person who runs `jj undo` at the root over an agent's snapshot gets a divergent change with both commits visible, and resolves it by abandoning the one to drop.
+- Another jj client's undo, operation restore, operation revert or abandon of a workspace's last snapshot no longer takes that snapshot's files off disk. A person who runs `jj undo` at the root over an agent's snapshot gets a divergent change with both commits visible, and resolves it by abandoning the one to drop. A rewrite of the snapshot is still followed, also one that drops files (`jj restore -r`, `jj diffedit`), as is a rebase that a revert gives a workspace stacked above: each starts from the snapshot's commit.
 - A person or agent who wants a workspace to leave its snapshot asks Reef: `reef undo`, `reef abandon` and `reef move` are followed as before.
 - After another client's abandon of A, the fourth arm rewrites A, which the abandon had hidden: the change comes back with one visible commit, and the row says divergent though nothing else is visible in the change. The files are safe; the row's word is wrong until the next move. The row's divergence is computed from the arm taken, not from the visible commits, as in #359.
+- Reef's own ref imports and fetches still count as Reef's moves. When one abandons a workspace's commit because a git branch or remote branch it was on went away, a clean workspace follows (as on main). That is a separate follow-up.
 - In R4-1's shape a clean workspace now diverges in both merge orders: the stale client's describe started at a commit only the undo beside it reached.
-- `reef op log` and the activity feed report the jj CLI's `jj undo` as external, where they said undo. Operations Reef wrote before `reef.kind` existed (before R2.03) with that description read as external too.
+- `reef op log`, the activity feed and the history index report the jj CLI's `jj undo` as external, where they said undo. In the history index a change such an undo hides is now `abandoned`, not `undone` (`reef history --outcome undone` no longer lists it), and its effects count as direct; rows indexed before the upgrade keep `undone`. Operations Reef wrote before `reef.kind` existed (before R2.03) with that description read as external too.
 - The walk reads no more operations than before. `leads` now keeps a set per operation since A, shared between an operation and its one parent until a move or a merge adds to it.
 
 ## Alternatives considered
