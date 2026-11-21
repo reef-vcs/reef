@@ -109,7 +109,7 @@ impl Repo {
             remote_auto_track_bookmarks: std::collections::HashMap::new(),
         };
         let mut tx = self.repo.start_transaction();
-        let stats = import_keeping_working_copies(tx.repo_mut(), &options).await?;
+        let stats = import_pinning_reef_workspaces(tx.repo_mut(), &options).await?;
         let failed_refs = stats
             .failed_ref_names
             .iter()
@@ -132,15 +132,10 @@ impl Repo {
     }
 }
 
-/// jj's `import_refs`, with the working-copy commit of every Reef workspace
-/// (`reef-<id>`) in `repo`'s view tagged for its length, so that jj's
-/// abandon of unreachable commits, which keeps what a local tag reaches,
-/// keeps the commits those workspaces are on or build on. Each tag is named
-/// `reef:pin:<workspace>`, which git cannot hold, and gets back its old
-/// target afterwards. The user's own jj workspaces are not pinned: Reef
-/// never imports git's HEAD into them, so their commits can be ones the user
-/// dropped with git, which jj abandons (ADR 0090).
-async fn import_keeping_working_copies(
+/// jj's `import_refs` never abandons a commit that a local tag reaches
+/// (`pinned_commit_ids` in jj-lib's `git.rs`). The pin names contain `:`,
+/// which no git ref name can hold, so an imported git tag cannot overwrite one.
+async fn import_pinning_reef_workspaces(
     repo: &mut MutableRepo,
     options: &GitImportOptions,
 ) -> Result<GitImportStats, GitImportError> {

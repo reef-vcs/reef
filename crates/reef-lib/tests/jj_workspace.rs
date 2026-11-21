@@ -2856,18 +2856,12 @@ async fn import_keeps_the_commits_reef_workspaces_use() {
     );
 }
 
-/// How the user drops a commit with git after `reef init`.
 #[derive(Clone, Copy, Debug)]
 enum GitDrop {
-    /// `git reset --hard HEAD~1` on `main`.
     Reset,
-    /// `git checkout main` and `git branch -D feat`.
     DeleteBranch,
 }
 
-/// The user's root checkout is not a Reef workspace: Reef never imports
-/// git's HEAD after `reef init`, so its commit is often one the user has
-/// since dropped with git, and Reef's import abandons it as jj's does.
 #[tokio::test]
 async fn import_abandons_what_only_the_root_checkout_uses() {
     if !git_available() {
