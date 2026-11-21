@@ -230,7 +230,7 @@ test("a person reviews a proposal: intent, evidence, definitions, comments, decl
       .getByRole("link", { name: "Renew a lease" })
       .click();
     await page.getByRole("button", { name: /^Accept/ }).click();
-    await expect(page.getByRole("status")).toHaveText(/^Signed off/);
+    await expect(page.getByRole("status")).toHaveText(/^Signed off and (queued to land|landed)/);
     const evidence = JSON.stringify(
       await reef.reef(["evidence", "list", "--repo", reef.repo, "-r", head, "--kind", "signoff"]),
     );

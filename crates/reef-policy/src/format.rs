@@ -304,6 +304,12 @@ impl Policy {
         self.reads_destination
     }
 
+    /// Whether `[passkeys]` pins a passkey (R3.43): without one, no key's
+    /// presence counts as `user_verified` under this policy.
+    pub fn pins_passkeys(&self) -> bool {
+        !self.passkeys.is_empty()
+    }
+
     /// The `[landing]` table, or its defaults (R3.14, ADR 0067).
     pub fn landing(&self) -> &LandingSettings {
         &self.landing

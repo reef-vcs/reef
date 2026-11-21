@@ -866,9 +866,12 @@ pub mod error {
     /// `state`, `transition_id`.
     pub const DEPENDENCY_LEFT_REVIEW: &str = "DEPENDENCY_LEFT_REVIEW";
     /// `LandChange` through the web UI of a commit whose tree has no
-    /// `signoff`/`pass` by a person's passkey-verified key (R3.31, ADR
-    /// 0086). Metadata: `change_id`, `commit_id`, `tree_id` (empty for a
-    /// conflicted tree).
+    /// `signoff`/`pass` by a person's key approved by a live passkey the
+    /// destination's `[passkeys]` pins for them (R3.31, ADR 0086).
+    /// Metadata: `missing` (`pin`: the destination pins no passkey;
+    /// `touch`: no passkey-verified sign-off; `pinned_touch`: only ones
+    /// whose passkey is unpinned or removed), `change_id`, `commit_id`,
+    /// `tree_id` (empty for a conflicted tree), `destination`.
     pub const VERIFIED_SIGNOFF_REQUIRED: &str = "VERIFIED_SIGNOFF_REQUIRED";
     /// `GetLanding` naming no landing, or a change with none (R3.13).
     /// Metadata: `id` or `change_id`.

@@ -134,15 +134,34 @@ export interface AcceptTarget extends SignOffTarget {
 }
 
 const EXPECTED_COMMIT_MISMATCH = "EXPECTED_COMMIT_MISMATCH";
+const VERIFIED_SIGNOFF_REQUIRED = "VERIFIED_SIGNOFF_REQUIRED";
 
 export const MOVED_AFTER_SIGNING =
   "Signed off, but the agent changed the proposal before it could land: review the new version to accept it.";
 
 /**
+ * Why the web UI could not land a tree it signed off: the destination's
+ * policy pins no passkey, or not the one that touched (ADR 0086 decision 2).
+ * Null for any other refusal.
+ */
+export function unpinnedWords(metadata: Record<string, string>, commit: string): string | null {
+  const destination = metadata.destination ?? "the destination";
+  const terminal = `or land it from a terminal: reef land ${commit.slice(0, 12)}`;
+  switch (metadata.missing) {
+    case "pin":
+      return `Signed off, but ${destination} pins no passkey, so the web UI cannot land on it. To land from here, add the [passkeys] line that reef identity passkey list prints to ${destination}'s reef-policy.toml; ${terminal}.`;
+    case "pinned_touch":
+      return `Signed off, but ${destination} does not pin the passkey you touched, so the web UI cannot land it. Accept again with a passkey ${destination}'s reef-policy.toml pins (reef identity passkey list shows the line that pins each); ${terminal}.`;
+    default:
+      return null;
+  }
+}
+
+/**
  * Accept: signs off the tree the person reviewed with one passkey touch,
  * then asks to land that commit, which lands the stack below it too (R3.10).
- * Through the web UI the daemon lands only a tree a person's passkey signed
- * off (ADR 0086). The change is named by its id with the commit shown, so
+ * Through the web UI the daemon lands only a tree signed off with a passkey
+ * the destination's policy pins (ADR 0086). The change is named by its id with the commit shown, so
  * an amend after the read refuses the landing as a mismatch. With automatic
  * landing the request returns the landing the service opened.
  */
@@ -167,6 +186,10 @@ export async function accept(
     const error = reefError(thrown);
     if (isSessionInvalid(error)) throw thrown;
     if (error.reason === EXPECTED_COMMIT_MISMATCH) return MOVED_AFTER_SIGNING;
+    if (error.reason === VERIFIED_SIGNOFF_REQUIRED) {
+      const words = unpinnedWords(error.metadata, target.commitId);
+      if (words) return words;
+    }
     return `Signed off, but the request to land failed: ${error.message}${error.hint ? ` ${error.hint}` : ""}`;
   }
 }

@@ -47,9 +47,9 @@ pub(crate) enum Rule {
     /// ([`check_comment`]).
     Comment,
     /// A landing a person asks for, at the commit the page showed
-    /// ([`check_land`]), of a tree a person's passkey-verified sign-off is
-    /// on, which the landing checks once it resolves the commit
-    /// (`crate::landing`, `VERIFIED_SIGNOFF_REQUIRED`).
+    /// ([`check_land`]), of a tree a sign-off is on that a passkey the
+    /// destination pins approved, which the landing's gate checks once it
+    /// knows the destination (`crate::landing`, `VERIFIED_SIGNOFF_REQUIRED`).
     Land,
 }
 
@@ -187,8 +187,9 @@ pub(crate) fn check_confirm(
 
 /// [`Rule::Land`]'s part a request shows: through the web listener,
 /// `LandChange` lands what a person saw: by a person, at a named commit,
-/// naming no workspace. That a person touched a passkey for that commit's
-/// tree needs its evidence, so the landing checks it.
+/// naming no workspace. That a person touched a pinned passkey for that
+/// commit's tree needs its evidence and the destination's policy, so the
+/// landing checks it.
 pub(crate) fn check_land(web: bool, request: &LandChangeRequest) -> Result<(), super::WebError> {
     // A request naming no revision is the handler's to refuse; it still
     // names no workspace, whose refresh the handler would run first.

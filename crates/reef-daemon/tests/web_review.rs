@@ -371,8 +371,9 @@ async fn web_decline_and_comment_audited() {
     assert_eq!(socket_note.comment.unwrap().author.unwrap().web, None);
 
     // A landing asked for from the page needs a person's touch on the
-    // tree, even with no policy (`passkeys::a_web_landing_needs_a_touch`
-    // lands one with Accept's sign-off); the socket's needs none.
+    // tree of a passkey the destination pins, so a destination with no
+    // policy takes none (`passkeys::a_web_landing_needs_a_touch` lands one
+    // with Accept's sign-off); the socket's needs none.
     let land = v1::LandChangeRequest {
         repo: repo.id.clone(),
         revision: landed.change_id.clone(),

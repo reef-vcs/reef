@@ -248,6 +248,33 @@ describe("the proposal page", () => {
     expect(daemon.added).toHaveLength(1);
   });
 
+  it.each([
+    [
+      "pin",
+      /Signed off, but main pins no passkey, so the web UI cannot land on it\. .*reef identity passkey list.*reef land /,
+    ],
+    [
+      "pinned_touch",
+      /Signed off, but main does not pin the passkey you touched.*reef identity passkey list.*reef land /,
+    ],
+  ])("says what to pin when the landing refuses for want of %s", async (missing, words) => {
+    installAuthenticator();
+    const daemon = daemonWithDiff();
+    daemon.failures.landChange = daemonError(Code.FailedPrecondition, {
+      reason: "VERIFIED_SIGNOFF_REQUIRED",
+      metadata: { missing, destination: "main", commit_id: COMMIT },
+    });
+    await open(daemon);
+    await act(() => {
+      button("Accept").click();
+    });
+    await waitFor(() => {
+      expect(screen.queryByText(words)).not.toBeNull();
+    });
+    expect(screen.queryByText(new RegExp(`reef land ${COMMIT.slice(0, 12)}\\.`))).not.toBeNull();
+    expect(daemon.added).toHaveLength(1);
+  });
+
   it("explains Accept without a passkey, and still declines and comments", async () => {
     installAuthenticator();
     const daemon = daemonWithDiff();

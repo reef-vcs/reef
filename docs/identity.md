@@ -177,6 +177,8 @@ alice = ["3c9e0d5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f"]
 
 On the Passkeys page, **Confirm a passkey to pin** asks your authenticator for a touch, checks it against the key Reef holds, and **Copy policy snippet** copies the line for the passkeys it confirmed, with each fingerprint computed from the key the touch verified. This holds only on the daemon's own page: open it yourself, with `reef ui` or `reef identity passkey add` from your own terminal. A page on another `localhost` port can look the same and show an agent's fingerprint, and with the default `[ui] listen` port 0 the port changes at every start, so the address bar gives no cue (S-255). `reef identity passkey list` prints the line with every live passkey. A change to the policy file needs `[owners]`' sign-off; with `presence = "user_verified"` in `[owners]`, that takes an owner's pinned passkey, so an agent cannot change the pins. [docs/policy.md](policy.md#pinned-passkeys) has the rules.
 
+The web UI lands a change only with a pinned passkey's sign-off: **Accept** on a proposal page lands on a destination whose policy pins the passkey you touch, and is refused there until one is pinned (`VERIFIED_SIGNOFF_REQUIRED`, `missing` `pin`), whatever else the policy asks ([proposals](proposals.md#reviewing-in-the-web-ui)). Pinning is how a destination takes landings from the web UI at all.
+
 ### Approving a sign-off
 
 Each verified sign-off is its own approval: one fresh key, one touch, one statement about one change.

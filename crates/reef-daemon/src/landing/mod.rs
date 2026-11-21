@@ -243,19 +243,10 @@ pub enum LandingError {
         /// (R3.10).
         head: Option<String>,
     },
-    /// Through the web UI, the commit's tree carries no sign-off a person's
-    /// passkey verified (R3.31, `touch`).
-    #[error(
-        "through the web UI, commit {commit} lands only with a person's passkey-verified sign-off on its tree, and it has none"
-    )]
-    VerifiedSignoffRequired {
-        /// The change.
-        change: String,
-        /// The commit asked for.
-        commit: String,
-        /// Its tree; empty when conflicted.
-        tree: String,
-    },
+    /// Through the web UI, the commit's tree carries no sign-off approved
+    /// by a live passkey the destination's policy pins (R3.31, `touch`).
+    #[error("{0}")]
+    VerifiedSignoffRequired(Box<touch::Untouched>),
     /// The destination is a remote bookmark.
     #[error("{0:?} is not a local bookmark; the landing service lands on local bookmarks")]
     DestinationNotLocal(String),
@@ -345,7 +336,7 @@ impl Classify for LandingError {
             Self::DependencyLeftReview { .. }
             | Self::NotProposed { .. }
             | Self::Amended { .. }
-            | Self::VerifiedSignoffRequired { .. }
+            | Self::VerifiedSignoffRequired(_)
             | Self::DestinationNotLocal(_)
             | Self::DestinationNotFound(_)
             | Self::DestinationConflicted(_)
@@ -424,7 +415,7 @@ impl Advise for LandingError {
                     head.as_deref().unwrap_or(change.as_str()),
                 ],
             )),
-            Self::VerifiedSignoffRequired { commit, .. } => Some(touch::advice(commit)),
+            Self::VerifiedSignoffRequired(untouched) => Some(untouched.advice()),
             Self::DestinationNotLocal(name) => {
                 let local = name.split('@').next().unwrap_or(name);
                 Some(Advice::hint(format!(
@@ -505,11 +496,7 @@ impl LandingError {
                     ("visible_commit_id", visible.clone()),
                 ],
             ),
-            Self::VerifiedSignoffRequired {
-                change,
-                commit,
-                tree,
-            } => touch::reason(change, commit, tree),
+            Self::VerifiedSignoffRequired(untouched) => untouched.reason(),
             Self::DestinationNotLocal(name) => (
                 reason::DESTINATION_NOT_LOCAL,
                 vec![("destination", name.clone())],
@@ -600,8 +587,8 @@ pub struct LandRequest {
     /// (R3.45): stored on the rows it queues.
     pub automatic_key: Option<String>,
     /// Asked for through the web UI (R3.31): refused unless the tree of the
-    /// commit asked for carries a person's passkey-verified sign-off
-    /// (`touch`).
+    /// commit asked for carries a sign-off approved by a live passkey the
+    /// destination's policy pins (`touch`).
     pub needs_touch: bool,
 }
 
@@ -1338,9 +1325,6 @@ pub async fn land_change(
             .call_async(move |head| async move { resolve(head, &request).await }.boxed_local())
             .await??
     };
-    if request.needs_touch {
-        touch::require(state, request.repo, &info).await?;
-    }
     if let Some(status) = automatic::wait_for_evidence(
         state,
         request.repo,
@@ -1547,6 +1531,9 @@ pub(crate) async fn decide(
     let destination = row.destination.clone().unwrap_or_default();
     if destination.contains('@') {
         return Err(LandingError::DestinationNotLocal(destination));
+    }
+    if request.needs_touch {
+        touch::require(state, repo, &info, &destination).await?;
     }
     let slots = stack_slots(state, repo, &info, &destination).await?;
     let who = requester(state, request);
