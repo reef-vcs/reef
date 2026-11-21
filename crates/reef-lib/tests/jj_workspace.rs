@@ -2782,7 +2782,7 @@ fn git_at(root: &Path, args: &[&str]) -> String {
 }
 
 #[tokio::test]
-async fn import_keeps_the_commits_working_copies_use() {
+async fn import_keeps_the_commits_reef_workspaces_use() {
     if !git_available() {
         eprintln!("skipped: no git on PATH");
         return;
@@ -2793,38 +2793,156 @@ async fn import_keeps_the_commits_working_copies_use() {
     std::fs::create_dir(&root).unwrap();
     write(&root, "a.txt", "a\n");
     let mut repo = Repo::init_colocated_git(&root, &settings()).await.unwrap();
-    let used = repo.snapshot("snapshot").await.unwrap().wc_commit;
-    let tree = git_at(&root, &["rev-parse", &format!("{used}^{{tree}}")]);
-    let unused = git_at(
-        &root,
-        &["commit-tree", &tree, "-p", used.as_str(), "-m", "unused"],
-    );
-    git_at(&root, &["branch", "used", used.as_str()]);
+    let base = repo.snapshot("snapshot").await.unwrap().wc_commit;
+    let tree = git_at(&root, &["rev-parse", &format!("{base}^{{tree}}")]);
+    let commit_on_base = |message: &str| {
+        git_at(
+            &root,
+            &["commit-tree", &tree, "-p", base.as_str(), "-m", message],
+        )
+    };
+    let below = commit_on_base("below");
+    let unused = commit_on_base("unused");
+    git_at(&root, &["branch", "below", &below]);
     git_at(&root, &["branch", "unused", &unused]);
     repo.import_git_refs(&meta).await.unwrap();
     assert!(
         heads_of(&repo).contains(&unused),
         "the import brings in the branch"
     );
+    let below: CommitIdHex = below.parse().unwrap();
+    let ws_root = dir.path().join("ws");
+    std::fs::create_dir(&ws_root).unwrap();
+    let (ws, _) = repo
+        .create_workspace(
+            "reef-0123456789abcdef",
+            &ws_root,
+            &dir.path().join("wc"),
+            StartPoint::NewOn(below.clone()),
+            &OpMeta::new(OpKind::CreateWorkspace, "reef: create workspace"),
+        )
+        .await
+        .unwrap();
+    let top = wc_commit_id(&ws);
 
-    git_at(&root, &["branch", "-D", "used", "unused"]);
+    git_at(&root, &["branch", "-D", "below", "unused"]);
     let imported = repo.import_git_refs(&meta).await.unwrap();
     assert_eq!(imported.abandoned_commits, 1, "only the unused commit");
     assert_eq!(
         heads_of(&repo),
-        BTreeSet::from([used.to_string()]),
-        "the unused commit is abandoned, the working copy's stays"
+        BTreeSet::from([top.clone()]),
+        "the unused commit is abandoned, the Reef workspace's stays"
     );
     assert_eq!(
-        wc_commit_id(&repo),
-        used.as_str(),
-        "the working copy stays on it"
+        repo.resolve_revision(&format!("{top}-"))
+            .await
+            .unwrap()
+            .commit_id,
+        below,
+        "the commit the workspace builds on stays"
+    );
+    assert_eq!(
+        repo.head()
+            .view()
+            .get_wc_commit_id(WorkspaceName::new("reef-0123456789abcdef"))
+            .map(jj_lib::object_id::ObjectId::hex),
+        Some(top),
+        "the Reef workspace stays on its commit"
     );
     assert_eq!(
         repo.head().view().local_tags().count(),
         0,
         "the import leaves no tag behind"
     );
+}
+
+/// How the user drops a commit with git after `reef init`.
+#[derive(Clone, Copy, Debug)]
+enum GitDrop {
+    /// `git reset --hard HEAD~1` on `main`.
+    Reset,
+    /// `git checkout main` and `git branch -D feat`.
+    DeleteBranch,
+}
+
+/// The user's root checkout is not a Reef workspace: Reef never imports
+/// git's HEAD after `reef init`, so its commit is often one the user has
+/// since dropped with git, and Reef's import abandons it as jj's does.
+#[tokio::test]
+async fn import_abandons_what_only_the_root_checkout_uses() {
+    if !git_available() {
+        eprintln!("skipped: no git on PATH");
+        return;
+    }
+    for drop in [GitDrop::Reset, GitDrop::DeleteBranch] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("colocated");
+        std::fs::create_dir(&root).unwrap();
+        let git = |args: &[&str]| {
+            let mut all = vec![
+                "-c",
+                "user.name=T",
+                "-c",
+                "user.email=t@example.com",
+                "-c",
+                "commit.gpgsign=false",
+            ];
+            all.extend_from_slice(args);
+            git_at(&root, &all)
+        };
+        git(&["init", "-q", "-b", "main"]);
+        write(&root, "base.txt", "base\n");
+        git(&["add", "."]);
+        git(&["commit", "-qm", "base"]);
+        if let GitDrop::DeleteBranch = drop {
+            git(&["checkout", "-qb", "feat"]);
+        }
+        write(&root, "x.txt", "x\n");
+        git(&["add", "."]);
+        git(&["commit", "-qm", "X"]);
+        let x = git(&["rev-parse", "HEAD"]);
+        let mut repo = Repo::init_in_git_repo(&root, &settings(), None)
+            .await
+            .unwrap();
+        let meta = OpMeta::new(OpKind::ImportRefs, "reef: import git refs");
+        repo.import_git_refs(&meta).await.unwrap();
+        assert_eq!(
+            repo.resolve_revision("@-")
+                .await
+                .unwrap()
+                .commit_id
+                .as_str(),
+            x,
+            "{drop:?}: the root checkout builds on X"
+        );
+
+        match drop {
+            GitDrop::Reset => git(&["reset", "-q", "--hard", "HEAD~1"]),
+            GitDrop::DeleteBranch => {
+                git(&["checkout", "-q", "main"]);
+                git(&["branch", "-qD", "feat"])
+            }
+        };
+        let imported = repo.import_git_refs(&meta).await.unwrap();
+        assert_eq!(imported.abandoned_commits, 1, "{drop:?}: X is abandoned");
+        assert!(
+            !repo
+                .heads()
+                .unwrap()
+                .iter()
+                .any(|head| head.commit_id.as_str() == x),
+            "{drop:?}: X is not a head"
+        );
+        assert_ne!(
+            repo.resolve_revision("@-")
+                .await
+                .unwrap()
+                .commit_id
+                .as_str(),
+            x,
+            "{drop:?}: the root checkout no longer builds on X"
+        );
+    }
 }
 
 fn heads_of(repo: &Repo) -> BTreeSet<String> {

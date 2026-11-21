@@ -16,6 +16,7 @@ use jj_lib::transaction::TransactionCommitError;
 
 use super::oplog::OpMeta;
 use super::repo::{OperationIdHex, Repo};
+use super::workspace::REEF_WORKSPACE_PREFIX;
 use crate::error::{Classify, ErrorKind, classify_by_source};
 
 /// What [`Repo::import_git_refs`] did.
@@ -24,8 +25,8 @@ pub struct ImportRefsOutcome {
     /// The operation recording the import, or `None` when git's refs
     /// already matched jj's view and nothing was written.
     pub op_id: Option<OperationIdHex>,
-    /// Commits abandoned because git no longer reaches them and no
-    /// working copy is on them or builds on them.
+    /// Commits abandoned because git no longer reaches them and no Reef
+    /// workspace is on them or builds on them.
     pub abandoned_commits: usize,
     /// Git refs that could not be imported, by full name.
     pub failed_refs: Vec<String>,
@@ -68,7 +69,7 @@ impl Repo {
     /// and adopts the new operation, as the `jj` CLI does before each
     /// command in a colocated repository. Local branches become local
     /// bookmarks; remote-tracking bookmarks are not auto-tracked. A commit
-    /// git no longer reaches is abandoned unless a working copy is on it or
+    /// git no longer reaches is abandoned unless a Reef workspace is on it or
     /// builds on it. Only meaningful for a repository with a git store (see
     /// [`Repo::is_colocated`]); otherwise [`ImportRefsError::Import`] with
     /// an unexpected-backend error.
@@ -131,11 +132,14 @@ impl Repo {
     }
 }
 
-/// jj's `import_refs`, with every working-copy commit in `repo`'s view
-/// tagged for its length, so that jj's abandon of unreachable commits,
-/// which keeps what a local tag reaches, keeps the commits workspaces are
-/// on or build on. Each tag is named `reef:pin:<workspace>`, which git
-/// cannot hold, and gets back its old target afterwards.
+/// jj's `import_refs`, with the working-copy commit of every Reef workspace
+/// (`reef-<id>`) in `repo`'s view tagged for its length, so that jj's
+/// abandon of unreachable commits, which keeps what a local tag reaches,
+/// keeps the commits those workspaces are on or build on. Each tag is named
+/// `reef:pin:<workspace>`, which git cannot hold, and gets back its old
+/// target afterwards. The user's own jj workspaces are not pinned: Reef
+/// never imports git's HEAD into them, so their commits can be ones the user
+/// dropped with git, which jj abandons (ADR 0090).
 async fn import_keeping_working_copies(
     repo: &mut MutableRepo,
     options: &GitImportOptions,
@@ -144,6 +148,7 @@ async fn import_keeping_working_copies(
         .view()
         .wc_commit_ids()
         .iter()
+        .filter(|(workspace, _)| workspace.as_str().starts_with(REEF_WORKSPACE_PREFIX))
         .map(|(workspace, commit)| {
             (
                 format!("reef:pin:{}", workspace.as_str()).into(),

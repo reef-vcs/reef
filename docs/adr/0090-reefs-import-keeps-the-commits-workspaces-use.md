@@ -19,16 +19,20 @@ The flag cannot simply be turned off. In jj-lib 0.47 it also decides whether the
 
 ## Decision
 
-1. **Every import Reef runs pins the working-copy commits.** `Repo::import_git_refs` sets a local tag at every working-copy commit in the view for the length of the import's transaction, named `reef:pin:<workspace>` (a name git cannot hold), and removes the tags before the transaction commits. jj's abandon keeps every commit a working copy is on or descends from and abandons the rest, as before. Every jj workspace counts, the root checkout's `default` included. The tags never reach git or a committed view. A user's `git.abandon-unreachable-commits = false` still turns the abandon off.
+1. **Every import Reef runs pins the working-copy commits of Reef's workspaces.** `Repo::import_git_refs` sets a local tag at the working-copy commit of every jj workspace named `reef-<id>` ([0014](0014-workspace-model-on-jj.md)) for the length of the import's transaction, named `reef:pin:<workspace>` (a name git cannot hold), and removes the tags before the transaction commits. jj's abandon keeps every commit a Reef workspace is on or descends from and abandons the rest, as before. The tags never reach git or a committed view. A user's `git.abandon-unreachable-commits = false` still turns the abandon off.
+
+   The user's own jj workspaces, the root checkout's `default` among them, get no pin, so the import treats them as the jj CLI does. Reef never imports git's HEAD after `reef init`, so in a root the user drives with git, `default`'s commit is often one the user has since dropped with `git reset --hard`, `git branch -D`, `git rebase` or `git pull --rebase`. A pin there would keep that commit visible for good, as a head without a bookmark that the history index keeps `OPEN`, where the jj CLI abandons it.
 2. **jj's synthetic rewrites are unchanged.** A git amend of a snapshot is still followed and carried. A branch moved back from a snapshot to an earlier snapshot of the same change is still recorded as a rewrite into the earlier one; the workspace moves there and keeps its files by diverging, as [0089](0089-another-clients-undo-keeps-a-workspaces-files.md)'s amendment decides.
 3. **A kept commit stays visible for good.** Release does not abandon it, like any released workspace's change today. Nothing records which commits an import kept.
 4. **It is an open change.** The history index keeps it `OPEN`, and `reef here` says what it said before the branch went away.
 
 ## Consequences
 
-- Deleting, pruning, squash-merging away or resetting the git branch on an agent's change no longer moves any workspace: not the agent's, not one stacked above it. The first write after it acts on the agent's change, and nothing diverges.
+- Deleting, pruning or squash-merging away the git branch on an agent's change, or resetting it to another change, no longer moves any Reef workspace: not the agent's, not one stacked above it. The first write after it acts on the agent's change, and nothing diverges. A reset back to an earlier snapshot of the same change still moves the workspace, by decision 2.
 - After the workspace is released, the change stays in `reef log` until someone abandons it. A squash merge on a forge, fetched, lands a new change and leaves the agent's open, as [0044](0044-history-index-and-query-layer.md) already says for a fetch.
-- Moving `main` back with git after it landed a workspace's change leaves that change open, where the import abandoned it.
+- Moving `main` back with git after it landed a workspace's change leaves that change open while a Reef workspace is still on it or builds on it, where the import abandoned it. Once no Reef workspace uses it, the next import abandons it as before.
+- A Reef workspace whose working-copy commit is hidden (another client rewrote or abandoned it, and the workspace has not followed yet) is still pinned, so the import keeps that commit's visible ancestors until the workspace moves off it or is released.
+- The root checkout behaves as with the jj CLI alone. When the import abandons the commit `default` is on, jj rebases `default`'s commit or moves it to a new one, and the next `jj` command in the root checks that out. Reef's import itself changes only the view, not the root's files.
 - The jj CLI's own import still abandons with jj's rules. When it runs first, [0089](0089-another-clients-undo-keeps-a-workspaces-files.md) keeps a single workspace's files by diverging, and a workspace stacked above still follows the rebase.
 - The import evaluates one more set of revisions, the working-copy commits' ancestors, inside the revset jj already evaluates. No new state, API, schema or threat-model row.
 
