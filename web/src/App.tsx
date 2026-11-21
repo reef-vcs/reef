@@ -1,8 +1,9 @@
 // The app shell: the app bar and the routes over one connection and one live
 // layer. Without a session, or once the daemon refuses it, every route is
-// the no-session page. The overview is in the entry chunk; every other page
-// is its own (R2.21), and the three repository pages share a frame keyed by
-// the repository.
+// the no-session page. The home page is the inbox across every repository
+// (R3.33) above the overview, which is in the entry chunk; every other page
+// is its own (R2.21), and the repository pages share a frame keyed by the
+// repository.
 import { useEffect, useMemo, useState } from "react";
 import { client, type Connection } from "./api/connection";
 import { isSessionInvalid, reefError, type ReefError } from "./api/errors";
@@ -15,7 +16,8 @@ import { ErrorView } from "./ui/ErrorView";
 import { HeaderSlots } from "./ui/header-slots";
 import { lazyRoute } from "./ui/lazy-route";
 import type { RepoPage } from "./ui/RepoNav";
-import { match, usePath, useSearch } from "./ui/router";
+import { match, navigate, usePath, useSearch } from "./ui/router";
+import { inboxHref } from "./views/inbox-route";
 import { NoSession } from "./views/NoSession";
 import { NotFound } from "./views/NotFound";
 import { Overview } from "./views/Overview";
@@ -29,11 +31,15 @@ const REPO_PAGES: [string, RepoPage][] = [
   ["/repos/:repo/smartlog", "smartlog"],
   ["/repos/:repo/workspaces", "workspaces"],
   ["/repos/:repo/activity", "activity"],
-  ["/repos/:repo/proposals", "proposals"],
-  ["/repos/:repo/proposals/:change", "proposals"],
+  ["/repos/:repo/inbox", "inbox"],
+  ["/repos/:repo/proposals", "inbox"],
+  ["/repos/:repo/proposals/:change", "proposal"],
 ];
 
 const PAGE_TITLES: Record<string, string> = { "/states": "States", "/passkeys": "Passkeys" };
+
+/** Pages that set the title themselves: the home page is the inbox, with its count. */
+const SELF_TITLED = new Set(["/"]);
 
 /** The repository page `path` names, if any, and the proposal it opens. */
 function repoRoute(path: string): { repo: string; page: RepoPage; change: string } | null {
@@ -85,6 +91,10 @@ function Shell({
   const { status, error } = useDaemonStatus(connection, onSessionInvalid);
   const repo = repoRoute(path);
   const approval = match("/approve/:id", path)?.id;
+  const oldTab = match("/repos/:repo/proposals", path)?.repo;
+  useEffect(() => {
+    if (oldTab) navigate(inboxHref({ repo: oldTab }), { replace: true });
+  }, [oldTab]);
   // The app bar's slots, for the repository frame's portals (ui/header-slots).
   const [crumb, setCrumb] = useState<HTMLElement | null>(null);
   const [tabs, setTabs] = useState<HTMLElement | null>(null);
@@ -93,9 +103,9 @@ function Shell({
   // The repository frame titles its own pages, once it knows the name.
   const inRepo = repo !== null;
   useEffect(() => {
-    if (inRepo) return;
+    if (inRepo || SELF_TITLED.has(path)) return;
     const page = PAGE_TITLES[path] ?? (approval ? "Approve a sign-off" : "Not found");
-    document.title = path === "/" ? "Reef" : `${page} — Reef`;
+    document.title = `${page} — Reef`;
   }, [inRepo, path, approval]);
   return (
     <HeaderSlots.Provider value={slots}>

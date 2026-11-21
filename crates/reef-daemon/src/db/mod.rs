@@ -37,6 +37,7 @@ pub(crate) mod comments;
 pub(crate) mod conflict_assignments;
 mod evidence;
 mod identity;
+pub(crate) mod inbox;
 pub(crate) mod jobs;
 mod landing_pushes;
 pub(crate) mod landings;
@@ -103,7 +104,8 @@ pub use lifecycle::{
 /// `0022` is #262's), `0025_help_requests` (R3.32) and
 /// `0026_resolution_tiers` (R3.28, numbered after R3.32's, which merged
 /// first; `0024` is unused), `0027_dependent_lifecycle` (R3.11),
-/// `0028_passkeys` (R3.43) and `0029_web_audit` (R3.31).
+/// `0028_passkeys` (R3.43), `0029_web_audit` (R3.31) and
+/// `0030_inbox_marks` (R3.33).
 /// They are independent of each other, so a database may have a later one
 /// without an earlier one; see [`migrate`].
 const MIGRATIONS: &[(&str, &str)] = &[
@@ -200,6 +202,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0029_web_audit",
         include_str!("migrations/0029_web_audit.sql"),
     ),
+    (
+        "0030_inbox_marks",
+        include_str!("migrations/0030_inbox_marks.sql"),
+    ),
 ];
 
 /// The schema version (`user_version`) of a fully migrated database: the
@@ -257,6 +263,9 @@ pub const META_MIGRATION_PREFIX: &str = "migration:";
 /// the query modules export, as [`Db::insert_workspace_with_lease`] does.
 pub struct Db {
     conn: Mutex<Connection>,
+    /// Woken after every statement that may change which active workspaces
+    /// need attention, for `presence::attention` (R3.33).
+    attention: tokio::sync::Notify,
 }
 
 /// Failure of an operation on the database.
@@ -500,6 +509,7 @@ impl Db {
         index_evidence_artifacts(&mut conn)?;
         let db = Db {
             conn: Mutex::new(conn),
+            attention: tokio::sync::Notify::new(),
         };
         db.init_meta()?;
         Ok(db)
@@ -981,7 +991,8 @@ mod tests {
                 "0026_resolution_tiers",
                 "0027_dependent_lifecycle",
                 "0028_passkeys",
-                "0029_web_audit"
+                "0029_web_audit",
+                "0030_inbox_marks"
             ]
         );
         // A newer daemon applied a migration this binary does not have, without
@@ -1037,7 +1048,8 @@ mod tests {
                 "0026_resolution_tiers",
                 "0027_dependent_lifecycle",
                 "0028_passkeys",
-                "0029_web_audit"
+                "0029_web_audit",
+                "0030_inbox_marks"
             ]
         );
         let repo = "aaaa000000000001".parse().unwrap();

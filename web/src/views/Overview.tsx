@@ -1,11 +1,12 @@
-// `/`: every registered repository as a card, with who is working in it now
+// `/`: the inbox across every repository (R3.33, its own chunk), then every
+// registered repository as a card, with who is working in it now
 // and its latest operation, live from both streams. The repository links to
 // its smartlog (R2.19); the agents, and the latest operation's workspace and
 // agent, link to its workspaces page (R2.20); the operation itself, to the
 // activity feed with it selected (R2.21). Developer mode adds the
 // repository's id and shows the operation in the API's words.
 import { timestampDate } from "@bufbuild/protobuf/wkt";
-import { useEffect, useState, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import type { Connection } from "../api/connection";
 import type { Operation } from "../gen/reef/api/v1/operations_pb";
 import type { Repository } from "../gen/reef/api/v1/repositories_pb";
@@ -16,6 +17,7 @@ import { Avatar, AvatarStack } from "../ui/Avatar";
 import { useDevMode } from "../ui/dev-mode";
 import { ErrorView } from "../ui/ErrorView";
 import { operationLabel } from "../ui/operation";
+import { lazyRoute } from "../ui/lazy-route";
 import { Link } from "../ui/router";
 import { clock } from "../ui/time";
 import { Time } from "../ui/TimeLabel";
@@ -24,6 +26,8 @@ import { activityHref } from "./activity-route";
 import { fleetHref } from "./fleet-route";
 import { OverviewModel } from "./overview-model";
 import { smartlogHref } from "./smartlog-route";
+
+const Inbox = lazyRoute(() => import("./Inbox").then((m) => m.Inbox));
 
 function lastComponent(root: string): string {
   return root.replace(/\/+$/, "").split("/").pop() || root;
@@ -230,9 +234,20 @@ export function Overview({
   useEffect(() => model.start(), [model]);
   const { repositories, latest, error } = useSyncExternalStore(model.subscribe, model.getSnapshot);
   const agents = useActiveAgents(live);
+  const names = useMemo(
+    () => new Map((repositories ?? []).map((r) => [r.id, lastComponent(r.root)] as const)),
+    [repositories],
+  );
 
   return (
     <>
+      <Inbox
+        repoNames={names}
+        connection={connection}
+        live={live}
+        frame={frame}
+        onSessionInvalid={onSessionInvalid}
+      />
       <h1>Repositories</h1>
       {repositories && repositories.length > 0 && (
         <Summary repositories={repositories} agents={agents} latest={latest} />

@@ -172,7 +172,7 @@ impl PresenceService for PresenceHandler {
         if kind == PresenceKind::Unspecified {
             return Err(invalid("kind is required"));
         }
-        if matches!(kind, PresenceKind::Lease | PresenceKind::Job) {
+        if crate::presence::daemon_only(kind) {
             return Err(status(PresenceError::DaemonKind(kind)));
         }
         check_report(&request, kind)?;
@@ -189,6 +189,8 @@ impl PresenceService for PresenceHandler {
             progress: request.progress,
             lease: None,
             job: None,
+            automatic: None,
+            attention: reef_api::v1::Attention::Unspecified,
             ttl: clamp_ttl(convert::request_duration(request.ttl.as_ref())),
         };
         let presence = self

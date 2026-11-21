@@ -16,6 +16,7 @@ use reef_lib::error::{Classify, ErrorKind};
 use crate::error::{Advice, Advise};
 use crate::model::PresenceId;
 
+pub(crate) mod attention;
 mod filter;
 mod hub;
 pub mod publish;
@@ -88,6 +89,28 @@ impl Default for Limits {
     }
 }
 
+/// The TTL of an entry that mirrors state the daemon holds (`AUTOMATIC`,
+/// `ATTENTION`, R3.33): the entry ends when the state does, so its TTL is
+/// only a backstop.
+pub const STATE_TTL: Duration = Duration::from_hours(24);
+
+/// Whether only the daemon reports entries of `kind`.
+pub fn daemon_only(kind: PresenceKind) -> bool {
+    matches!(
+        kind,
+        PresenceKind::Lease | PresenceKind::Job | PresenceKind::Automatic | PresenceKind::Attention
+    )
+}
+
+fn daemon_kind_word(kind: PresenceKind) -> &'static str {
+    match kind {
+        PresenceKind::Job => "job",
+        PresenceKind::Automatic => "automatic status",
+        PresenceKind::Attention => "attention",
+        _ => "lease",
+    }
+}
+
 /// `ttl` as stored: unset or zero is [`DEFAULT_TTL`], and the rest is
 /// clamped to [`MIN_TTL`]..=[`MAX_TTL`].
 pub fn clamp_ttl(ttl: Option<Duration>) -> Duration {
@@ -116,9 +139,9 @@ pub enum PresenceError {
         /// `kind`, `agent`, `repo` or `workspace`.
         field: &'static str,
     },
-    /// A report of kind `LEASE` or `JOB` (R3.05): reason
+    /// A report of a kind only the daemon reports ([`daemon_only`]): reason
     /// `DAEMON_PRESENCE`, metadata `kind`.
-    #[error("{} presence is reported by the daemon only", if *.0 == PresenceKind::Job { "job" } else { "lease" })]
+    #[error("{} presence is reported by the daemon only", daemon_kind_word(*.0))]
     DaemonKind(PresenceKind),
     /// A report or clear of an entry the daemon reports: reason
     /// `DAEMON_PRESENCE`, metadata `presence_id`.

@@ -1848,6 +1848,7 @@ fn root_help_names_every_command() {
             || command == "conflict"
             || command == "comment"
             || command == "ask"
+            || command == "inbox"
         {
             continue;
         }

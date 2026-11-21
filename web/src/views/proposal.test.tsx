@@ -1,4 +1,4 @@
-// The proposal page and the Proposals tab (R3.31) over an in-memory daemon
+// The proposal page (R3.31) over an in-memory daemon
 // and a fake authenticator: the reads in the page's order, a definition
 // expanded to its lines, Accept (one touch, then a landing request for the
 // reviewed commit), Decline (a reason, at the commit shown), a note and an
@@ -28,9 +28,18 @@ import {
   PolicyRuleResultSchema,
   PolicyRuleStatus,
 } from "../gen/reef/api/v1/policy_pb";
+import { PresenceKind } from "../gen/reef/api/v1/presence_pb";
 import { OperationStore } from "../live/operations";
+import { PresenceStore } from "../live/presence";
 import type { Live } from "../live/share";
-import { daemonError, immediateFrames, operation, operationsFrame, settle } from "../test/fakes";
+import {
+  daemonError,
+  immediateFrames,
+  operation,
+  operationsFrame,
+  presenceFrame,
+  settle,
+} from "../test/fakes";
 import { passkey } from "../test/identity-daemon";
 import { CHANGE, COMMIT, proposal, ProposalDaemon, REPO, TREE } from "../test/proposal-daemon";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "../test/testing-library";
@@ -38,7 +47,6 @@ import { installAuthenticator, removeAuthenticator } from "../test/webauthn";
 import { Proposal } from "./Proposal";
 import { MOVED_AFTER_SIGNING } from "./proposal-actions";
 import { POLL_MS } from "./proposal-model";
-import { Proposals } from "./Proposals";
 
 afterEach(() => {
   cleanup();
@@ -54,9 +62,26 @@ async function flush() {
 function live() {
   const operations = new OperationStore(immediateFrames);
   operations.applyFrame(operationsFrame({ live: true, cursor: "c0" }));
+  const presence = new PresenceStore(immediateFrames);
+  presence.applyFrame(presenceFrame([], true));
   let cursor = 1;
+  let reported = 1;
   return {
-    live: { operations } as unknown as Live,
+    live: { operations, presence } as unknown as Live,
+    /** The daemon replaces the proposal's AUTOMATIC entry (R3.33). */
+    judged: () => {
+      presence.applyFrame(
+        presenceFrame([
+          {
+            id: "auto1",
+            kind: PresenceKind.AUTOMATIC,
+            repoId: REPO,
+            changeId: CHANGE,
+            updatedAt: timestampFromMs(1_795_000_000_000 + reported++),
+          },
+        ]),
+      );
+    },
     push: () => {
       operations.applyFrame(
         operationsFrame({
@@ -464,11 +489,31 @@ describe("the proposal page", () => {
     expect(button("Decline").disabled).toBe(false);
   });
 
-  it("reads again without an operation while in review: evidence records none", async () => {
+  it("reads again when its status entry moves: evidence records no operation", async () => {
+    installAuthenticator();
+    const daemon = daemonWithDiff();
+    const stream = await open(daemon);
+    expect(screen.getByText("The policy blocks it.")).toBeTruthy();
+    daemon.evaluation.decision = PolicyDecision.ALLOW;
+    daemon.evaluation.rules = [];
+    await act(() => {
+      stream.judged();
+    });
+    // Paced: the read follows the last one by 250 ms at least.
+    await waitFor(() => {
+      expect(screen.getByText("The policy allows it to land.")).toBeTruthy();
+    });
+  });
+
+  it("polls while in review only where no policy judges it", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
       installAuthenticator();
       const daemon = daemonWithDiff();
+      const entry = daemon.entries[0];
+      if (entry) {
+        entry.automatic = create(AutomaticStatusSchema, { state: AutomaticState.OFF });
+      }
       await open(daemon);
       expect(screen.getByText("The policy blocks it.")).toBeTruthy();
       daemon.evaluation.decision = PolicyDecision.ALLOW;
@@ -511,51 +556,5 @@ describe("the proposal page", () => {
       `/repos/${REPO}/proposals/${below}`,
     );
     expect(button(/^Accept with the 1 change below$/)).toBeTruthy();
-  });
-});
-
-describe("the Proposals tab", () => {
-  it("lists open proposals newest first, and holds them while new ones wait behind a count", async () => {
-    const daemon = new ProposalDaemon();
-    const at = (ms: number) => ({ last: { recordedAt: timestampFromMs(ms) } });
-    daemon.entries = [
-      proposal("1".repeat(32), "1".repeat(40), "Older", {
-        lifecycle: { state: LifecycleState.PROPOSED, recorded: true, ...at(1_000) },
-      }),
-      proposal("2".repeat(32), "2".repeat(40), "Newer", {
-        lifecycle: { state: LifecycleState.PROPOSED, recorded: true, ...at(2_000) },
-      }),
-    ];
-    const stream = live();
-    render(
-      <Proposals
-        repo={REPO}
-        at=""
-        connection={daemon.connection()}
-        live={stream.live}
-        frame={immediateFrames}
-        onSessionInvalid={vi.fn()}
-      />,
-    );
-    await flush();
-    const titles = () =>
-      within(screen.getByRole("list", { name: "Open proposals" }))
-        .getAllByRole("link")
-        .map((l) => l.textContent);
-    expect(titles()).toEqual(["Newer", "Older"]);
-    daemon.entries.push(
-      proposal("3".repeat(32), "3".repeat(40), "Newest", {
-        lifecycle: { state: LifecycleState.PROPOSED, recorded: true, ...at(3_000) },
-      }),
-    );
-    await act(() => {
-      stream.push();
-    });
-    const show = await screen.findByRole("button", { name: "Show 1 new proposal" });
-    expect(titles()).toEqual(["Newer", "Older"]);
-    await act(() => {
-      show.click();
-    });
-    expect(titles()).toEqual(["Newest", "Newer", "Older"]);
   });
 });

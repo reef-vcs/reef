@@ -528,6 +528,7 @@ impl Judging<'_> {
             let mut needs = found.failed;
             needs.extend(found.missing);
             needs.extend(found.signoffs);
+            needs.extend(found.rules);
             return Verdict::Blocked(Box::new(status.with_missing(needs)));
         }
         status.next = match reason {
@@ -801,14 +802,24 @@ struct Requirements {
     failed: Vec<Need>,
     missing: Vec<Need>,
     signoffs: Vec<Need>,
+    /// Rules that block with no evidence or sign-off to ask for.
+    rules: Vec<Need>,
     other: bool,
 }
+
+/// The kind of a sign-off's need in a status's `missing`.
+pub(crate) const SIGNOFF_NEED: &str = "signoff";
+/// The kind of a blocking rule's need in a status's `missing`: a rule that
+/// asks for no evidence or sign-off (`[[forbid]]`, `[limits]`, `[[rule]]`,
+/// a built-in, or any rule that could not be evaluated), targeted at it.
+pub(crate) const RULE_NEED: &str = "rule";
 
 fn requirements(evaluation: &Evaluation) -> Requirements {
     let mut found = Requirements {
         failed: Vec::new(),
         missing: Vec::new(),
         signoffs: Vec::new(),
+        rules: Vec::new(),
         other: false,
     };
     for rule in &evaluation.rules {
@@ -825,11 +836,32 @@ fn requirements(evaluation: &Evaluation) -> Requirements {
             RuleKind::Require if !rule.missing.is_empty() => {
                 found.missing.extend(rule.missing.iter().cloned());
             }
-            RuleKind::Signoff => {
-                found.signoffs.extend(rule.missing.iter().cloned());
+            // A sign-off a rule still needs, its own or built in (the
+            // owners' on a policy file, a resolution's approval): one need
+            // of kind `signoff`, targeted at the rule, from those who may
+            // sign. A rule that could not be evaluated needs no sign-off.
+            _ if rule.status == RuleStatus::Unsatisfied && rule.signoff.is_some() => {
+                let mut attestors = Vec::new();
+                if let Some(signoff) = &rule.signoff {
+                    attestors.extend(signoff.groups.iter().cloned());
+                    attestors.extend(signoff.identities.iter().cloned());
+                }
+                found.signoffs.push(Need {
+                    kind: SIGNOFF_NEED.to_owned(),
+                    target: rule.name.clone(),
+                    attestors,
+                    ..Need::default()
+                });
                 found.other = true;
             }
-            _ => found.other = true,
+            _ => {
+                found.rules.push(Need {
+                    kind: RULE_NEED.to_owned(),
+                    target: rule.name.clone(),
+                    ..Need::default()
+                });
+                found.other = true;
+            }
         }
     }
     found
@@ -838,6 +870,77 @@ fn requirements(evaluation: &Evaluation) -> Requirements {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rule(
+        name: &str,
+        kind: RuleKind,
+        status: RuleStatus,
+        signs: bool,
+    ) -> reef_policy::RuleResult {
+        reef_policy::RuleResult {
+            name: name.to_owned(),
+            kind,
+            status,
+            message: String::new(),
+            paths: Vec::new(),
+            paths_total: 0,
+            missing: Vec::new(),
+            failed: Vec::new(),
+            signoff: signs.then(|| reef_policy::SignoffNeed {
+                identities: vec!["alice".to_owned()],
+                count: 1,
+                ..reef_policy::SignoffNeed::default()
+            }),
+            evidence_ids: Vec::new(),
+        }
+    }
+
+    fn kinds(rules: Vec<reef_policy::RuleResult>) -> Vec<(String, String)> {
+        let mut evaluation = Evaluation::no_policy(&reef_policy::Input::default());
+        evaluation.rules = rules;
+        let found = requirements(&evaluation);
+        found
+            .signoffs
+            .iter()
+            .chain(&found.rules)
+            .map(|need| (need.kind.clone(), need.target.clone()))
+            .collect()
+    }
+
+    // R3.33: a sign-off a rule needs, its own or built in, is a need of
+    // kind `signoff`; a rule that blocks with nothing to ask for is one of
+    // kind `rule`, so a sign-off beside it is not the only thing missing;
+    // and a sign-off rule that could not be evaluated asks for no sign-off.
+    #[test]
+    fn sign_offs_and_blocking_rules_are_needs() {
+        use RuleKind as K;
+        use RuleStatus as S;
+        let pair = |kind: &str, target: &str| (kind.to_owned(), target.to_owned());
+        assert_eq!(
+            kinds(vec![rule(
+                "builtin:owners",
+                K::Builtin,
+                S::Unsatisfied,
+                true
+            )]),
+            [pair("signoff", "builtin:owners")]
+        );
+        assert_eq!(
+            kinds(vec![
+                rule("review", K::Signoff, S::Unsatisfied, true),
+                rule("no-vendor", K::Forbid, S::Unsatisfied, false),
+            ]),
+            [pair("signoff", "review"), pair("rule", "no-vendor")]
+        );
+        assert_eq!(
+            kinds(vec![rule("review", K::Signoff, S::Error, true)]),
+            [pair("rule", "review")]
+        );
+        assert_eq!(
+            kinds(vec![rule("review", K::Signoff, S::Satisfied, true)]),
+            Vec::<(String, String)>::new()
+        );
+    }
 
     #[test]
     fn no_executor_until_a_claim_after_an_unclaimed_expiry() {

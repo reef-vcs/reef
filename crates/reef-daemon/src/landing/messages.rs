@@ -462,5 +462,6 @@ pub fn automatic_message(status: &super::AutomaticStatus) -> v1::AutomaticStatus
         reason: status.reason.clone().unwrap_or_default(),
         next: status.next.clone(),
         evaluated_at: Some(timestamp(status.evaluated_at)),
+        retrying: status.retrying(),
     }
 }

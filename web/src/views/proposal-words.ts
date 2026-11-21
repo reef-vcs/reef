@@ -27,10 +27,12 @@ export function changeLabel(changeId: string): string {
   return shortId(reverseHex(changeId));
 }
 
-/** "test", "test of src/lib.rs", "a sign-off". */
+/** "test", "test of src/lib.rs", "a sign-off for review", "no-vendor to pass". */
 export function needWords(need: Pick<PolicyEvidenceNeed, "kind" | "target">): string {
-  const kind = need.kind === "signoff" ? "a sign-off" : need.kind;
-  return need.target ? `${kind} of ${need.target}` : kind;
+  // A sign-off's and a blocking rule's target is the rule's name (R3.33).
+  if (need.kind === "signoff") return need.target ? `a sign-off for ${need.target}` : "a sign-off";
+  if (need.kind === "rule") return `${need.target || "a rule"} to pass`;
+  return need.target ? `${need.kind} of ${need.target}` : need.kind;
 }
 
 function needsList(needs: Pick<PolicyEvidenceNeed, "kind" | "target">[], total: number): string {

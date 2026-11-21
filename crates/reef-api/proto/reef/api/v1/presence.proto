@@ -6,6 +6,7 @@ package reef.api.v1;
 
 import "google/protobuf/duration.proto";
 import "google/protobuf/timestamp.proto";
+import "reef/api/v1/changes.proto";
 import "reef/api/v1/executor.proto";
 import "reef/api/v1/options.proto";
 import "reef/api/v1/workspaces.proto";
@@ -16,7 +17,8 @@ service PresenceService {
   // `presence_id` names, which lapses after its TTL unless reported again.
   // An entry's kind, agent, repository and workspace are fixed; everything
   // else may change. Any client holding an entry's id may replace it; no
-  // client may report kind PRESENCE_KIND_LEASE or replace an entry the
+  // client may report kind PRESENCE_KIND_LEASE, JOB, AUTOMATIC or ATTENTION,
+  // or replace an entry the
   // daemon reports. Nothing is persisted: entries end with the daemon.
   //
   // A client reporting for a process it runs keeps one entry per subject:
@@ -99,6 +101,16 @@ enum PresenceKind {
   // only, from executors' UpdateJob calls. One entry per open job; it ends
   // when the job does, and its ended event carries the terminal state.
   PRESENCE_KIND_JOB = 5;
+  // An open proposal's automatic status (R3.33, #362), reported by the
+  // daemon only. One entry per proposal its destination's policy judges,
+  // replaced when the status's state or evaluation key changes (new
+  // evidence on its trees changes the key), ended when it leaves review or
+  // nothing judges it.
+  PRESENCE_KIND_AUTOMATIC = 6;
+  // An active workspace's attention (R3.33, #145), reported by the daemon
+  // only. One entry per active workspace that needs attention, ended when
+  // it no longer does.
+  PRESENCE_KIND_ATTENTION = 7;
 }
 
 // How far a long-running operation has got.
@@ -146,6 +158,12 @@ message Presence {
   // For PRESENCE_KIND_JOB: the job as of this report. Unset for other
   // kinds.
   JobPresence job = 14;
+  // For PRESENCE_KIND_AUTOMATIC: the status, without `missing` (its
+  // `missing_total` stays): the entry says that it moved, and
+  // ListProposals says what is missing. Unset for other kinds.
+  AutomaticStatus automatic = 15;
+  // For PRESENCE_KIND_ATTENTION: why the workspace needs attention.
+  Attention attention = 16;
 }
 
 // A job, as a PRESENCE_KIND_JOB entry reports it (R3.05).

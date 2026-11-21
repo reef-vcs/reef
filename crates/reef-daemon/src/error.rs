@@ -775,6 +775,9 @@ fn reason_and_metadata(
             Some((reason, meta(&pairs)))
         } else if let Some(error) = error.downcast_ref::<crate::comments::CommentError>() {
             error.reason().map(|(reason, pairs)| (reason, meta(&pairs)))
+        } else if let Some(error) = error.downcast_ref::<crate::service::inbox::InboxError>() {
+            let (reason, pairs) = error.reason();
+            Some((reason, meta(&pairs)))
         } else if let Some(error) = error.downcast_ref::<crate::assign::AssignError>() {
             assign_reason(error)
         } else if let Some(error) = error.downcast_ref::<ReplayError>() {

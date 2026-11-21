@@ -14,6 +14,7 @@ import {
   RepositoryService,
   type Repository,
 } from "../gen/reef/api/v1/repositories_pb";
+import { InboxService } from "../gen/reef/api/v1/inbox_pb";
 import { OperationStore } from "../live/operations";
 import { PresenceStore } from "../live/presence";
 import type { Live } from "../live/share";
@@ -72,6 +73,9 @@ function setup(daemon: Partial<Daemon> = {}, live = true) {
         if (request.pageToken) await state.hold;
         return page;
       },
+    });
+    service(InboxService, {
+      getInbox: () => ({ sections: [] }),
     });
     service(OperationService, {
       async listOperations(request) {
@@ -311,6 +315,15 @@ describe("Overview", () => {
     });
     await flush();
     expect(t.onSessionInvalid).toHaveBeenCalled();
+  });
+
+  it("opens on the inbox, above the repositories (R3.33)", async () => {
+    setup();
+    await flush();
+    const inbox = await screen.findByRole("region", { name: "Needs you now" });
+    expect(within(inbox).getByText("Nothing needs you now.")).toBeTruthy();
+    const headings = screen.getAllByRole("heading", { level: 1 }).map((h) => h.textContent);
+    expect(headings).toEqual(["Inbox", "Repositories"]);
   });
 
   it("says how to register a repository when there are none", async () => {

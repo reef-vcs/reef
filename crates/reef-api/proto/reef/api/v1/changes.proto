@@ -565,8 +565,11 @@ message AutomaticStatus {
   AutomaticState state = 1;
   // What the gate said, or what it waits for.
   string message = 2;
-  // WAITING: the pairs asked for; NEEDS: the failed pairs and the missing
-  // evidence and sign-offs; at most 20.
+  // WAITING: the pairs asked for; NEEDS: the failed pairs, the missing
+  // evidence, each sign-off still needed (kind `signoff`, target the rule's
+  // name) and each rule that blocks with nothing to ask for (kind `rule`,
+  // target the rule's name); at most 20. Kinds `signoff` and `rule` here
+  // name a person's decision and a rule, not evidence an executor makes.
   repeated PolicyEvidenceNeed missing = 3;
   // How many there are; more than `missing` holds when it was cut.
   uint32 missing_total = 4;
@@ -581,6 +584,10 @@ message AutomaticStatus {
   repeated string next = 8;
   // When it was judged.
   google.protobuf.Timestamp evaluated_at = 9;
+  // RETURNED: the service queues it again by itself, soon (the destination
+  // moved under its landing). False when it waits for someone: a person to
+  // land it again, or an executor to claim its checks (R3.33).
+  bool retrying = 10;
 }
 
 // A page of recorded lifecycles.

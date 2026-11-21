@@ -94,7 +94,7 @@ describe("RepoFrame", () => {
       "Smartlog",
       "Workspaces",
       "Activity",
-      "Proposals",
+      "Inbox",
     ]);
     expect(links.map((l) => l.getAttribute("aria-current"))).toEqual([null, null, "page", null]);
     expect(screen.getByRole("slider")).toBeTruthy();

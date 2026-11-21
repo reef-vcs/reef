@@ -9,10 +9,12 @@
 // agent with a client entry on the same workspace, and to its own `agent`
 // (the owner) only when no client entry names that workspace.
 //
-// Executor jobs' entries (R3.05, kind JOB) are left out: they name the job's
-// requester and no workspace, and belong to the landing pipeline view
-// (R3.34), not to an agent's row.
-import { PresenceKind, type Presence } from "../gen/reef/api/v1/presence_pb";
+// Entries about state, not an agent's doing (live/kinds.ts), are left out:
+// executor jobs (R3.05) name the job's requester and no workspace, and
+// proposals' statuses and workspaces' attention (R3.33) belong to the
+// inbox, not to an agent's row.
+import type { Presence } from "../gen/reef/api/v1/presence_pb";
+import { isAgentEntry } from "../live/kinds";
 
 export interface FleetAgent {
   name: string;
@@ -38,7 +40,7 @@ function add(list: string[], value: string) {
 /** The agents of `entries` in repository `repoId` (a full id). Other entries are left out. */
 export function joinAgents(entries: Iterable<Presence>, repoId: string): AgentJoin {
   const mine = [...entries].filter(
-    (p) => p.repoId !== "" && p.repoId === repoId && p.kind !== PresenceKind.JOB,
+    (p) => p.repoId !== "" && p.repoId === repoId && isAgentEntry(p),
   );
   // The client agents on each workspace.
   const clients = new Map<string, string[]>();

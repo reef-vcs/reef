@@ -28,7 +28,7 @@ import {
 import { diffFiles, nest } from "./proposal-diff";
 import { estimateWords } from "./ProposalComments";
 import { hunkLines } from "./ProposalDiff";
-import { automaticWords, heldWords, transitionWords } from "./proposal-words";
+import { automaticWords, heldWords, needWords, transitionWords } from "./proposal-words";
 
 const symbol = (name: string, enclosing = "", kind = SymbolChangeKind.CHANGED) =>
   create(SymbolChangeSchema, {
@@ -232,5 +232,14 @@ describe("the actions", () => {
     expect(declineBlocked(LifecycleState.DECLINED, false)).toBe(
       "Only a change in review can be declined.",
     );
+  });
+});
+
+describe("a need in words", () => {
+  it("names a sign-off's rule and a blocking rule (R3.33)", () => {
+    expect(needWords({ kind: "signoff", target: "review" })).toBe("a sign-off for review");
+    expect(needWords({ kind: "signoff", target: "" })).toBe("a sign-off");
+    expect(needWords({ kind: "rule", target: "no-vendor" })).toBe("no-vendor to pass");
+    expect(needWords({ kind: "test", target: "src/lib.rs" })).toBe("test of src/lib.rs");
   });
 });

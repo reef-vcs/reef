@@ -39,6 +39,11 @@ pub enum DaemonKey {
     Progress(u64),
     /// An executor job (R3.05), by the 64 bits of its id.
     Job(u64),
+    /// An open proposal's automatic status (R3.33), by its repository and
+    /// the first 64 bits of its change id.
+    Automatic(RepoId, u64),
+    /// An active workspace's attention (R3.33).
+    Attention(WorkspaceId),
 }
 
 /// What an entry says, as a report gives it: validated and resolved.
@@ -64,6 +69,10 @@ pub struct Report {
     pub lease: Option<v1::Lease>,
     /// For `JOB` (R3.05).
     pub job: Option<v1::JobPresence>,
+    /// For `AUTOMATIC` (R3.33).
+    pub automatic: Option<v1::AutomaticStatus>,
+    /// For `ATTENTION` (R3.33).
+    pub attention: v1::Attention,
     /// How long it lasts unless reported again, already clamped.
     pub ttl: Duration,
 }
@@ -259,7 +268,7 @@ impl PresenceHub {
         replace: Option<PresenceId>,
         report: Report,
     ) -> Result<v1::Presence, PresenceError> {
-        if matches!(report.kind, PresenceKind::Lease | PresenceKind::Job) {
+        if super::daemon_only(report.kind) {
             return Err(PresenceError::DaemonKind(report.kind));
         }
         let mut inner = self.lock();
@@ -448,6 +457,33 @@ impl PresenceHub {
             .collect()
     }
 
+    /// The live `ATTENTION` entries (R3.33): each workspace's attention as
+    /// published.
+    pub fn attention_entries(&self) -> HashMap<WorkspaceId, i32> {
+        let inner = self.lock();
+        inner
+            .daemon_keys
+            .iter()
+            .filter_map(|(key, id)| match key {
+                DaemonKey::Attention(workspace) => inner
+                    .entries
+                    .get(id)
+                    .map(|entry| (*workspace, entry.change.presence.attention)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The live `AUTOMATIC` entries of `repo` (R3.33), by key.
+    pub fn automatic_keys(&self, repo: RepoId) -> Vec<DaemonKey> {
+        self.lock()
+            .daemon_keys
+            .keys()
+            .filter(|key| matches!(key, DaemonKey::Automatic(of, _) if *of == repo))
+            .copied()
+            .collect()
+    }
+
     /// The daemon's live entry `key`.
     pub fn daemon_entry(&self, key: DaemonKey) -> Option<v1::Presence> {
         let inner = self.lock();
@@ -498,6 +534,8 @@ impl PresenceHub {
             lease: report.lease,
             by_daemon: daemon.is_some(),
             job: report.job,
+            automatic: report.automatic,
+            attention: report.attention.into(),
         };
         if daemon.is_none() && presence.encoded_len() > MAX_ENTRY_BYTES {
             return Err(PresenceError::TooLarge {
