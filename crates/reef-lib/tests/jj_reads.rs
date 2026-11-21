@@ -1588,11 +1588,12 @@ fn operations_are_classified() {
             None,
             None,
         ),
+        // The jj CLI's `jj undo` (#357): only `reef.kind` says Reef undid.
         (
             "undo: restore to operation 00ff".into(),
             false,
             "default",
-            Some(OpKind::Undo),
+            Some(OpKind::External),
             None,
             None,
         ),
