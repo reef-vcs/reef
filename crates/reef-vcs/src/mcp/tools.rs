@@ -569,6 +569,14 @@ pub(super) const TOOLS: &[ToolDef] = &[
 #[cfg_attr(not(test), expect(dead_code, reason = "the test reads it"))]
 pub(super) const NOT_TOOLS: &[(&str, &str)] = &[
     (
+        "/reef.api.v1.InboxService/GetInbox",
+        "a person's triage view; an agent supervising others runs `reef inbox`",
+    ),
+    (
+        "/reef.api.v1.InboxService/MarkInboxSeen",
+        "a person's reading position, moved by the web UI",
+    ),
+    (
         "/reef.api.v1.GitService/FetchGitRemote",
         "rebase_change fetches; an agent rarely needs a fetch alone",
     ),

@@ -42,6 +42,7 @@ import {
   WorkspaceService,
   WorkspaceState,
 } from "../gen/reef/api/v1/workspaces_pb";
+import { PresenceKind } from "../gen/reef/api/v1/presence_pb";
 import { joinAgents } from "../fleet/agents";
 import { DiskScheduler } from "../fleet/disk";
 import { restartWindowMs } from "../fleet/lease";
@@ -50,6 +51,7 @@ import { after, type Cancel } from "../live/backoff";
 import { FrameNotifier, type FrameScheduler } from "../live/frame";
 import type { OperationBatch, OperationStore } from "../live/operations";
 import { Paced } from "../live/paced";
+import { stateSignature } from "../live/kinds";
 import type { PresenceStore } from "../live/presence";
 
 export const REPOSITORY_NOT_FOUND = "REPOSITORY_NOT_FOUND";
@@ -150,6 +152,8 @@ export class FleetModel {
   private closeWindow: Cancel | undefined;
   private resyncs = -1;
   private agentsSeeded = false;
+  /** The repository's ATTENTION entries, as last seen ([`stateSignature`]). */
+  private attention: string | undefined;
   private readonly hiddenAgents = new Set<string>();
 
   constructor(
@@ -301,6 +305,16 @@ export class FleetModel {
 
   private onPresence() {
     if (this.frozen || this.stopped) return;
+    const attention = stateSignature(
+      this.presence.entries.values(),
+      PresenceKind.ATTENTION,
+      this.repoId ?? "",
+    );
+    if (attention !== this.attention) {
+      const first = this.attention === undefined;
+      this.attention = attention;
+      if (!first && this.requested && this.operations.live) this.paced.request();
+    }
     if (this.presence.resyncs !== this.resyncs) {
       // A new subscription: the daemon may have restarted, so the restart
       // window is read again (only once the repository is known).

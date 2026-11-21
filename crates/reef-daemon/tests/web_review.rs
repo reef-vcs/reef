@@ -82,6 +82,13 @@ impl Page {
         )
     }
 
+    fn inbox(&self) -> v1::inbox_service_client::InboxServiceClient<Web> {
+        v1::inbox_service_client::InboxServiceClient::with_origin(
+            self.service(),
+            self.origin.clone(),
+        )
+    }
+
     fn changes(&self) -> ChangeServiceClient<Web> {
         ChangeServiceClient::with_origin(self.service(), self.origin.clone())
     }
@@ -540,5 +547,49 @@ async fn a_web_answer_skips_the_confirm_only_while_the_question_is_open() {
             InstructionState::Pending,
             InstructionState::AwaitingConfirmation
         ]
+    );
+}
+
+// R3.33 (S-261): through the web UI a mark is the default person's, moved
+// forward only and capped at the newest transition; the request has
+// nothing else to set.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_web_mark_is_the_default_persons() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let page = Page::open(client).await;
+    let unread = client
+        .get_inbox(v1::GetInboxRequest {
+            repos: vec![repo.id.clone()],
+            ..v1::GetInboxRequest::default()
+        })
+        .await
+        .unwrap();
+    assert!(!unread.sections[0].landed.as_ref().unwrap().from_mark);
+    let stands = page
+        .inbox()
+        .mark_inbox_seen(v1::MarkInboxSeenRequest {
+            marks: vec![v1::InboxMark {
+                repo: repo.id.clone(),
+                seq: 1_000,
+            }],
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        stands.marks[0].seq, 0,
+        "capped at the newest transition: none"
+    );
+    let read = client
+        .get_inbox(v1::GetInboxRequest {
+            repos: vec![repo.id.clone()],
+            ..v1::GetInboxRequest::default()
+        })
+        .await
+        .unwrap();
+    assert!(
+        read.sections[0].landed.as_ref().unwrap().from_mark,
+        "the socket reads the mark the page set: both are the default person's"
     );
 }

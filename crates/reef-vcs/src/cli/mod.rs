@@ -39,6 +39,7 @@ mod history;
 pub(crate) mod holder;
 mod hook;
 mod identity;
+pub(crate) mod inbox;
 mod init;
 mod input;
 mod job;
@@ -361,6 +362,9 @@ enum Command {
         after_help = "Example: reef ask -m 'Which config format?' --tried 'read docs/config.md' --reason decision --wait 10m"
     )]
     Ask(ask::AskArgs),
+    /// What needs you now, what you watch, and what landed since you last looked.
+    #[command(after_help = "Example: reef inbox   # every repository; --repo to narrow it")]
+    Inbox(inbox::InboxArgs),
     /// Revert one operation (`reef op log` lists them).
     Undo(op::UndoArgs),
     /// List the operation log, or show one operation.
@@ -891,6 +895,7 @@ async fn run(global: Global, command: Command, out: &Out) -> Result<ExitCode, Cl
         }
         Command::Comment(args) => Box::pin(comment::run(&connect(&global, out).await?, args)).await,
         Command::Ask(args) => Box::pin(ask::run(&connect(&global, out).await?, args)).await,
+        Command::Inbox(args) => Box::pin(inbox::run(&connect(&global, out).await?, args)).await,
         Command::Undo(args) => op::undo(&connect(&global, out).await?, args).await,
         Command::Op(args) => op::run(&connect(&global, out).await?, args).await,
         Command::History(args) => history::run(&connect(&global, out).await?, args).await,

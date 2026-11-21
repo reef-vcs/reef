@@ -66,6 +66,10 @@ pub(crate) enum Rule {
     /// brings a remote one). The handler refuses with
     /// `PASSKEY_OVER_REMOTE`.
     WebOnly,
+    /// The inbox's marks (R3.33): only for the operator identity the
+    /// caller's token is linked to; refused for a token with no link
+    /// (`REMOTE_IDENTITY_REQUIRED`, `crate::service::inbox`).
+    InboxMark,
 }
 
 /// Every `ACCESS_WRITE` method and its rule.
@@ -164,6 +168,7 @@ pub(crate) const TABLE: &[(&str, Rule)] = &[
         Rule::WebOnly,
     ),
     ("/reef.api.v1.IdentityService/RemovePasskey", Rule::WebOnly),
+    ("/reef.api.v1.InboxService/MarkInboxSeen", Rule::InboxMark),
     (
         "/reef.api.v1.IdentityService/RequestApproval",
         Rule::WebOnly,

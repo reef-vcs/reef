@@ -520,6 +520,8 @@ impl Daemon {
         crate::landing::start(&state);
         // Open proposals are judged again, and land when they may (R3.45).
         crate::landing::start_automatic(&state);
+        // Workspaces needing attention, as presence (R3.33).
+        crate::presence::attention::start(&state);
         // Instructions made moot by transitions, and expired ones (R3.12).
         crate::comments::start(&state);
         // Resolver assignments follow the log (R3.27).

@@ -1,6 +1,6 @@
 // Reviewing a proposal in a real browser against a real daemon (R3.31): an
 // agent proposes a stack of two changes and one more; the person opens the
-// Proposals tab, opens the stack's head, reads its intent, its evidence and
+// repository's inbox (R3.33), opens the stack's head, reads its intent, its evidence and
 // its definitions, expands one to its lines, writes a note and an
 // instruction it confirms, declines the other proposal with a reason, and
 // accepts the head with one passkey touch, after which the stack lands.
@@ -160,15 +160,17 @@ test("a person reviews a proposal: intent, evidence, definitions, comments, decl
     return { head: headCommit, other: otherCommit };
   });
 
-  await test.step("open the head from the Proposals tab", async () => {
+  await test.step("open the head from the repository's inbox", async () => {
     await page.goto(`${url}repos/${reef.repo}/smartlog`);
     await page
       .getByRole("navigation", { name: "Repository" })
-      .getByRole("link", { name: "Proposals" })
+      .getByRole("link", { name: "Inbox" })
       .click();
-    const list = page.getByRole("list", { name: "Open proposals" });
-    await expect(list.getByRole("link")).toHaveCount(3);
-    await list.getByRole("link", { name: "Renew a lease" }).click();
+    const main = page.getByRole("main");
+    for (const subject of ["Add the lease length", "Renew a lease", "Rewrite the notes"]) {
+      await expect(main.getByRole("link", { name: subject })).toBeVisible();
+    }
+    await main.getByRole("link", { name: "Renew a lease" }).click();
     await expect(page.getByRole("heading", { level: 2 })).toContainText("Renew a lease");
   });
 
@@ -207,11 +209,8 @@ test("a person reviews a proposal: intent, evidence, definitions, comments, decl
   });
 
   await test.step("decline the other proposal with a reason", async () => {
-    await page.getByRole("link", { name: "Proposals", exact: true }).first().click();
-    await page
-      .getByRole("list", { name: "Open proposals" })
-      .getByRole("link", { name: "Rewrite the notes" })
-      .click();
+    await page.getByRole("main").getByRole("link", { name: "Inbox", exact: true }).click();
+    await page.getByRole("main").getByRole("link", { name: "Rewrite the notes" }).click();
     await page.getByRole("button", { name: "Decline" }).click();
     await page.getByLabel(/^Why/).fill("Out of scope for this release.");
     await page.getByRole("button", { name: "Decline" }).last().click();
@@ -224,11 +223,10 @@ test("a person reviews a proposal: intent, evidence, definitions, comments, decl
 
   if (!chromium) return;
   await test.step("accept the head with one touch; the stack lands", async () => {
+    // R3.31's Proposals tab address opens the inbox.
     await page.goto(`${url}repos/${reef.repo}/proposals`);
-    await page
-      .getByRole("list", { name: "Open proposals" })
-      .getByRole("link", { name: "Renew a lease" })
-      .click();
+    await expect.poll(() => new URL(page.url()).pathname).toBe(`/repos/${reef.repo}/inbox`);
+    await page.getByRole("main").getByRole("link", { name: "Renew a lease" }).click();
     await page.getByRole("button", { name: /^Accept/ }).click();
     await expect(page.getByRole("status")).toHaveText(/^Signed off and (queued to land|landed)/);
     const evidence = JSON.stringify(

@@ -133,6 +133,7 @@ impl Db {
     /// ([`DbError::AlreadyExists`]). A workspace is normally inserted with its
     /// first lease by [`Db::insert_workspace_with_lease`].
     pub fn insert_workspace(&self, w: &WorkspaceRecord) -> Result<(), DbError> {
+        let _wake = AttentionWake(&self.attention);
         self.in_transaction(|tx| insert_workspace_in(tx, w))
     }
 
@@ -146,6 +147,7 @@ impl Db {
         w: &WorkspaceRecord,
         l: &LeaseRecord,
     ) -> Result<(), DbError> {
+        let _wake = AttentionWake(&self.attention);
         let unleased = WorkspaceRecord {
             lease_id: None,
             ..w.clone()
@@ -311,6 +313,7 @@ impl Db {
         id: WorkspaceId,
         state: WorkspaceState,
     ) -> Result<(), DbError> {
+        let _wake = AttentionWake(&self.attention);
         self.in_transaction(|tx| {
             let current: WorkspaceState = tx
                 .query_row("SELECT state FROM workspaces WHERE id = ?1", [id], |row| {
@@ -349,6 +352,7 @@ impl Db {
         id: WorkspaceId,
         expired_by: Option<Timestamp>,
     ) -> Result<bool, DbError> {
+        let _wake = AttentionWake(&self.attention);
         let changed = self.with(|conn| {
             conn.execute(
                 "UPDATE workspaces SET state = 'releasing'
@@ -376,6 +380,7 @@ impl Db {
         lease_end: LeaseEnd,
         reclaim: &ReclaimRecord,
     ) -> Result<(), DbError> {
+        let _wake = AttentionWake(&self.attention);
         self.in_transaction(|tx| {
             let current: WorkspaceState = tx
                 .query_row("SELECT state FROM workspaces WHERE id = ?1", [id], |row| {
@@ -442,6 +447,7 @@ impl Db {
         attention: Option<Attention>,
         divergent: bool,
     ) -> Result<(), DbError> {
+        let _wake = AttentionWake(&self.attention);
         let changed = self.with(|conn| {
             conn.execute(
                 "UPDATE workspaces
@@ -478,6 +484,7 @@ impl Db {
         attention: Option<Attention>,
         divergent: Option<bool>,
     ) -> Result<(), DbError> {
+        let _wake = AttentionWake(&self.attention);
         let changed = self.with(|conn| {
             conn.execute(
                 "UPDATE workspaces SET attention = ?2, divergent = coalesce(?3, divergent)
@@ -531,6 +538,25 @@ impl Db {
             tx.execute("DELETE FROM workspaces WHERE id = ?1", [id])?;
             Ok(())
         })
+    }
+}
+
+/// Wakes `presence::attention` when dropped, at the end of a writer that
+/// may change which workspaces need attention, whatever it returned: the
+/// task reads the rows and changes nothing when nothing changed.
+struct AttentionWake<'a>(&'a tokio::sync::Notify);
+
+impl Drop for AttentionWake<'_> {
+    fn drop(&mut self) {
+        self.0.notify_one();
+    }
+}
+
+impl Db {
+    /// Notified after a write that may change which active workspaces need
+    /// attention (R3.33).
+    pub fn attention_changed(&self) -> &tokio::sync::Notify {
+        &self.attention
     }
 }
 

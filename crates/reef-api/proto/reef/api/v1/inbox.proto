@@ -1,0 +1,230 @@
+// The triage inbox (R3.33, ADR 0088, docs/inbox.md): what needs a person
+// now, what they watch, and what landed since they last looked.
+syntax = "proto3";
+
+package reef.api.v1;
+
+import "google/protobuf/timestamp.proto";
+import "reef/api/v1/changes.proto";
+import "reef/api/v1/comments.proto";
+import "reef/api/v1/conflicts.proto";
+import "reef/api/v1/operations.proto";
+import "reef/api/v1/options.proto";
+import "reef/api/v1/presence.proto";
+import "reef/api/v1/workspaces.proto";
+
+// Reading the inbox and moving the caller's marks.
+service InboxService {
+  // What needs the caller now, what they watch, and what landed since
+  // their mark, one section per repository: every repository `repos`
+  // names, or every registered one. A repository that fails to read is a
+  // section with `error`, and the others still return.
+  //
+  // The caller is the daemon's default person on the socket and through
+  // the web UI, and the operator identity a remote token links; a token
+  // linked to none reads digests from 24 hours ago.
+  //
+  // Errors: NOT_FOUND with reason REPOSITORY_NOT_FOUND (metadata `repo`)
+  // or REPOSITORY_NOT_REGISTERED (metadata `path`) for a repository named
+  // in `repos`; INVALID_ARGUMENT for more than 256 repositories or
+  // `digest_from` entries. A `digest_from` entry naming a repository not
+  // read, or no longer registered, is ignored.
+  rpc GetInbox(GetInboxRequest) returns (GetInboxResponse) {
+    option (reef.api.v1.access) = ACCESS_READ;
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  // Moves the caller's marks forward: each to the larger of where it
+  // stands and `seq`, never past the repository's newest committed
+  // transition. Repeating it changes nothing. Records no operation.
+  //
+  // Errors: PERMISSION_DENIED with reason REMOTE_IDENTITY_REQUIRED for a
+  // remote token linked to no operator identity; INVALID_ARGUMENT for no
+  // marks, more than 256, or two for one repository; NOT_FOUND as
+  // GetInbox.
+  rpc MarkInboxSeen(MarkInboxSeenRequest) returns (MarkInboxSeenResponse) {
+    option (reef.api.v1.access) = ACCESS_WRITE;
+    option idempotency_level = IDEMPOTENT;
+  }
+}
+
+// Read the inbox.
+message GetInboxRequest {
+  // Repositories by id, name or path; empty for every registered one. At
+  // most 256.
+  repeated string repos = 1;
+  // Where each repository's digest starts, in place of the caller's mark:
+  // a page passes the base its visit started from, so its digest keeps
+  // that base after the page marks it seen. A repository not listed starts
+  // at the caller's mark, or 24 hours ago without one.
+  repeated InboxMark digest_from = 2;
+}
+
+// The inbox.
+message GetInboxResponse {
+  // One per repository read, in the order read.
+  repeated InboxSection sections = 1;
+  // The operation kinds whose operations can change an inbox: a client
+  // reads a repository again when one is recorded in it.
+  repeated OperationKind refresh_operations = 2;
+  // The presence kinds whose entries, new, changed or ended, can change
+  // an inbox.
+  repeated PresenceKind refresh_presence = 3;
+}
+
+// One repository's inbox.
+message InboxSection {
+  // The repository.
+  string repo_id = 1;
+  // What needs the caller now, newest first, at most 200.
+  repeated InboxItem needs_you_now = 2;
+  // How many there are; more than `needs_you_now` holds when it was cut.
+  uint32 needs_you_now_total = 3;
+  // What the caller watches, newest first, at most 200.
+  repeated InboxItem watching = 4;
+  // How many there are.
+  uint32 watching_total = 5;
+  // What landed since the base.
+  LandedDigest landed = 6;
+  // Set when the repository could not be read; the lists are then empty.
+  InboxError error = 7;
+}
+
+// Why an item is in its bucket (docs/inbox.md, "The buckets").
+enum InboxReason {
+  // Not set: never a reason the daemon returns.
+  INBOX_REASON_UNSPECIFIED = 0;
+  // Needs you now: an agent's open help request.
+  INBOX_REASON_HELP = 1;
+  // Needs you now: a proposal whose only missing evidence is sign-offs.
+  INBOX_REASON_SIGNOFF = 2;
+  // Needs you now: a conflict nobody owns.
+  INBOX_REASON_CONFLICT_UNOWNED = 3;
+  // Needs you now: a conflict blocked for a person (tier `ask`, or its
+  // attempts spent).
+  INBOX_REASON_CONFLICT_BLOCKED = 4;
+  // Needs you now: a proposal a landing returned, unchanged since.
+  INBOX_REASON_RETURNED = 5;
+  // Needs you now: a proposal whose jobs no executor claims.
+  INBOX_REASON_NO_EXECUTOR = 6;
+  // Needs you now: an active workspace that needs attention.
+  INBOX_REASON_ATTENTION = 7;
+  // Needs you now: a person's instruction waiting for its Confirm.
+  INBOX_REASON_CONFIRM = 8;
+  // Watching: any other open proposal.
+  INBOX_REASON_IN_REVIEW = 9;
+  // Watching: an instruction pending, delivered or running.
+  INBOX_REASON_IN_FLIGHT = 10;
+}
+
+// One item.
+message InboxItem {
+  // `<object>:<repository id>:<object id>`, one per object whatever its
+  // reason (`proposal`, `help`, `instruction`, `conflict`, `workspace`),
+  // stable across reads: a client tells a new item from one it has shown
+  // by it, and never parses it.
+  string key = 1;
+  // The repository.
+  string repo_id = 2;
+  // Why it is in its bucket.
+  InboxReason reason = 3;
+  // The daemon's sentence for it, such as "Needs a sign-off from
+  // release". Never agent text: that is in the record.
+  string headline = 4;
+  // When it began to need its bucket: the request's or instruction's
+  // creation, the proposal's last transition, the assignment's last
+  // change, the workspace's last snapshot.
+  google.protobuf.Timestamp since = 5;
+  // The change it is about, in hex; empty for a workspace with none.
+  string change_id = 6;
+  // That change's visible commit, for a proposal, conflict or workspace;
+  // empty for a help request or an instruction, whose answer or confirm
+  // checks no commit.
+  string commit_id = 7;
+  // A `reef` command line that acts on it, as an argv, where the web UI
+  // cannot; empty for none.
+  repeated string next = 8;
+  // The record, as its own read returns it.
+  oneof record {
+    // A proposal, as ListProposals returns it.
+    ProposalEntry proposal = 10;
+    // A help request or an instruction, as ListComments returns it.
+    Comment comment = 11;
+    // A conflict assignment, as ListConflictAssignments returns it.
+    ConflictAssignment assignment = 12;
+    // A workspace, as ListWorkspaces returns it.
+    Workspace workspace = 13;
+  }
+}
+
+// What landed in one repository since a base.
+message LandedDigest {
+  // Changes landed after `from_seq` and landed still.
+  uint64 count = 1;
+  // Who proposed them, most first, at most 10.
+  repeated InboxAgentCount by_agent = 2;
+  // The newest, newest first, at most 10.
+  repeated InboxLanding newest = 3;
+  // The base: a lifecycle transition sequence number; landings recorded
+  // after it are counted. 0 with no mark.
+  uint64 from_seq = 4;
+  // The newest transition counted, or `from_seq` when none: the value to
+  // mark seen.
+  uint64 through_seq = 5;
+  // When the caller's mark was set, when the base is the mark; when the
+  // base transition was recorded, for another `digest_from` base; 24 hours
+  // ago with neither.
+  google.protobuf.Timestamp since = 6;
+  // Whether the base is the caller's mark.
+  bool from_mark = 7;
+}
+
+// How many changes one agent landed.
+message InboxAgentCount {
+  // The agent; empty for changes no agent proposed.
+  string agent = 1;
+  // How many.
+  uint64 count = 2;
+}
+
+// One landed change.
+message InboxLanding {
+  // The change, in hex.
+  string change_id = 1;
+  // Its description's first line, as written.
+  string subject = 2;
+  // The agent that proposed it; empty for none.
+  string agent = 3;
+  // When its landing was recorded.
+  google.protobuf.Timestamp landed_at = 4;
+  // The landing transition's sequence number.
+  uint64 seq = 5;
+}
+
+// Why a repository could not be read.
+message InboxError {
+  // The error's reason, as an ErrorDetail would carry it.
+  string reason = 1;
+  // What went wrong.
+  string message = 2;
+}
+
+// A mark: where a person has seen one repository's landings up to.
+message InboxMark {
+  // The repository: an id, name or path in a request, the id in a
+  // response.
+  string repo = 1;
+  // A lifecycle transition sequence number of the repository.
+  uint64 seq = 2;
+}
+
+// Move marks forward.
+message MarkInboxSeenRequest {
+  // At most one per repository, at most 256.
+  repeated InboxMark marks = 1;
+}
+
+// Where the marks stand.
+message MarkInboxSeenResponse {
+  // One per mark asked for, in the same order.
+  repeated InboxMark marks = 1;
+}

@@ -1935,3 +1935,79 @@ textarea {
   padding: var(--space-2);
   resize: vertical;
 }
+
+/* ------------------------------------------------- inbox (R3.33) */
+
+.inbox {
+  max-width: 64rem;
+  margin-bottom: var(--space-6);
+}
+
+.inbox-bucket h2 {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+.inbox-list {
+  list-style: none;
+  margin: 0;
+  padding: 0 !important;
+}
+
+.inbox-row,
+.inbox-digest {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--border);
+}
+
+.inbox-digest {
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.inbox-digest p {
+  margin: 0;
+}
+
+.inbox-row:first-child,
+.inbox-digest:first-child {
+  border-top: none;
+}
+
+.inbox-row.departed {
+  opacity: 0.55;
+}
+
+.inbox-reason {
+  flex: none;
+  min-width: 5.5rem;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.inbox-row-text {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.inbox-landings {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+@media (max-width: 40rem) {
+  .inbox-row {
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+}
