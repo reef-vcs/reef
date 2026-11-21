@@ -2767,6 +2767,181 @@ async fn colocated_repository_imports_git_branches() {
     assert_eq!(resolved.commit_id, commit);
 }
 
+fn git_at(root: &Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_AUTHOR_NAME", "Reef Test")
+        .env("GIT_AUTHOR_EMAIL", "reef-test@example.com")
+        .env("GIT_COMMITTER_NAME", "Reef Test")
+        .env("GIT_COMMITTER_EMAIL", "reef-test@example.com")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+#[tokio::test]
+async fn import_keeps_the_commits_reef_workspaces_use() {
+    if !git_available() {
+        eprintln!("skipped: no git on PATH");
+        return;
+    }
+    let meta = OpMeta::new(OpKind::ImportRefs, "reef: import git refs");
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("colocated");
+    std::fs::create_dir(&root).unwrap();
+    write(&root, "a.txt", "a\n");
+    let mut repo = Repo::init_colocated_git(&root, &settings()).await.unwrap();
+    let base = repo.snapshot("snapshot").await.unwrap().wc_commit;
+    let tree = git_at(&root, &["rev-parse", &format!("{base}^{{tree}}")]);
+    let commit_on_base = |message: &str| {
+        git_at(
+            &root,
+            &["commit-tree", &tree, "-p", base.as_str(), "-m", message],
+        )
+    };
+    let below = commit_on_base("below");
+    let unused = commit_on_base("unused");
+    git_at(&root, &["branch", "below", &below]);
+    git_at(&root, &["branch", "unused", &unused]);
+    repo.import_git_refs(&meta).await.unwrap();
+    assert!(
+        heads_of(&repo).contains(&unused),
+        "the import brings in the branch"
+    );
+    let below: CommitIdHex = below.parse().unwrap();
+    let ws_root = dir.path().join("ws");
+    std::fs::create_dir(&ws_root).unwrap();
+    let (ws, _) = repo
+        .create_workspace(
+            "reef-0123456789abcdef",
+            &ws_root,
+            &dir.path().join("wc"),
+            StartPoint::NewOn(below.clone()),
+            &OpMeta::new(OpKind::CreateWorkspace, "reef: create workspace"),
+        )
+        .await
+        .unwrap();
+    let top = wc_commit_id(&ws);
+
+    git_at(&root, &["branch", "-D", "below", "unused"]);
+    let imported = repo.import_git_refs(&meta).await.unwrap();
+    assert_eq!(imported.abandoned_commits, 1, "only the unused commit");
+    assert_eq!(
+        heads_of(&repo),
+        BTreeSet::from([top.clone()]),
+        "the unused commit is abandoned, the Reef workspace's stays"
+    );
+    assert_eq!(
+        repo.resolve_revision(&format!("{top}-"))
+            .await
+            .unwrap()
+            .commit_id,
+        below,
+        "the commit the workspace builds on stays"
+    );
+    assert_eq!(
+        repo.head()
+            .view()
+            .get_wc_commit_id(WorkspaceName::new("reef-0123456789abcdef"))
+            .map(jj_lib::object_id::ObjectId::hex),
+        Some(top),
+        "the Reef workspace stays on its commit"
+    );
+    assert_eq!(
+        repo.head().view().local_tags().count(),
+        0,
+        "the import leaves no tag behind"
+    );
+}
+
+#[derive(Clone, Copy, Debug)]
+enum GitDrop {
+    Reset,
+    DeleteBranch,
+}
+
+#[tokio::test]
+async fn import_abandons_what_only_the_root_checkout_uses() {
+    if !git_available() {
+        eprintln!("skipped: no git on PATH");
+        return;
+    }
+    for drop in [GitDrop::Reset, GitDrop::DeleteBranch] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("colocated");
+        std::fs::create_dir(&root).unwrap();
+        let git = |args: &[&str]| git_at(&root, args);
+        git(&["init", "-q", "-b", "main"]);
+        write(&root, "base.txt", "base\n");
+        git(&["add", "."]);
+        git(&["commit", "-qm", "base"]);
+        if let GitDrop::DeleteBranch = drop {
+            git(&["checkout", "-qb", "feat"]);
+        }
+        write(&root, "x.txt", "x\n");
+        git(&["add", "."]);
+        git(&["commit", "-qm", "X"]);
+        let x = git(&["rev-parse", "HEAD"]);
+        let mut repo = Repo::init_in_git_repo(&root, &settings(), None)
+            .await
+            .unwrap();
+        let meta = OpMeta::new(OpKind::ImportRefs, "reef: import git refs");
+        repo.import_git_refs(&meta).await.unwrap();
+        assert_eq!(
+            repo.resolve_revision("@-")
+                .await
+                .unwrap()
+                .commit_id
+                .as_str(),
+            x,
+            "{drop:?}: the root checkout builds on X"
+        );
+
+        match drop {
+            GitDrop::Reset => git(&["reset", "-q", "--hard", "HEAD~1"]),
+            GitDrop::DeleteBranch => {
+                git(&["checkout", "-q", "main"]);
+                git(&["branch", "-qD", "feat"])
+            }
+        };
+        let imported = repo.import_git_refs(&meta).await.unwrap();
+        assert_eq!(imported.abandoned_commits, 1, "{drop:?}: X is abandoned");
+        assert!(
+            !repo
+                .heads()
+                .unwrap()
+                .iter()
+                .any(|head| head.commit_id.as_str() == x),
+            "{drop:?}: X is not a head"
+        );
+        assert_ne!(
+            repo.resolve_revision("@-")
+                .await
+                .unwrap()
+                .commit_id
+                .as_str(),
+            x,
+            "{drop:?}: the root checkout no longer builds on X"
+        );
+    }
+}
+
+fn heads_of(repo: &Repo) -> BTreeSet<String> {
+    repo.heads()
+        .unwrap()
+        .into_iter()
+        .map(|head| head.commit_id.to_string())
+        .collect()
+}
+
 /// Whether `version`, `jj --version`'s output, names a `jj` CLI at jj-lib's
 /// minor ([`JJ_LIB_VERSION`](reef_lib::jj::JJ_LIB_VERSION)) or the one
 /// before it.

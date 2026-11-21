@@ -8,12 +8,15 @@
 
 use jj_lib::backend::BackendError;
 use jj_lib::config::ConfigGetError;
-use jj_lib::git::{GitImportError, GitImportOptions, GitSettings};
-use jj_lib::repo::Repo as _;
+use jj_lib::git::{GitImportError, GitImportOptions, GitImportStats, GitSettings};
+use jj_lib::op_store::RefTarget;
+use jj_lib::ref_name::RefNameBuf;
+use jj_lib::repo::{MutableRepo, Repo as _};
 use jj_lib::transaction::TransactionCommitError;
 
 use super::oplog::OpMeta;
 use super::repo::{OperationIdHex, Repo};
+use super::workspace::REEF_WORKSPACE_PREFIX;
 use crate::error::{Classify, ErrorKind, classify_by_source};
 
 /// What [`Repo::import_git_refs`] did.
@@ -22,7 +25,8 @@ pub struct ImportRefsOutcome {
     /// The operation recording the import, or `None` when git's refs
     /// already matched jj's view and nothing was written.
     pub op_id: Option<OperationIdHex>,
-    /// Commits abandoned because git no longer reaches them.
+    /// Commits abandoned because git no longer reaches them and no Reef
+    /// workspace is on them or builds on them.
     pub abandoned_commits: usize,
     /// Git refs that could not be imported, by full name.
     pub failed_refs: Vec<String>,
@@ -64,10 +68,11 @@ impl Repo {
     /// recorded with `meta`, committed only if it changes anything,
     /// and adopts the new operation, as the `jj` CLI does before each
     /// command in a colocated repository. Local branches become local
-    /// bookmarks; remote-tracking bookmarks are not auto-tracked. Only
-    /// meaningful for a repository with a git store (see
-    /// [`Repo::is_colocated`]); otherwise
-    /// [`ImportRefsError::Import`] with an unexpected-backend error.
+    /// bookmarks; remote-tracking bookmarks are not auto-tracked. A commit
+    /// git no longer reaches is abandoned unless a Reef workspace is on it or
+    /// builds on it. Only meaningful for a repository with a git store (see
+    /// [`Repo::is_colocated`]); otherwise [`ImportRefsError::Import`] with
+    /// an unexpected-backend error.
     #[tracing::instrument(skip_all, fields(repo = %self.workspace_root().display()))]
     pub async fn import_git_refs(
         &mut self,
@@ -104,7 +109,7 @@ impl Repo {
             remote_auto_track_bookmarks: std::collections::HashMap::new(),
         };
         let mut tx = self.repo.start_transaction();
-        let stats = jj_lib::git::import_refs(tx.repo_mut(), &options).await?;
+        let stats = import_pinning_reef_workspaces(tx.repo_mut(), &options).await?;
         let failed_refs = stats
             .failed_ref_names
             .iter()
@@ -125,6 +130,40 @@ impl Repo {
             failed_refs,
         })
     }
+}
+
+/// jj's `import_refs` never abandons a commit that a local tag reaches
+/// (`pinned_commit_ids` in jj-lib's `git.rs`). The pin names contain `:`,
+/// which no git ref name can hold, so an imported git tag cannot overwrite one.
+async fn import_pinning_reef_workspaces(
+    repo: &mut MutableRepo,
+    options: &GitImportOptions,
+) -> Result<GitImportStats, GitImportError> {
+    let pins: Vec<(RefNameBuf, RefTarget)> = repo
+        .view()
+        .wc_commit_ids()
+        .iter()
+        .filter(|(workspace, _)| workspace.as_str().starts_with(REEF_WORKSPACE_PREFIX))
+        .map(|(workspace, commit)| {
+            (
+                format!("reef:pin:{}", workspace.as_str()).into(),
+                RefTarget::normal(commit.clone()),
+            )
+        })
+        .collect();
+    let restore: Vec<(RefNameBuf, RefTarget)> = pins
+        .into_iter()
+        .map(|(name, pin)| {
+            let before = repo.get_local_tag(&name).clone();
+            repo.set_local_tag_target(&name, pin);
+            (name, before)
+        })
+        .collect();
+    let stats = jj_lib::git::import_refs(repo, options).await;
+    for (name, before) in restore {
+        repo.set_local_tag_target(&name, before);
+    }
+    stats
 }
 
 impl Repo {

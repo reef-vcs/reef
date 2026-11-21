@@ -264,7 +264,6 @@ async fn follows_operations() {
     );
 }
 
-/// Test 7: open, landed, abandoned by a rewind, abandoned and back, undone.
 #[tokio::test(flavor = "multi_thread")]
 #[expect(clippy::too_many_lines, reason = "one fixture, every outcome")]
 async fn outcomes() {
@@ -295,15 +294,12 @@ async fn outcomes() {
         .change_when(&ws.change_id, |c| c.outcome() == ChangeOutcome::Landed)
         .await;
     assert!(landed.landed_at.is_some(), "seen landing: {landed:#?}");
-    // Moving main back has jj's import abandon what only the old target
-    // reached, the change included (descendants are rebased): the outcome
-    // follows the repository.
     fx.git(&["update-ref", "refs/heads/main", &main_before]);
     let _trigger = fx.workspace("importer").await;
     let rewound = fx
         .change_when(&ws.change_id, |c| c.outcome() != ChangeOutcome::Landed)
         .await;
-    assert_eq!(rewound.outcome(), ChangeOutcome::Abandoned, "{rewound:#?}");
+    assert_eq!(rewound.outcome(), ChangeOutcome::Open, "{rewound:#?}");
     assert!(rewound.landed_at.is_none());
 
     // Abandoned, then the abandon undone.
