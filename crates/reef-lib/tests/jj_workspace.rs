@@ -2767,6 +2767,78 @@ async fn colocated_repository_imports_git_branches() {
     assert_eq!(resolved.commit_id, commit);
 }
 
+/// Runs git at `root` and returns its trimmed output.
+fn git_at(root: &Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+// Issue #374: an import abandons what git no longer reaches, except a
+// commit a working copy is on or builds on.
+#[tokio::test]
+async fn import_keeps_the_commits_working_copies_use() {
+    if !git_available() {
+        eprintln!("skipped: no git on PATH");
+        return;
+    }
+    let meta = OpMeta::new(OpKind::ImportRefs, "reef: import git refs");
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("colocated");
+    std::fs::create_dir(&root).unwrap();
+    write(&root, "a.txt", "a\n");
+    let mut repo = Repo::init_colocated_git(&root, &settings()).await.unwrap();
+    let used = repo.snapshot("snapshot").await.unwrap().wc_commit;
+    let tree = git_at(&root, &["rev-parse", &format!("{used}^{{tree}}")]);
+    let unused = git_at(
+        &root,
+        &["commit-tree", &tree, "-p", used.as_str(), "-m", "unused"],
+    );
+    git_at(&root, &["branch", "used", used.as_str()]);
+    git_at(&root, &["branch", "unused", &unused]);
+    repo.import_git_refs(&meta).await.unwrap();
+    assert!(
+        heads_of(&repo).contains(&unused),
+        "the import brings in the branch"
+    );
+
+    git_at(&root, &["branch", "-D", "used", "unused"]);
+    let imported = repo.import_git_refs(&meta).await.unwrap();
+    assert_eq!(imported.abandoned_commits, 1, "only the unused commit");
+    assert_eq!(
+        heads_of(&repo),
+        BTreeSet::from([used.to_string()]),
+        "the unused commit is abandoned, the working copy's stays"
+    );
+    assert_eq!(
+        wc_commit_id(&repo),
+        used.as_str(),
+        "the working copy stays on it"
+    );
+    assert_eq!(
+        repo.head().view().local_tags().count(),
+        0,
+        "the import leaves no tag behind"
+    );
+}
+
+/// The visible heads of `repo`'s view.
+fn heads_of(repo: &Repo) -> BTreeSet<String> {
+    repo.heads()
+        .unwrap()
+        .into_iter()
+        .map(|head| head.commit_id.to_string())
+        .collect()
+}
+
 /// Whether `version`, `jj --version`'s output, names a `jj` CLI at jj-lib's
 /// minor ([`JJ_LIB_VERSION`](reef_lib::jj::JJ_LIB_VERSION)) or the one
 /// before it.

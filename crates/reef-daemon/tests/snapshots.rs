@@ -767,25 +767,170 @@ async fn reefs_import(daemon: &TestDaemon, repo: &SyntheticRepo) {
 }
 
 /// `git branch review <commit>` at the root, Reef's import, `git branch -D
-/// review`, and Reef's import again, which abandons `commit` because git no
-/// longer reaches it. Asserts that the import moved `ws` off `commit`.
-async fn on_a_deleted_branch(
-    daemon: &TestDaemon,
-    repo: &SyntheticRepo,
-    ws: &Workspace,
-    commit: &str,
-) {
+/// review`, and Reef's import again. Git no longer reaches `commit`.
+async fn on_a_deleted_branch(daemon: &TestDaemon, repo: &SyntheticRepo, commit: &str) {
     git(&repo.root, &[], &["branch", "review", commit]);
     reefs_import(daemon, repo).await;
     git(&repo.root, &[], &["branch", "-D", "review"]);
     reefs_import(daemon, repo).await;
-    let now =
-        reef_lib::jj::view_wc_commit(open(&repo.root).await.head(), &format!("reef-{}", ws.id));
-    assert_ne!(
-        now.as_ref().map(CommitIdHex::as_str),
-        Some(commit),
-        "the import abandoned the workspace's commit"
-    );
+}
+
+/// The visible commits of `change`, and their descriptions.
+async fn visible_commits(
+    daemon: &TestDaemon,
+    repo: &SyntheticRepo,
+    change: &str,
+) -> Vec<(String, String)> {
+    daemon
+        .client
+        .list_changes(reef_api::v1::ListChangesRequest {
+            repo: repo.id.clone(),
+            revset: "all()".to_owned(),
+            skip_snapshot: true,
+            ..reef_api::v1::ListChangesRequest::default()
+        })
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|entry| entry.change)
+        .filter(|found| found.change_id == change)
+        .map(|found| (found.commit_id, found.description))
+        .collect()
+}
+
+/// Asserts that `ws` is on `commit`, the one visible commit of its change
+/// `ws.change_id`, not divergent, and that `w/one.txt`, `w/two.txt` and
+/// any `more` are on disk and in that commit.
+async fn assert_unchanged(
+    daemon: &TestDaemon,
+    repo: &SyntheticRepo,
+    ws: &Workspace,
+    commit: &str,
+    more: &[&str],
+) {
+    let row = inspect(daemon, repo, ws).await;
+    assert_eq!(row.change_id, ws.change_id, "the workspace's change");
+    assert_eq!(row.commit_id, commit, "the workspace's commit");
+    let commits = visible_commits(daemon, repo, &ws.change_id).await;
+    assert_eq!(commits.len(), 1, "one visible commit: {commits:?}");
+    for path in ["w/one.txt", "w/two.txt"].iter().chain(more) {
+        assert!(
+            Path::new(&ws.path).join(path).is_file(),
+            "{path} stays on disk"
+        );
+        assert!(
+            tree_has(&repo.root, commit, path).await,
+            "{path} is in the workspace's commit"
+        );
+    }
+    assert!(!row.divergent, "the change has not diverged");
+    assert_eq!(row.attention(), Attention::Unspecified);
+}
+
+// Issues #368, #374: someone puts a git branch on the agent's last
+// snapshot and deletes it again. Reef's own import of git refs before its
+// next write keeps the snapshot's commit, which the workspace is on, so
+// the workspace stays on it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_clean_workspace_stays_on_its_commit_over_reefs_import_of_a_deleted_branch() {
+    let (daemon, repo) = colocated_fixture().await;
+    let (ws, _hold, [_, last]) = snapshotted_twice(&daemon, &repo).await;
+    on_a_deleted_branch(&daemon, &repo, &last).await;
+
+    daemon
+        .client
+        .snapshot_workspace(&repo.id, &ws.id, "")
+        .await
+        .unwrap();
+    assert_unchanged(&daemon, &repo, &ws, &last, &[]).await;
+}
+
+// Issues #368, #374: the same with an edit since the last snapshot, which
+// the next snapshot adds to the change.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_busy_workspace_stays_on_its_change_over_reefs_import_of_a_deleted_branch() {
+    let (daemon, repo) = colocated_fixture().await;
+    let (ws, _hold, [_, last]) = snapshotted_twice(&daemon, &repo).await;
+    write(&ws, "w/three.txt", "three\n");
+    on_a_deleted_branch(&daemon, &repo, &last).await;
+
+    daemon
+        .client
+        .snapshot_workspace(&repo.id, &ws.id, "")
+        .await
+        .unwrap();
+    let now = inspect(&daemon, &repo, &ws).await.commit_id;
+    assert_ne!(now, last, "the edit is snapshotted");
+    assert_unchanged(&daemon, &repo, &ws, &now, &["w/three.txt"]).await;
+}
+
+// Issue #374: a workspace on a change above the agent's. Deleting the git
+// branch on the lower change's snapshot keeps that commit, which the upper
+// change builds on, so the upper workspace keeps the lower change's files
+// and neither workspace moves.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stacked_workspace_keeps_the_change_below_over_reefs_import_of_a_deleted_branch() {
+    let (daemon, repo) = colocated_fixture().await;
+    let (lower, _hold, [_, last]) = snapshotted_twice(&daemon, &repo).await;
+    let upper = create(
+        &daemon,
+        &repo,
+        Some(create_workspace_request::Start::NewOn(last.clone())),
+    )
+    .await;
+    let _hold_upper = daemon
+        .handle
+        .state()
+        .manager
+        .scheduler()
+        .pause(id_of(&upper));
+    write(&upper, "w/b.txt", "b\n");
+    daemon
+        .client
+        .snapshot_workspace(&repo.id, &upper.id, "")
+        .await
+        .unwrap();
+    let above = inspect(&daemon, &repo, &upper).await.commit_id;
+    on_a_deleted_branch(&daemon, &repo, &last).await;
+
+    for ws in [&upper, &lower] {
+        daemon
+            .client
+            .snapshot_workspace(&repo.id, &ws.id, "")
+            .await
+            .unwrap();
+    }
+    assert_unchanged(&daemon, &repo, &upper, &above, &["w/b.txt"]).await;
+    assert_unchanged(&daemon, &repo, &lower, &last, &[]).await;
+}
+
+// Issue #374: the first Reef write after the git branch on the agent's
+// snapshot is deleted runs the import that would abandon it. The describe
+// lands on the agent's change, not on an empty commit the import made.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_first_describe_after_a_deleted_branch_describes_the_agents_change() {
+    let (daemon, repo) = colocated_fixture().await;
+    let (ws, _hold, [_, last]) = snapshotted_twice(&daemon, &repo).await;
+    git(&repo.root, &[], &["branch", "review", &last]);
+    reefs_import(&daemon, &repo).await;
+    git(&repo.root, &[], &["branch", "-D", "review"]);
+
+    daemon
+        .client
+        .describe_change(reef_api::v1::DescribeChangeRequest {
+            workspace: ws.id.clone(),
+            revision: "@".to_owned(),
+            description: "described by the agent".to_owned(),
+            ..reef_api::v1::DescribeChangeRequest::default()
+        })
+        .await
+        .unwrap();
+    let commits = visible_commits(&daemon, &repo, &ws.change_id).await;
+    let [(commit, description)] = commits.as_slice() else {
+        panic!("one visible commit: {commits:?}");
+    };
+    assert_eq!(description.trim_end(), "described by the agent");
+    assert_unchanged(&daemon, &repo, &ws, commit, &[]).await;
 }
 
 /// Asserts that `ws`'s files `w/one.txt` and `w/two.txt`, and any `more`,
@@ -804,42 +949,6 @@ async fn assert_keeps(daemon: &TestDaemon, repo: &SyntheticRepo, ws: &Workspace,
     }
     assert!(row.divergent, "the change says it diverged");
     assert_eq!(row.attention(), Attention::Divergent);
-}
-
-// Issue #368: someone puts a git branch on the agent's last snapshot and
-// deletes it again. Reef's own import of git refs before its next write
-// abandons the snapshot's commit, which git no longer reaches, and puts
-// the workspace on a new empty commit. The import rewrote nothing, so the
-// clean workspace keeps its files and diverges, as it does when the jj CLI
-// imports first.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_clean_workspace_keeps_its_files_over_reefs_import_of_a_deleted_branch() {
-    let (daemon, repo) = colocated_fixture().await;
-    let (ws, _hold, [_, last]) = snapshotted_twice(&daemon, &repo).await;
-    on_a_deleted_branch(&daemon, &repo, &ws, &last).await;
-
-    daemon
-        .client
-        .snapshot_workspace(&repo.id, &ws.id, "")
-        .await
-        .unwrap();
-    assert_keeps(&daemon, &repo, &ws, &[]).await;
-}
-
-// Issue #368: the same with an edit since the last snapshot.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_busy_workspace_keeps_its_files_over_reefs_import_of_a_deleted_branch() {
-    let (daemon, repo) = colocated_fixture().await;
-    let (ws, _hold, [_, last]) = snapshotted_twice(&daemon, &repo).await;
-    write(&ws, "w/three.txt", "three\n");
-    on_a_deleted_branch(&daemon, &repo, &ws, &last).await;
-
-    daemon
-        .client
-        .snapshot_workspace(&repo.id, &ws.id, "")
-        .await
-        .unwrap();
-    assert_keeps(&daemon, &repo, &ws, &["w/three.txt"]).await;
 }
 
 /// `git branch review <last>` at the root, Reef's import, `git branch -f
