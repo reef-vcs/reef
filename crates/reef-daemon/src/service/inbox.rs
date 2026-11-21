@@ -109,10 +109,17 @@ impl InboxHandler {
     }
 
     /// One repository's section, its digest from the page's kept base
-    /// `from` when it has one; any failure to read the repository is its
-    /// `error`, so the other sections still return.
-    async fn section(&self, repo: RepoId, viewer: &Viewer, from: Option<i64>) -> v1::InboxSection {
-        match self.read_section(repo, viewer, from).await {
+    /// `from` when it has one, with `workspaces` its workspaces needing
+    /// attention; any failure to read the repository, or to list the
+    /// workspaces, is its `error`, so the other sections still return.
+    async fn section(
+        &self,
+        repo: RepoId,
+        viewer: &Viewer,
+        from: Option<i64>,
+        workspaces: Result<Vec<v1::Workspace>, Status>,
+    ) -> v1::InboxSection {
+        match self.read_section(repo, viewer, from, workspaces).await {
             Ok(section) => section,
             Err(error) => v1::InboxSection {
                 repo_id: repo.as_hex(),
@@ -130,11 +137,12 @@ impl InboxHandler {
         repo: RepoId,
         viewer: &Viewer,
         from: Option<i64>,
+        workspaces: Result<Vec<v1::Workspace>, Status>,
     ) -> Result<v1::InboxSection, Status> {
         let state = &self.state;
         let hex = repo.as_hex();
+        let workspaces = workspaces?;
         let (base, base_seen) = self.base(repo, viewer, from)?;
-        let workspaces = self.attention(&hex).await?;
         let proposals = self.proposals(&hex).await?;
         let help = self
             .comments(v1::ListCommentsRequest {
@@ -345,10 +353,13 @@ impl InboxHandler {
             .collect())
     }
 
-    /// `repo`'s active workspaces needing attention, page by page.
-    async fn attention(&self, repo: &str) -> Result<Vec<v1::Workspace>, Status> {
+    /// Active workspaces needing attention, by repository, page by page:
+    /// one listing for every section, since each `ListWorkspaces` call also
+    /// sums the machine's disk use. `repo` names the one repository read,
+    /// or is empty for every one.
+    async fn attention(&self, repo: &str) -> Result<HashMap<String, Vec<v1::Workspace>>, Status> {
         let handler = super::workspaces::WorkspacesService::new(Arc::clone(&self.state));
-        let mut workspaces = Vec::new();
+        let mut by_repo: HashMap<String, Vec<v1::Workspace>> = HashMap::new();
         let mut token = String::new();
         loop {
             let page = handler
@@ -361,13 +372,16 @@ impl InboxHandler {
                 }))
                 .await?
                 .into_inner();
-            workspaces.extend(
-                page.workspaces
-                    .into_iter()
-                    .filter(|workspace| workspace.attention() != v1::Attention::Unspecified),
-            );
+            for workspace in page.workspaces {
+                if workspace.attention() != v1::Attention::Unspecified {
+                    by_repo
+                        .entry(workspace.repo_id.clone())
+                        .or_default()
+                        .push(workspace);
+                }
+            }
             if page.next_page_token.is_empty() {
-                return Ok(workspaces);
+                return Ok(by_repo);
             }
             token = page.next_page_token;
         }
@@ -414,9 +428,22 @@ impl InboxService for InboxHandler {
             }
             from.insert(id, i64::try_from(mark.seq).unwrap_or(i64::MAX));
         }
+        // A listing that fails is every section's error, not the read's.
+        let scope = match repos.as_slice() {
+            [one] => one.as_hex(),
+            _ => String::new(),
+        };
+        let mut attention = self.attention(&scope).await;
         let mut sections = Vec::with_capacity(repos.len());
         for repo in repos {
-            sections.push(self.section(repo, &viewer, from.get(&repo).copied()).await);
+            let workspaces = match &mut attention {
+                Ok(by_repo) => Ok(by_repo.remove(&repo.as_hex()).unwrap_or_default()),
+                Err(error) => Err(error.clone()),
+            };
+            sections.push(
+                self.section(repo, &viewer, from.get(&repo).copied(), workspaces)
+                    .await,
+            );
         }
         Ok(Response::new(GetInboxResponse {
             sections,

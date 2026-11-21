@@ -598,6 +598,20 @@ async fn the_mark_moves_forward_only() {
         .await
         .unwrap();
     assert_eq!(stale.sections.len(), 1);
+    // One that is not a repository name at all (not hex) is the request's
+    // error.
+    let malformed = client
+        .get_inbox(GetInboxRequest {
+            digest_from: vec![InboxMark {
+                repo: "zzzz".to_owned(),
+                seq: 3,
+            }],
+            ..GetInboxRequest::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(reason(&malformed).0, Code::InvalidArgument);
+    assert!(malformed.to_string().contains("hex"), "{malformed}");
 }
 
 async fn listening(daemon: &TestDaemon) -> SocketAddr {
