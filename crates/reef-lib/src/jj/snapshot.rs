@@ -1880,7 +1880,8 @@ impl Walk<'_> {
     }
 
     /// Whether `step` is a move of Reef's that kept the workspace's edits
-    /// in their change.
+    /// in their change. An import of git refs counts only when it recorded
+    /// the move as a rewrite ([`origins`]), as in [`came_from`] (#368).
     async fn reefs_move(&self, step: &Move, trail: &mut Trail) -> Result<bool, SnapshotError> {
         let Move { op, was, now, .. } = step;
         let class = super::oplog::classify(&super::oplog::entry(op));
@@ -1902,6 +1903,7 @@ impl Walk<'_> {
                 Some(mover) => !same_change(self.repo, op, &mover, now).await?,
                 None => false,
             },
+            Some(OpKind::ImportRefs) => origins(op, now).contains(was),
             Some(kind) => {
                 trail.undone |= kind == OpKind::Undo;
                 true
