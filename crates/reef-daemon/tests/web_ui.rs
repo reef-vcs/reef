@@ -438,15 +438,20 @@ async fn api_needs_a_session() {
 }
 
 /// The writes the web listener passes (R3.43): passkeys, approvals, and
-/// evidence a passkey approved. Every other WRITE and every ADMIN method is
-/// refused.
-const WEB_WRITES: [&str; 6] = [
+/// evidence a passkey approved; and (R3.31) declines, comments,
+/// instructions' confirms and cancels, and landings. Every other WRITE and
+/// every ADMIN method is refused.
+const WEB_WRITES: [&str; 10] = [
     "/reef.api.v1.IdentityService/StartPasskeyRegistration",
     "/reef.api.v1.IdentityService/RegisterPasskey",
     "/reef.api.v1.IdentityService/RemovePasskey",
     "/reef.api.v1.IdentityService/RequestApproval",
     "/reef.api.v1.IdentityService/ResolveApproval",
     "/reef.api.v1.EvidenceService/AddEvidence",
+    "/reef.api.v1.ChangeService/TransitionChange",
+    "/reef.api.v1.CommentService/CreateComment",
+    "/reef.api.v1.CommentService/UpdateInstruction",
+    "/reef.api.v1.LandingService/LandChange",
 ];
 
 // R3.43 test 10 (R2.18 test 5's `only_read_rpcs` before it): every v1

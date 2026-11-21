@@ -461,6 +461,7 @@ pub(crate) fn carry_row(
         recorded_at: None,
         dependency_change_id: Some(dependency.to_owned()),
         dependency_event: Some(event.as_str().to_owned()),
+        web_session: None,
     }
 }
 

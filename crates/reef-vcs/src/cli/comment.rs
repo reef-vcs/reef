@@ -434,6 +434,9 @@ pub(crate) struct Author {
     /// The remote token the call came through.
     #[serde(skip_serializing_if = "Option::is_none")]
     remote: Option<RemoteCaller>,
+    /// The web UI session the call came through (R3.31).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    web_session: Option<String>,
 }
 
 /// What Reef recorded that predicts an instruction's cost. Model tokens
@@ -637,6 +640,7 @@ impl From<&v1::Comment> for Comment {
                     token_id: remote.token_id.clone(),
                     token_name: remote.token_name.clone(),
                 }),
+                web_session: json::web_caller(author.web.as_ref()),
             }),
             created_at: time(comment.created_at.as_ref()),
             operation_id: text(&comment.operation_id),
@@ -1060,8 +1064,8 @@ async fn answer(ctx: &Ctx, args: AnswerArgs) -> Result<(), CliError> {
 async fn withdraw(ctx: &Ctx, args: MessageArgs) -> Result<(), CliError> {
     let scope = scope::resolve(ctx, &args.scope).await?;
     let advice = AdviceCtx::new(&scope);
-    let response = ctx
-        .call(
+    let response = Box::pin(
+        ctx.call(
             ctx.client
                 .withdraw_help_request(WithdrawHelpRequestRequest {
                     repo: scope.repo_id.clone(),
@@ -1069,9 +1073,10 @@ async fn withdraw(ctx: &Ctx, args: MessageArgs) -> Result<(), CliError> {
                     summary: args.message.unwrap_or_default(),
                     workspace: scope.workspace_id(),
                 }),
-        )
-        .await
-        .map_err(|error| advice.refine(error))?;
+        ),
+    )
+    .await
+    .map_err(|error| advice.refine(error))?;
     let comment = Comment::from(&response.comment.unwrap_or_default());
     if response.operation.is_none() {
         ctx.out.note("reef: already withdrawn; nothing recorded");

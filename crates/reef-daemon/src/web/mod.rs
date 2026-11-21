@@ -120,6 +120,14 @@ pub enum WebError {
         /// `write`, `admin` or `unknown`.
         access: &'static str,
     },
+    /// A web listener write its allowlist row's rule refuses (R3.31).
+    #[error("through the web UI, {method} is allowed only by its rule {rule}")]
+    RuleDenied {
+        /// The method's path.
+        method: String,
+        /// The rule, by its name in `web/rules.rs`.
+        rule: &'static str,
+    },
     /// A `CreateWebSession` path that is not one (R3.43).
     #[error("{path:?} is not a path of the web UI")]
     InvalidPath {
@@ -134,7 +142,9 @@ impl Classify for WebError {
             Self::Disabled | Self::NotBuilt => ErrorKind::Conflict,
             Self::Unavailable { .. } => ErrorKind::Unavailable,
             Self::LaunchFile { .. } => ErrorKind::Internal,
-            Self::SessionInvalid | Self::AccessDenied { .. } => ErrorKind::PermissionDenied,
+            Self::SessionInvalid | Self::AccessDenied { .. } | Self::RuleDenied { .. } => {
+                ErrorKind::PermissionDenied
+            }
             Self::InvalidPath { .. } => ErrorKind::InvalidArgument,
         }
     }
@@ -157,8 +167,25 @@ impl Advise for WebError {
                 ["reef", "ui"],
             )),
             Self::AccessDenied { .. } => Some(Advice::hint(
-                "The web UI serves read RPCs and an allowlist of writes (passkeys, approvals, and evidence a passkey approved); use the CLI for this.",
+                "The web UI serves read RPCs and an allowlist of writes (passkeys, approvals, evidence a passkey approved, declines, comments and landings); use the CLI for this.",
             )),
+            Self::RuleDenied { rule, .. } => Some(Advice::hint(match *rule {
+                "decline" => {
+                    "Through the web UI a transition only declines, by a person, at the commit the page showed (`expected_commit_id`), naming no workspace; use the CLI for anything else."
+                }
+                "comment" => {
+                    "Through the web UI a comment is a person's note, instruction or answer: no help request, no confirm in the same call (confirm after its estimate), and no workspace or client session; use the CLI for anything else."
+                }
+                "confirm" => {
+                    "Through the web UI an instruction is only confirmed or cancelled; the session that claimed it releases, starts or finishes it."
+                }
+                "land" => {
+                    "Through the web UI a landing is asked for by a person, at the commit the page showed (`expected_commit_id`), naming no workspace; use the CLI for anything else."
+                }
+                _ => {
+                    "The web UI allows this write only under its rule in web/rules.rs; use the CLI."
+                }
+            })),
             Self::InvalidPath { .. } => Some(Advice::hint(
                 "Give a path of the web UI starting with /, of letters, digits and /._-, such as /approve/apr_0123456789abcdef, or none.",
             )),

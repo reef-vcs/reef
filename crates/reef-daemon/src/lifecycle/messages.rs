@@ -186,6 +186,7 @@ pub fn transition_message(row: &TransitionRow) -> v1::ChangeTransition {
             row.dependency_event.as_deref().unwrap_or_default(),
         )
         .map(Box::new),
+        web: web_caller(row.web_session.as_deref()),
     }
 }
 
@@ -345,4 +346,11 @@ fn lookup(
         }
     }
     Ok(found)
+}
+
+/// The web UI session a row recorded (R3.31), as a message.
+pub(crate) fn web_caller(session: Option<&str>) -> Option<v1::WebCaller> {
+    session.map(|session| v1::WebCaller {
+        session: session.to_owned(),
+    })
 }

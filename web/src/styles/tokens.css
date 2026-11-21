@@ -69,6 +69,8 @@
   --brand-strong: #086070;
   --brand-tint: #e3f4f5;
   --on-brand: #ffffff;
+  --diff-added: #e6f4ea;
+  --diff-removed: #fbe9e7;
   --coral: #e8735a;
   --ocean: #0c2b3a;
   --on-ocean: #ffffff;
@@ -132,6 +134,8 @@
     --brand-strong: #7ad6dc;
     --brand-tint: #17323a;
     --on-brand: #0c2b3a;
+    --diff-added: #1b2e22;
+    --diff-removed: #33201f;
     --coral: #f2937c;
     --ocean: #0a1e29;
     --on-ocean: #ffffff;
@@ -195,6 +199,8 @@
   --brand-strong: #7ad6dc;
   --brand-tint: #17323a;
   --on-brand: #0c2b3a;
+  --diff-added: #1b2e22;
+  --diff-removed: #33201f;
   --coral: #f2937c;
   --ocean: #0a1e29;
   --on-ocean: #ffffff;

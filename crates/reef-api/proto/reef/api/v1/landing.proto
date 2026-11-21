@@ -85,8 +85,14 @@ service LandingService {
   // a member below the revision declined or withdrawn at its current
   // commit, R3.11), PROPOSAL_AMENDED (metadata `change_id`, `commit_id`,
   // `visible_commit_id`; a dependent whose own diff is unchanged is carried
-  // first, R3.11), STACK_DESTINATION_MISMATCH (metadata `change_id`,
-  // `destination`), STACK_TOO_LARGE (metadata `size`, `max`),
+  // first, R3.11), VERIFIED_SIGNOFF_REQUIRED (metadata `missing`:
+  // `pin`, `touch` or `pinned_touch`, `change_id`, `commit_id`, `tree_id`,
+  // `destination`, and with `pin`, `policy`: `no_policy`, `invalid_policy`
+  // or `no_pins`; through the web UI only, R3.31: no `signoff`/`pass` is
+  // on the tree of the commit asked for by a person's key that a live
+  // passkey the destination's `[passkeys]` pins approved),
+  // STACK_DESTINATION_MISMATCH (metadata
+  // `change_id`, `destination`), STACK_TOO_LARGE (metadata `size`, `max`),
   // DESTINATION_NOT_LOCAL, DESTINATION_NOT_FOUND or DESTINATION_CONFLICTED
   // (metadata `destination`); UNAVAILABLE with reason QUEUE_FULL (metadata
   // `max`); INVALID_ARGUMENT with reason INVALID_WAIT (metadata `max`); a
@@ -332,6 +338,8 @@ message Landing {
   // The landing id of the stack's head in the request that made this one
   // (R3.10); empty for a change landed alone.
   string stack = 23;
+  // The web UI session that asked (R3.31); unset for any other call.
+  WebCaller web = 24;
 }
 
 // Whether a destination's landed history is on its git remote (R3.17).

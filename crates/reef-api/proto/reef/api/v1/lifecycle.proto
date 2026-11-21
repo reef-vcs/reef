@@ -184,6 +184,9 @@ message ChangeTransition {
   RemoteCaller remote = 20;
   // For cause DEPENDENCY, the change below that moved (R3.11).
   TransitionDependency dependency = 21;
+  // The web UI session the call came through (R3.31); unset for any other
+  // call.
+  WebCaller web = 22;
 }
 
 // A change's lifecycle as of a read.

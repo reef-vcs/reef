@@ -163,6 +163,7 @@ pub fn landing_message(landing: &StoredLanding, whole: bool) -> v1::Landing {
             token_id: token.clone(),
             token_name: row.remote_token_name.clone().unwrap_or_default(),
         }),
+        web: crate::lifecycle::messages::web_caller(row.web_session.as_deref()),
         created_at: Some(timestamp(row.created_at)),
         finished_at: row.finished_at.map(timestamp),
         batch_id: row.batch_id.clone().unwrap_or_default(),

@@ -161,6 +161,7 @@ The Passkeys page, linked from the web UI's Settings panel, lists each person id
 - **The first passkey is trusted on first use.** Any web UI session can add an identity's first passkey. The daemon's registration challenge is single use, valid for 5 minutes, and only for the web UI session that started it.
 - **Every later add, and every removal, needs an existing passkey.** The daemon refuses one without a user-verified assertion by one of the identity's live passkeys (`PASSKEY_REQUIRED`), so the page asks for a touch on an existing passkey first. Removing a passkey leaves the keys it certified as they are. An approval that is being checked when its passkey is removed or reset certifies no key: it is refused (`PASSKEY_ASSERTION_INVALID`, check `passkey`) and stays pending.
 - **A reset is the way back.** `reef identity passkey reset IDENTITY` removes every live passkey of the identity and revokes every unexpired key any of its passkeys certified, removed ones included, from now, in one step. Use it when a passkey is lost, or when one is listed that you did not add. It runs on the socket only, and the daemon logs it as a warning. The next passkey is the first again.
+- **A removed or reset passkey never comes back.** Its credential id and its public key are never registered again (`PASSKEY_EXISTS`), so a pin of it counts for nothing from then on. To keep using the authenticator, add a new passkey on it, which has a new key, and pin its line in place of the old one.
 - Registration and removal need a browser: on the socket they are `PASSKEY_NEEDS_WEB`, and through the remote listener `PASSKEY_OVER_REMOTE`.
 - An identity holds at most 32 live passkeys. A label is 1 to 64 bytes. A passkey is ES256, EdDSA or RS256; any other algorithm is `PASSKEY_ALGORITHM`.
 
@@ -176,6 +177,8 @@ alice = ["3c9e0d5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f"]
 ```
 
 On the Passkeys page, **Confirm a passkey to pin** asks your authenticator for a touch, checks it against the key Reef holds, and **Copy policy snippet** copies the line for the passkeys it confirmed, with each fingerprint computed from the key the touch verified. This holds only on the daemon's own page: open it yourself, with `reef ui` or `reef identity passkey add` from your own terminal. A page on another `localhost` port can look the same and show an agent's fingerprint, and with the default `[ui] listen` port 0 the port changes at every start, so the address bar gives no cue (S-255). `reef identity passkey list` prints the line with every live passkey. A change to the policy file needs `[owners]`' sign-off; with `presence = "user_verified"` in `[owners]`, that takes an owner's pinned passkey, so an agent cannot change the pins. [docs/policy.md](policy.md#pinned-passkeys) has the rules.
+
+The web UI lands a change only with a pinned passkey's sign-off: **Accept** on a proposal page lands on a destination whose policy pins the passkey you touch, and is refused there until one is pinned (`VERIFIED_SIGNOFF_REQUIRED`, `missing` `pin`), whatever else the policy asks ([proposals](proposals.md#reviewing-in-the-web-ui)). Pinning is how a destination takes landings from the web UI at all.
 
 ### Approving a sign-off
 

@@ -1102,6 +1102,10 @@ fn state_of(comment: &v1::Comment) -> (S, InstructionCause) {
 
 // 10.
 #[tokio::test(flavor = "multi_thread")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scenario, with the rows it writes by hand"
+)]
 async fn crash_between_row_and_operation() {
     let (daemon, repo) = fixture().await;
     let (_, change) = setup(&daemon.client, &repo.id).await;
@@ -1135,6 +1139,7 @@ async fn crash_between_row_and_operation() {
         instruction: None,
         help: None,
         updated_at: reef_daemon::model::Timestamp::now(),
+        web_session: None,
     };
     let event = |id: &str, comment: &str| reef_daemon::db::CommentEventRow {
         id: id.to_owned(),
@@ -1465,6 +1470,7 @@ async fn reconcile_after_a_lost_notice() {
         recorded_at: None,
         dependency_change_id: None,
         dependency_event: None,
+        web_session: None,
     };
     daemon
         .handle

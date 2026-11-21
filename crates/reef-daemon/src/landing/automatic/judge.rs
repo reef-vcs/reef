@@ -95,6 +95,7 @@ impl Judging<'_> {
             agent: Some(AGENT.to_owned()),
             remote: None,
             automatic_key: Some(self.key.to_owned()),
+            needs_touch: false,
         })
     }
 

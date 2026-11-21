@@ -250,6 +250,8 @@ const PAGES: &[&str] = &[
     "src/views/States.tsx",
     "src/views/Passkeys.tsx",
     "src/views/Approve.tsx",
+    "src/views/Proposals.tsx",
+    "src/views/Proposal.tsx",
 ];
 
 /// The chunks a route loads: the entry, each lazy chunk on its way (the
@@ -349,6 +351,14 @@ fn bundle_budget() {
         ("/states", &["src/views/States.tsx"]),
         ("/passkeys", &["src/views/Passkeys.tsx"]),
         ("/approve/<id>", &["src/views/Approve.tsx"]),
+        (
+            "/repos/<id>/proposals",
+            &["src/views/RepoFrame.tsx", "src/views/Proposals.tsx"],
+        ),
+        (
+            "/repos/<id>/proposals/<change>",
+            &["src/views/RepoFrame.tsx", "src/views/Proposal.tsx"],
+        ),
     ];
     for (route, lazy) in routes {
         let bytes: usize = route_files(&manifest, lazy)

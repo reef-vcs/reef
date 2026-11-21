@@ -24,6 +24,7 @@ mod history;
 pub(crate) mod instruct;
 pub mod messages;
 pub(crate) mod push;
+mod touch;
 mod worker;
 
 use std::collections::{HashMap, HashSet};
@@ -36,7 +37,7 @@ use reef_lib::error::{Classify, ErrorChain, ErrorKind};
 use reef_lib::jj::land::{self, LandError, LandTarget, Preview};
 use reef_lib::jj::lifecycle::{LifecycleState, TransitionCause};
 use reef_lib::jj::log::{ChangeInfo, Describer};
-use reef_lib::jj::oplog::{self, OpMeta, RemoteToken};
+use reef_lib::jj::oplog::{self, OpMeta};
 use reef_lib::jj::revset::{self, RevisionError, RevsetScope};
 use reef_lib::jj::rewrite::{self, RewriteError};
 use reef_lib::jj::{ChangeIdHex, CommitIdHex, OpKind, OperationIdHex, files};
@@ -242,6 +243,10 @@ pub enum LandingError {
         /// (R3.10).
         head: Option<String>,
     },
+    /// Through the web UI, the commit's tree carries no sign-off approved
+    /// by a live passkey the destination's policy pins (R3.31, `touch`).
+    #[error("{0}")]
+    VerifiedSignoffRequired(Box<touch::Untouched>),
     /// The destination is a remote bookmark.
     #[error("{0:?} is not a local bookmark; the landing service lands on local bookmarks")]
     DestinationNotLocal(String),
@@ -331,6 +336,7 @@ impl Classify for LandingError {
             Self::DependencyLeftReview { .. }
             | Self::NotProposed { .. }
             | Self::Amended { .. }
+            | Self::VerifiedSignoffRequired(_)
             | Self::DestinationNotLocal(_)
             | Self::DestinationNotFound(_)
             | Self::DestinationConflicted(_)
@@ -409,6 +415,7 @@ impl Advise for LandingError {
                     head.as_deref().unwrap_or(change.as_str()),
                 ],
             )),
+            Self::VerifiedSignoffRequired(untouched) => Some(untouched.advice()),
             Self::DestinationNotLocal(name) => {
                 let local = name.split('@').next().unwrap_or(name);
                 Some(Advice::hint(format!(
@@ -489,6 +496,7 @@ impl LandingError {
                     ("visible_commit_id", visible.clone()),
                 ],
             ),
+            Self::VerifiedSignoffRequired(untouched) => untouched.reason(),
             Self::DestinationNotLocal(name) => (
                 reason::DESTINATION_NOT_LOCAL,
                 vec![("destination", name.clone())],
@@ -578,6 +586,10 @@ pub struct LandRequest {
     /// The automatic service's evaluation key, when it is the one asking
     /// (R3.45): stored on the rows it queues.
     pub automatic_key: Option<String>,
+    /// Asked for through the web UI (R3.31): refused unless the tree of the
+    /// commit asked for carries a sign-off approved by a live passkey the
+    /// destination's policy pins (`touch`).
+    pub needs_touch: bool,
 }
 
 /// What [`land_change`] did.
@@ -603,6 +615,8 @@ pub(crate) struct Requester {
     pub(crate) identity_name: Option<String>,
     pub(crate) session_id: Option<String>,
     pub(crate) remote: Option<(String, String)>,
+    /// The web UI session it came through (R3.31).
+    pub(crate) web: Option<String>,
     /// The agent as sent, still marked with its remote token, for
     /// `reef.agent`.
     pub(crate) marked: Option<String>,
@@ -1118,13 +1132,7 @@ pub(crate) fn decision_text(decision: Decision) -> &'static str {
 
 /// Who `request` is, as a landing records it.
 fn requester(state: &AppState, request: &LandRequest) -> Requester {
-    let (agent, remote_name) = match request.agent.as_deref() {
-        Some(marked) => {
-            let (agent, token) = RemoteToken::unmark(marked);
-            (Some(agent.to_owned()), token.map(|token| token.name))
-        }
-        None => (None, None),
-    };
+    let (agent, remote_name, web) = crate::lifecycle::caller_parts(request.agent.as_deref());
     let actor = if request.remote.is_some() {
         Actor::Agent
     } else {
@@ -1147,6 +1155,7 @@ fn requester(state: &AppState, request: &LandRequest) -> Requester {
         identity_name,
         session_id,
         remote,
+        web,
         marked: request.agent.clone().or_else(|| {
             request
                 .workspace
@@ -1179,6 +1188,7 @@ pub(crate) fn new_row(repo: RepoId, destination: &str, who: &Requester) -> Landi
         identity_name: who.identity_name.clone(),
         remote_token: who.remote.as_ref().map(|(id, _)| id.clone()),
         remote_token_name: who.remote.as_ref().map(|(_, name)| name.clone()),
+        web_session: who.web.clone(),
         created_at: Timestamp::now(),
         finished_at: None,
         batch_id: None,
@@ -1235,6 +1245,7 @@ pub(crate) fn transition_row(
         recorded_at: None,
         dependency_change_id: None,
         dependency_event: None,
+        web_session: who.web.clone(),
     }
 }
 
@@ -1520,6 +1531,9 @@ pub(crate) async fn decide(
     let destination = row.destination.clone().unwrap_or_default();
     if destination.contains('@') {
         return Err(LandingError::DestinationNotLocal(destination));
+    }
+    if request.needs_touch {
+        touch::require(state, repo, &info, &destination).await?;
     }
     let slots = stack_slots(state, repo, &info, &destination).await?;
     let who = requester(state, request);

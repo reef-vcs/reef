@@ -161,6 +161,8 @@ pub struct CommentRow {
     pub help: Option<HelpColumns>,
     /// When the row last changed.
     pub updated_at: Timestamp,
+    /// The web UI session the call came through (R3.31).
+    pub web_session: Option<String>,
 }
 
 /// One comment write, as `comment_events` holds it.
@@ -225,6 +227,8 @@ pub struct CommentEventRow {
     pub created_at: Timestamp,
     /// The operation's end.
     pub recorded_at: Option<Timestamp>,
+    /// The web UI session the call came through (R3.31).
+    pub web_session: Option<String>,
 }
 
 /// Which comments a listing returns: the fields AND, an empty list matches
@@ -273,11 +277,11 @@ const COMMENT_COLUMNS: &str = "repo_id, id, status, change_id, round, commit_id,
      claimed_token, channel, taken, summary, confirmed_at, delivered_at, started_at,
      finished_at, updated_at, help_state, help_reason, help_tried, help_question,
      help_client_session, help_conflict_id, help_assignment_id, help_answer_id, help_cause,
-     help_answered_at, help_closed_at, help_assignment_seq";
+     help_answered_at, help_closed_at, help_assignment_seq, web_session";
 
 /// How many columns [`COMMENT_COLUMNS`] names: the index of a column a query
 /// selects after them.
-const COMMENT_COLUMN_COUNT: usize = 59;
+const COMMENT_COLUMN_COUNT: usize = 60;
 
 /// [`Db::answered_conflict_help_request`]'s query after its columns. The
 /// last entry into BLOCKED is read through
@@ -311,7 +315,7 @@ const EVENT_COLUMNS: &str = "repo_id, id, seq, status, comment_id, change_id, ev
      to_state, cause, transition_id, agent, actor, identity_id, remote_token, summary,
      claimed_client_session, claimed_workspace_id, claimed_agent, claimed_token, channel, taken,
      operation_id, operation_collected, created_at, recorded_at, help_from, help_to,
-     help_answer_id";
+     help_answer_id, web_session";
 
 impl CommentEventRow {
     /// An event of `repo` with every other field empty, written now: the
@@ -347,6 +351,7 @@ impl CommentEventRow {
             operation_collected: false,
             created_at: Timestamp::now(),
             recorded_at: None,
+            web_session: None,
         }
     }
 }
@@ -435,6 +440,7 @@ fn comment_from_row(row: &Row<'_>) -> rusqlite::Result<CommentRow> {
         instruction,
         help,
         updated_at: Timestamp(row.get(46)?),
+        web_session: text_at(row, 59)?,
     })
 }
 
@@ -469,6 +475,7 @@ fn event_from_row(row: &Row<'_>) -> rusqlite::Result<CommentEventRow> {
         help_from: text_at(row, 26)?,
         help_to: text_at(row, 27)?,
         help_answer_id: text_at(row, 28)?,
+        web_session: text_at(row, 29)?,
     })
 }
 
@@ -514,7 +521,7 @@ impl Db {
                      ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21,
                      NULL, 0, NULL, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, NULL, NULL,
                      NULL, NULL, NULL, 0, NULL, ?32, NULL, NULL, NULL, ?21, ?33, ?34, ?35, ?36,
-                     ?37, ?38, ?39, NULL, ?40, NULL, NULL, ?41)"
+                     ?37, ?38, ?39, NULL, ?40, NULL, NULL, ?41, ?42)"
                 ),
                 params![
                     comment.repo_id,
@@ -558,6 +565,7 @@ impl Db {
                     h.and_then(|h| h.assignment_id.clone()),
                     h.map(|h| h.cause.clone()),
                     h.and_then(|h| h.assignment_seq),
+                    comment.web_session,
                 ],
             )?;
             insert_event_in(tx, event)?;
@@ -1422,7 +1430,7 @@ fn insert_event_in(tx: &Transaction<'_>, event: &CommentEventRow) -> Result<(), 
         &format!(
             "INSERT INTO comment_events({EVENT_COLUMNS}) VALUES (?1, ?2, NULL, 'pending', ?3, ?4,
              ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, NULL, 0,
-             ?21, NULL, ?22, ?23, ?24)"
+             ?21, NULL, ?22, ?23, ?24, ?25)"
         ),
         params![
             event.repo_id,
@@ -1449,6 +1457,7 @@ fn insert_event_in(tx: &Transaction<'_>, event: &CommentEventRow) -> Result<(), 
             event.help_from,
             event.help_to,
             event.help_answer_id,
+            event.web_session,
         ],
     )?;
     Ok(())

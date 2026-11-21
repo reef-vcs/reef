@@ -46,7 +46,7 @@ pub use reef::daemon::v0;
 /// The revision of `reef.api.v1` this build serves. It increases by one with
 /// every change to the schema, and [`API_DIGEST`] changes with it; v1 only
 /// grows (ADR 0029). `GetDaemonStatus` reports it.
-pub const API_REVISION: u32 = 42;
+pub const API_REVISION: u32 = 43;
 
 /// blake3 of the v1 descriptors without comments, one per revision, oldest
 /// first: entry `n - 1` is revision `n`'s. A schema change appends one entry
@@ -200,6 +200,9 @@ pub const API_DIGESTS: &[&str] = &[
     // `CreateWebSessionRequest.path`, `PolicyEvaluation.verified` and
     // `PolicyVerifiedSigner`.
     "bbc35d527e6a852e3a50e1c864d085919001e56dfb609a816b921afa324cca93",
+    // R3.31: `web` on `ChangeTransition`, `CommentAuthor`, `Landing` and
+    // `Operation`.
+    "49512924a385f0570d163faf8061ed6da9284a5722e2c4821360764c231d1e5e",
 ];
 
 /// blake3 of the v1 descriptors without comments, as of [`API_REVISION`]:
@@ -635,8 +638,8 @@ pub mod error {
     /// (`type`, `challenge`, `origin`, `rp`, `flags`, `signature`,
     /// `counter` or `passkey`).
     pub const PASSKEY_ASSERTION_INVALID: &str = "PASSKEY_ASSERTION_INVALID";
-    /// A registration of a credential id any passkey had, removed or not,
-    /// or of a live passkey's public key (R3.43). Metadata: `id`.
+    /// A registration of a credential id or a public key any passkey had,
+    /// removed or not (R3.43). Metadata: `id`.
     pub const PASSKEY_EXISTS: &str = "PASSKEY_EXISTS";
     /// No live passkey has the id (R3.43). Metadata: `id`.
     pub const PASSKEY_NOT_FOUND: &str = "PASSKEY_NOT_FOUND";
@@ -862,6 +865,16 @@ pub mod error {
     /// withdrawn at its current commit (R3.11). Metadata: `change_id`,
     /// `state`, `transition_id`.
     pub const DEPENDENCY_LEFT_REVIEW: &str = "DEPENDENCY_LEFT_REVIEW";
+    /// `LandChange` through the web UI of a commit whose tree has no
+    /// `signoff`/`pass` by a person's key approved by a live passkey the
+    /// destination's `[passkeys]` pins for them (R3.31, ADR 0086).
+    /// Metadata: `missing` (`pin`: the destination pins no passkey;
+    /// `touch`: no passkey-verified sign-off; `pinned_touch`: only ones
+    /// whose passkey is unpinned or removed), `change_id`, `commit_id`,
+    /// `tree_id` (empty for a conflicted tree), `destination`, and with
+    /// `pin`, `policy` (`no_policy`, `invalid_policy` or `no_pins`: the
+    /// first two land nothing from a terminal either).
+    pub const VERIFIED_SIGNOFF_REQUIRED: &str = "VERIFIED_SIGNOFF_REQUIRED";
     /// `GetLanding` naming no landing, or a change with none (R3.13).
     /// Metadata: `id` or `change_id`.
     pub const LANDING_NOT_FOUND: &str = "LANDING_NOT_FOUND";

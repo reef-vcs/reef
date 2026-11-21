@@ -62,7 +62,9 @@ impl LandingService for LandingHandler {
         let agent = super::caller_of(&request)?;
         let remote = super::remote_of(&request)
             .map(|caller| (caller.token_id.clone(), caller.token_name.clone()));
+        let web = super::web_of(&request).is_some();
         let request = request.into_inner();
+        crate::web::rules::check_land(web, &request).map_err(status)?;
         let state = &self.state;
         let wait = Duration::from_millis(u64::from(request.wait_ms));
         if wait > crate::landing::MAX_WAIT {
@@ -90,6 +92,7 @@ impl LandingService for LandingHandler {
                 agent: agent.clone(),
                 remote,
                 automatic_key: None,
+                needs_touch: web,
             },
         )
         .await

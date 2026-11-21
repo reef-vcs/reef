@@ -11,8 +11,8 @@ use reef_lib::jj::diff::{ChangeKind, EntryKind, FileDiffInfo, HunkInfo};
 use reef_lib::jj::effects::{ChangeEffectKind, OpEffects};
 use reef_lib::jj::log::{ChangeInfo, EdgeKind, LogNode, SignatureInfo};
 use reef_lib::jj::oplog::{
-    ATTR_AGENT, ATTR_REMOTE_TOKEN, ATTR_REMOTE_TOKEN_NAME, ATTR_SNAPSHOT_KIND, OpClass, OpEntry,
-    OpKind, RemoteToken,
+    self, ATTR_AGENT, ATTR_REMOTE_TOKEN, ATTR_REMOTE_TOKEN_NAME, ATTR_SNAPSHOT_KIND,
+    ATTR_WEB_SESSION, OpClass, OpEntry, OpKind,
 };
 
 use crate::backend::{BackendChoice, BackendKind, DiskUsage};
@@ -383,10 +383,10 @@ pub(super) fn operation(entry: &OpEntry, repo: RepoId, written: Written<'_>) -> 
         None => (String::new(), String::new()),
     };
     let workspace_id = written.workspace.map_or(named, str::to_owned);
-    let agent = entry
-        .attributes
-        .get(ATTR_AGENT)
-        .map_or(RemoteToken::unmark(written.agent).0, String::as_str);
+    let agent = entry.attributes.get(ATTR_AGENT).map_or(
+        oplog::unmark(written.agent).agent.unwrap_or_default(),
+        String::as_str,
+    );
     v1::Operation {
         id: entry.id.to_string(),
         repo_id: repo.as_hex(),
@@ -406,17 +406,23 @@ pub(super) fn operation(entry: &OpEntry, repo: RepoId, written: Written<'_>) -> 
         jj_workspace,
         agent: agent.to_owned(),
         remote: remote_caller(&entry.attributes),
+        web: entry
+            .attributes
+            .get(ATTR_WEB_SESSION)
+            .map(|session| v1::WebCaller {
+                session: session.clone(),
+            }),
         attributes: entry.attributes.clone(),
         effects: None,
         transitions: crate::lifecycle::messages::operation_transitions(entry),
         landing_id: entry
             .attributes
-            .get(reef_lib::jj::oplog::ATTR_LANDING)
+            .get(oplog::ATTR_LANDING)
             .cloned()
             .unwrap_or_default(),
         batch_id: entry
             .attributes
-            .get(reef_lib::jj::oplog::ATTR_BATCH)
+            .get(oplog::ATTR_BATCH)
             .cloned()
             .unwrap_or_default(),
         comments: crate::comments::messages::operation_comments(entry),
@@ -427,6 +433,7 @@ pub(super) fn operation(entry: &OpEntry, repo: RepoId, written: Written<'_>) -> 
 /// An operation the daemon just wrote but could not read back, as a
 /// message: what the RPC that wrote it knows. Effects are unset.
 pub(super) fn unread_operation(id: &str, repo: RepoId, written: Written<'_>) -> v1::Operation {
+    let marked = oplog::unmark(written.agent);
     v1::Operation {
         id: id.to_owned(),
         repo_id: repo.as_hex(),
@@ -437,13 +444,14 @@ pub(super) fn unread_operation(id: &str, repo: RepoId, written: Written<'_>) -> 
             .into(),
         is_snapshot: written.kind == v1::OperationKind::Snapshot,
         workspace_id: written.workspace.unwrap_or_default().to_owned(),
-        agent: RemoteToken::unmark(written.agent).0.to_owned(),
-        remote: RemoteToken::unmark(written.agent)
-            .1
-            .map(|token| v1::RemoteCaller {
-                token_id: token.id,
-                token_name: token.name,
-            }),
+        agent: marked.agent.unwrap_or_default().to_owned(),
+        remote: marked.remote.map(|token| v1::RemoteCaller {
+            token_id: token.id,
+            token_name: token.name,
+        }),
+        web: marked.web.map(|session| v1::WebCaller {
+            session: session.to_owned(),
+        }),
         ..v1::Operation::default()
     }
 }
@@ -733,17 +741,23 @@ pub(super) fn listed_operation(
         jj_workspace,
         agent: agent.to_owned(),
         remote: remote_caller(&entry.attributes),
+        web: entry
+            .attributes
+            .get(ATTR_WEB_SESSION)
+            .map(|session| v1::WebCaller {
+                session: session.clone(),
+            }),
         attributes: entry.attributes.clone(),
         effects: None,
         transitions: crate::lifecycle::messages::operation_transitions(entry),
         landing_id: entry
             .attributes
-            .get(reef_lib::jj::oplog::ATTR_LANDING)
+            .get(oplog::ATTR_LANDING)
             .cloned()
             .unwrap_or_default(),
         batch_id: entry
             .attributes
-            .get(reef_lib::jj::oplog::ATTR_BATCH)
+            .get(oplog::ATTR_BATCH)
             .cloned()
             .unwrap_or_default(),
         comments: crate::comments::messages::operation_comments(entry),

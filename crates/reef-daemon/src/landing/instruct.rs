@@ -200,6 +200,7 @@ pub(crate) async fn write(
         remote: None,
         help: None,
         client_session: String::new(),
+        web: false,
     };
     match comments::create(state, request).await {
         Ok(written) => {

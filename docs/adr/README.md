@@ -97,4 +97,5 @@ This index is maintained by hand. Every PR that adds an ADR or changes a status 
 | [0083](0083-help-requests.md) | Help requests from agents | accepted |
 | [0084](0084-dependent-change-lifecycle.md) | Dependent change lifecycle | accepted |
 | [0085](0085-verified-human-presence.md) | Verified human presence: passkeys, pinned by policy, one touch per sign-off | accepted |
+| [0086](0086-reviewing-from-the-web-ui.md) | Reviewing from the web UI: the proposal view's writes and their record | accepted |
 | [0087](0087-adopting-only-what-came-from-the-last-snapshot.md) | Adopting only what came from the last snapshot | accepted |

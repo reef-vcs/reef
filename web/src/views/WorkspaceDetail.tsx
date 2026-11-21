@@ -3,7 +3,11 @@
 // until that answers; at an operation, `GetWorkspace` at it, without disk.
 // All text is plain text: nothing from the API is rendered as HTML.
 import { timestampFromMs } from "@bufbuild/protobuf/wkt";
-import { ChangeStep } from "../gen/reef/api/v1/lifecycle_pb";
+import {
+  ChangeStep,
+  LifecycleState,
+  type MissingDependency as Missing,
+} from "../gen/reef/api/v1/lifecycle_pb";
 import type { Presence } from "../gen/reef/api/v1/presence_pb";
 import {
   Backend,
@@ -39,6 +43,7 @@ import {
   ENDING_WORDS,
   type LeaseView,
 } from "./fleet-rows";
+import { proposalHref } from "./proposal-route";
 import { smartlogHref } from "./smartlog-route";
 
 /** What the workspace's change needs next (#262, ADR 0080), in people's words. */
@@ -57,6 +62,32 @@ const STEP_WORDS: Record<ChangeStep, string> = {
   [ChangeStep.ASK]: "ask a person: its conflict waits for their go-ahead",
   [ChangeStep.DEPENDENCY]: "move it off a change below that was declined or withdrawn",
 };
+
+const SAFE_REF = /^[A-Za-z0-9._:/-]+$/;
+
+/** The change below that left review (R3.11, #350), and the command that moves off it. */
+function MissingDependency({ repo, missing }: { repo: string; missing: Missing }) {
+  const word = missing.state === LifecycleState.WITHDRAWN ? "withdrawn" : "declined";
+  // The destination is a bookmark name an agent chose: only a plain one goes
+  // into a command to copy, as the daemon's own message does (S-246).
+  const onto = /^[0-9a-f]{32}$/.test(missing.moveOnto)
+    ? shortId(reverseHex(missing.moveOnto))
+    : SAFE_REF.test(missing.moveOnto)
+      ? missing.moveOnto
+      : "<destination>";
+  const command = `reef rebase ${shortId(reverseHex(missing.moveChangeId))} --source --onto ${onto}`;
+  return (
+    <p>
+      The change below it,{" "}
+      <Link to={proposalHref({ repo, change: missing.changeId })}>
+        <span className="mono">{shortId(reverseHex(missing.changeId))}</span>
+      </Link>
+      , was {word}
+      {missing.transition?.reason ? `: ${missing.transition.reason}` : ""}. Move off it with{" "}
+      <code>{command}</code> <Copy text={command} />
+    </p>
+  );
+}
 
 const PATHS_SHOWN = 20;
 const ENDINGS_SHOWN = 10;
@@ -367,6 +398,9 @@ export function WorkspaceDetail({
           </p>
           {response.workspace && response.workspace.step !== ChangeStep.UNSPECIFIED && (
             <p>Next step: {STEP_WORDS[response.workspace.step]}.</p>
+          )}
+          {response.workspace?.missingDependency && (
+            <MissingDependency repo={repo} missing={response.workspace.missingDependency} />
           )}
           {(response.workspace?.behindTrunk ?? 0) > 0 && (
             <p>

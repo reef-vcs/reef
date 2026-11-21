@@ -62,6 +62,8 @@ pub struct LandingRow {
     pub remote_token: Option<String>,
     /// Its name then.
     pub remote_token_name: Option<String>,
+    /// The web UI session that asked (R3.31).
+    pub web_session: Option<String>,
     /// When it was asked for.
     pub created_at: Timestamp,
     /// When it finished.
@@ -154,7 +156,7 @@ const COLUMNS: &str = "repo_id, id, destination, destination_before, destination
      reason, message, policy_commit, policy_blob, policy_sha256, attempts, enqueue_operation_id,
      operation_id, operation_collected, agent, actor, identity_name, remote_token,
      remote_token_name, created_at, finished_at, batch_id, history, pushed_at, push_operation_id,
-     stack, stack_position, automatic_key";
+     stack, stack_position, automatic_key, web_session";
 
 const CHANGE_COLUMNS: &str = "position, change_id, queued_commit, queued_tree, landed_commit,
      landed_tree, rebased, overlap, conflicts, decision, evaluation, evaluation_sha256,
@@ -193,6 +195,7 @@ fn landing_from_row(row: &Row<'_>) -> rusqlite::Result<LandingRow> {
             .get::<_, Option<i64>>(27)?
             .and_then(|position| u32::try_from(position).ok()),
         automatic_key: row.get(28)?,
+        web_session: row.get(29)?,
     })
 }
 
@@ -225,7 +228,7 @@ fn write_landing_in(tx: &Transaction<'_>, row: &LandingRow) -> rusqlite::Result<
         &format!(
             "INSERT OR REPLACE INTO landings({COLUMNS})
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-                     ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29)"
+                     ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30)"
         ),
         params![
             row.repo_id,
@@ -257,6 +260,7 @@ fn write_landing_in(tx: &Transaction<'_>, row: &LandingRow) -> rusqlite::Result<
             row.stack,
             row.stack_position.map(i64::from),
             row.automatic_key,
+            row.web_session,
         ],
     )?;
     Ok(())

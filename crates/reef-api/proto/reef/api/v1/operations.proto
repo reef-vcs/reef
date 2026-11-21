@@ -280,6 +280,9 @@ message Operation {
   // operations. Each carries what the attribute holds (see
   // ConflictAssignmentEvent); GetConflictAssignment has the rest.
   repeated ConflictAssignmentEvent conflict_events = 22;
+  // Who caused it through the web UI's listener (R3.31): the operation
+  // attribute `reef.web-session`; unset for any other call.
+  WebCaller web = 23;
 }
 
 // What an operation changed, from the difference between its view and its

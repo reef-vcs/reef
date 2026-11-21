@@ -316,11 +316,13 @@ impl ChangeService for ChangesHandler {
         let agent = super::caller_of(&request)?;
         let remote = super::remote_of(&request)
             .map(|caller| (caller.token_id.clone(), caller.token_name.clone()));
+        let web = super::web_of(&request).is_some();
         let request = request.into_inner();
         let state = &self.state;
         let messages = &crate::lifecycle::messages::state_of;
         let to = messages(request.to)
             .ok_or_else(|| status(crate::lifecycle::LifecycleError::TargetRequired))?;
+        crate::web::rules::check_decline(web, &request).map_err(status)?;
         let target = target(state, &request.repo, &request.workspace)?;
         let mut snapshot = None;
         if !request.skip_snapshot && !request.revision.trim().is_empty() {
