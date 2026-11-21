@@ -2771,6 +2771,12 @@ fn git_at(root: &Path, args: &[&str]) -> String {
     let output = std::process::Command::new("git")
         .args(args)
         .current_dir(root)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_AUTHOR_NAME", "Reef Test")
+        .env("GIT_AUTHOR_EMAIL", "reef-test@example.com")
+        .env("GIT_COMMITTER_NAME", "Reef Test")
+        .env("GIT_COMMITTER_EMAIL", "reef-test@example.com")
         .output()
         .unwrap();
     assert!(
@@ -2872,18 +2878,7 @@ async fn import_abandons_what_only_the_root_checkout_uses() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("colocated");
         std::fs::create_dir(&root).unwrap();
-        let git = |args: &[&str]| {
-            let mut all = vec![
-                "-c",
-                "user.name=T",
-                "-c",
-                "user.email=t@example.com",
-                "-c",
-                "commit.gpgsign=false",
-            ];
-            all.extend_from_slice(args);
-            git_at(&root, &all)
-        };
+        let git = |args: &[&str]| git_at(&root, args);
         git(&["init", "-q", "-b", "main"]);
         write(&root, "base.txt", "base\n");
         git(&["add", "."]);
