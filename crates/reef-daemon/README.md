@@ -21,7 +21,7 @@ The read RPCs (`GetStatus`, `ListChanges`, `GetChange`, `GetDiff`, `ListOperatio
 | `reef: import git refs` | `IMPORT_REFS` |
 | `reef: describe commit <commit id>` | `DESCRIBE` |
 | `reef: abandon commit <commit id>` | `ABANDON` |
-| `reef: undo operation <operation id>`, or `undo: restore to operation <id>` | `UNDO` |
+| `reef: undo operation <operation id>` (the jj CLI's `undo: restore to operation <id>` is `EXTERNAL`, #357) | `UNDO` |
 | `reef: edit commit <commit id>`, `reef: new change on <commit id>` | `EDIT` |
 | `reef: propose change <change id>` (and `withdraw`, `decline`, `supersede`, `land`) | `TRANSITION` |
 | `reef: comment comment <id> on change <change id>` (and `instruct`, `confirm`, `claim`, `start`, `finish`, `cancel`, `release`) | `COMMENT` |

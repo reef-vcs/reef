@@ -665,8 +665,6 @@ const DESCRIBED: [(&str, OpKind); 4] = [
 ];
 /// The description of a ref import before a create.
 const IMPORT_REFS: &str = "reef: import git refs";
-/// The prefix of `reef_lib::jj::undo`'s description.
-const UNDO_PREFIX: &str = "undo: restore to operation ";
 /// The descriptions of the write RPCs (R2.03), each followed by a full
 /// commit or operation id.
 const WRITES: [(&str, OpKind); 31] = [
@@ -750,6 +748,8 @@ fn leading_id(rest: &str) -> Option<String> {
 
 /// Classifies `entry`: by [`ATTR_KIND`], else by the descriptions Reef
 /// writes, else [`OpKind::External`]; the root operation is unclassified.
+/// The jj CLI's `jj undo` is external, though `Repo::undo_last` copies its
+/// description: only [`ATTR_KIND`] says an undo is Reef's (#357).
 pub fn classify(entry: &OpEntry) -> OpClass {
     let workspace_id = entry
         .attributes
@@ -800,9 +800,6 @@ pub fn classify(entry: &OpEntry) -> OpClass {
     }
     if description == IMPORT_REFS {
         return class(OpKind::ImportRefs, None);
-    }
-    if description.starts_with(UNDO_PREFIX) {
-        return class(OpKind::Undo, None);
     }
     for (prefix, kind) in WRITES {
         if description.starts_with(prefix) {

@@ -568,6 +568,90 @@ async fn a_clean_workspace_keeps_its_file_over_an_older_rewrite() {
     );
 }
 
+/// `jj undo --allow-cross-workspace` at the registered root, as the jj CLI
+/// writes it: the view of `op`'s parent restored, described as the jj CLI
+/// describes it, with no `reef.*` attributes.
+async fn jj_undo(repo: &SyntheticRepo, op: &str) {
+    use jj_lib::default_backend_factories::{
+        default_backend_factories, default_working_copy_factories, default_workspace_loader_factory,
+    };
+    use jj_lib::object_id::ObjectId as _;
+    use jj_lib::op_store::OperationId;
+    let (root, op) = (repo.root.clone(), op.to_owned());
+    tokio::task::spawn_blocking(move || {
+        let workspace = default_workspace_loader_factory()
+            .create(&root)
+            .unwrap()
+            .load(
+                &test_settings(),
+                &default_backend_factories(),
+                &default_working_copy_factories(),
+            )
+            .unwrap();
+        let loader = workspace.repo_loader();
+        let head = pollster::block_on(loader.load_at_head(None)).unwrap();
+        let undone =
+            pollster::block_on(loader.load_operation(&OperationId::try_from_hex(&op).unwrap()))
+                .unwrap();
+        let [parent] = undone.parent_ids() else {
+            panic!("undoing a merge");
+        };
+        let parent = pollster::block_on(loader.load_operation(parent)).unwrap();
+        let view = pollster::block_on(parent.view()).unwrap();
+        let mut tx = head.start_transaction();
+        tx.repo_mut().set_view(view.store_view().clone());
+        let description = format!("undo: restore to operation {}", parent.id().hex());
+        pollster::block_on(tx.commit(description)).unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+// Issue #357: the agent writes a file and Reef snapshots it, then someone
+// runs `jj undo` at the root, which undoes that snapshot. The workspace has
+// no edits, but the undo is another client's and rewrote nothing: it keeps
+// its file and diverges.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_clean_workspace_keeps_its_file_over_a_jj_undo() {
+    let (daemon, repo) = fixture().await;
+    let ws = create(&daemon, &repo, None).await;
+    let _hold = daemon.handle.state().manager.scheduler().pause(id_of(&ws));
+    write(&ws, "one.txt", "one\n");
+    daemon
+        .client
+        .snapshot_workspace(&repo.id, &ws.id, "")
+        .await
+        .unwrap();
+    write(&ws, "two.txt", "two\n");
+    let snapshot = daemon
+        .client
+        .snapshot_workspace(&repo.id, &ws.id, "")
+        .await
+        .unwrap();
+    assert!(snapshot.changed);
+    jj_undo(&repo, op_id(snapshot.operation.as_ref())).await;
+
+    daemon
+        .client
+        .snapshot_workspace(&repo.id, &ws.id, "")
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(Path::new(&ws.path).join("two.txt"))
+            .ok()
+            .as_deref(),
+        Some("two\n"),
+        "the file stays on disk"
+    );
+    let row = inspect(&daemon, &repo, &ws).await;
+    assert!(row.divergent, "the change says it diverged");
+    assert_eq!(row.attention(), Attention::Divergent);
+    assert!(
+        tree_has(&repo.root, &row.commit_id, "two.txt").await,
+        "and its commit has the file"
+    );
+}
+
 // 8. The daemon sees the outside operation when it refreshes its head
 // before the scan, so the scan finds the working copy fresh; the
 // `RepoBehind` answer itself (an outside write between refresh and scan)

@@ -49,6 +49,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -1377,7 +1378,7 @@ async fn followed(
         unfinished,
         limit: Some(FOLLOW_LIMIT),
     };
-    let Some(mut moves) = walk.moves().await? else {
+    let Some(Since { ops, mut moves }) = walk.moves().await? else {
         return Ok(None);
     };
     // A merge's rebase is no move of Reef's: no carry leads through it.
@@ -1388,29 +1389,78 @@ async fn followed(
             return Ok(None);
         }
     }
-    let led = leads(&moves, from, repo.view().get_wc_commit_id(name));
+    let led = leads(&ops, &moves, from, repo.view().get_wc_commit_id(name));
     Ok(led.then_some(Followed { base: trail.base }))
 }
 
-/// Whether `moves`, in [`Walk::moves`]' order, lead from `from` to `to`,
-/// each one starting at a commit that `from` or an earlier move reached.
-fn leads(moves: &[Move], from: &CommitId, to: Option<&CommitId>) -> bool {
-    let mut reached = HashSet::from([from]);
-    for step in moves.iter().rev() {
-        if reached.contains(&step.was) {
-            reached.insert(&step.now);
+/// Whether `moves` lead from `from` to `to` through `ops`, the operations
+/// since `from` in [`Walk::moves`]' order: each move starts at `from` or at
+/// a commit that a move in its own operation's history reached. A move on
+/// another branch of the operation graph does not count, whatever the
+/// order puts first: the operation never saw it (#357).
+fn leads(ops: &[Operation], moves: &[Move], from: &CommitId, to: Option<&CommitId>) -> bool {
+    let mut by_op: HashMap<&OperationId, Vec<&Move>> = HashMap::new();
+    for step in moves {
+        by_op.entry(step.op.id()).or_default().push(step);
+    }
+    // Each operation's child that the loop below reaches last: the first in
+    // `ops`. It takes the operation's set, so a run of moves grows one set.
+    let mut last = HashMap::new();
+    for op in ops {
+        for parent in op.parent_ids() {
+            last.entry(parent).or_insert(op.id());
         }
     }
-    to.is_some_and(|to| reached.contains(to))
+    // The commits reached by each operation's end, until its last child.
+    // One before `from` reached `from` only.
+    let before = Rc::new(HashSet::from([from]));
+    let mut reached: HashMap<&OperationId, Rc<HashSet<&CommitId>>> = HashMap::new();
+    for op in ops.iter().rev() {
+        let mut here: Option<Rc<HashSet<&CommitId>>> = None;
+        for parent in op.parent_ids() {
+            let theirs = if last.get(parent) == Some(&op.id()) {
+                reached.remove(parent)
+            } else {
+                reached.get(parent).cloned()
+            };
+            let theirs = theirs.unwrap_or_else(|| Rc::clone(&before));
+            match &mut here {
+                None => here = Some(theirs),
+                Some(here) if !Rc::ptr_eq(here, &theirs) => {
+                    Rc::make_mut(here).extend(theirs.iter().copied());
+                }
+                Some(_) => {}
+            }
+        }
+        let mut here = here.unwrap_or_else(|| Rc::clone(&before));
+        let steps = by_op.get(op.id()).into_iter().flatten();
+        let now: Vec<&CommitId> = steps
+            .filter(|step| here.contains(&step.was))
+            .map(|step| &step.now)
+            .collect();
+        if !now.is_empty() {
+            Rc::make_mut(&mut here).extend(now);
+        }
+        reached.insert(op.id(), here);
+    }
+    let head = ops.first().map_or(&before, |head| &reached[head.id()]);
+    to.is_some_and(|to| head.contains(to))
 }
 
 /// Whether the commit `repo`'s view has for workspace `name` came from
 /// `from`, the commit the workspace last snapshotted (#344): the operations
-/// since `from` moved the workspace there from `from`, whoever wrote them
-/// ([`leads`]). A merge of operation heads that rebased the workspace's
-/// commit made the new one from its predecessor. Checking it out then loses
-/// nothing of the workspace's own: an operation that had `from` rewrote it,
-/// or moved the workspace off it on purpose.
+/// since `from` moved the workspace there from `from` ([`leads`]). A move
+/// another jj client wrote counts only when it rewrote the commit it
+/// started at ([`origins`]), as a describe or a rebase does, and so does a
+/// merge of operation heads that rebased the workspace's commit. Checking
+/// the commit out then follows a decision someone made about `from`: an
+/// operation that had `from` rewrote it (and may have dropped files, as
+/// `jj restore` does), or Reef moved the workspace off it on purpose (an
+/// undo, an abandon, `reef move`).
+///
+/// False for another client's `jj undo`, `jj op restore`, `jj op revert`
+/// or `jj abandon` of `from` (#357): each puts the workspace on a commit made from nothing
+/// of `from`'s, and checking it out would take `from`'s files off disk.
 ///
 /// False for a commit another jj client made from an older commit, having
 /// loaded the head before `from` was written, that the merge of its
@@ -1434,10 +1484,31 @@ async fn came_from(
         unfinished: None,
         limit: None,
     };
-    let Some(moves) = walk.moves().await? else {
+    let Some(Since { ops, mut moves }) = walk.moves().await? else {
         return Ok(false);
     };
-    Ok(leads(&moves, from, repo.view().get_wc_commit_id(name)))
+    moves.retain(|step| reefs(&step.op) || origins(&step.op, &step.now).contains(&step.was));
+    Ok(leads(
+        &ops,
+        &moves,
+        from,
+        repo.view().get_wc_commit_id(name),
+    ))
+}
+
+/// Whether Reef wrote `op` ([`super::oplog::classify`]).
+fn reefs(op: &Operation) -> bool {
+    let class = super::oplog::classify(&super::oplog::entry(op));
+    class.kind.is_some_and(|kind| kind != OpKind::External)
+}
+
+/// The operations since a commit ([`Walk::moves`]), and the moves among
+/// them.
+struct Since {
+    /// Each before every operation in its history: the head first.
+    ops: Vec<Operation>,
+    /// In the order of `ops`.
+    moves: Vec<Move>,
 }
 
 /// An operation that moved the workspace's commit.
@@ -1655,34 +1726,42 @@ async fn merged(
             return Ok(Vec::new());
         }
     }
-    let mut found = op
-        .predecessors_for_commit(&now)
-        .unwrap_or_default()
-        .to_vec();
-    let mut seen = HashSet::new();
-    let mut moves = Vec::new();
+    let moves = origins(op, &now).into_iter().map(|was| Move {
+        op: op.clone(),
+        was,
+        now: now.clone(),
+        merged: true,
+    });
+    Ok(moves.collect())
+}
+
+/// The commits `op` made `now` from: the predecessors jj recorded for it in
+/// `op`, and for a commit `op` wrote and rewrote again into `now`, that
+/// commit's. Empty when `op` did not write `now` as a rewrite: an undo, an
+/// operation restore, or a new commit.
+fn origins(op: &Operation, now: &CommitId) -> HashSet<CommitId> {
+    let mut found = op.predecessors_for_commit(now).unwrap_or_default().to_vec();
+    let (mut seen, mut origins) = (HashSet::new(), HashSet::new());
     while let Some(was) = found.pop() {
         if !seen.insert(was.clone()) {
             continue;
         }
         match op.predecessors_for_commit(&was) {
             Some(earlier) => found.extend_from_slice(earlier),
-            None => moves.push(Move {
-                op: op.clone(),
-                was,
-                now: now.clone(),
-                merged: true,
-            }),
+            None => {
+                origins.insert(was);
+            }
         }
     }
-    Ok(moves)
+    origins
 }
 
 impl Walk<'_> {
-    /// The operations since `from` that moved the workspace's commit, each
-    /// before the moves in its history: those with one parent whose view
-    /// has another commit for it, and the merges whose rebase made the
-    /// workspace's commit ([`merged`]). An operation is since `from` when it is
+    /// The operations since `from`, each before every operation in its
+    /// history, and the moves among them, in the same order: the operations
+    /// with one parent whose view has another commit for the workspace, and
+    /// the merges whose rebase made the workspace's commit ([`merged`]). An
+    /// operation is since `from` when it is
     /// in the head's history and in the history of no operation there
     /// whose view has `from` for the workspace. So an operation of another
     /// client that loaded the head before `from` was written, and committed
@@ -1693,7 +1772,7 @@ impl Walk<'_> {
     /// `limit` of them, the log could not be read back far enough
     /// to know them ([`Walk::read_back`]), or they could not all be put in
     /// order ([`Log::since_in_order`]).
-    async fn moves(&self) -> Result<Option<Vec<Move>>, SnapshotError> {
+    async fn moves(&self) -> Result<Option<Since>, SnapshotError> {
         let mut commits = Commits {
             name: self.name,
             read: HashMap::new(),
@@ -1708,7 +1787,7 @@ impl Walk<'_> {
             return Ok(None);
         };
         let mut moves = Vec::new();
-        for op in since {
+        for op in &since {
             let [parent] = op.parent_ids() else {
                 moves.extend(merged(op, &log, &mut commits).await?);
                 continue;
@@ -1719,7 +1798,7 @@ impl Walk<'_> {
             match (commits.at(parent).await?, commits.at(op).await?) {
                 (was, now) if was == now => {}
                 (Some(was), Some(now)) => moves.push(Move {
-                    op: op.clone(),
+                    op: (*op).clone(),
                     was,
                     now,
                     merged: false,
@@ -1727,7 +1806,8 @@ impl Walk<'_> {
                 _ => return Ok(None),
             }
         }
-        Ok(Some(moves))
+        let ops = since.into_iter().cloned().collect();
+        Ok(Some(Since { ops, moves }))
     }
 
     /// Reads the operation log back from the head until the operations
