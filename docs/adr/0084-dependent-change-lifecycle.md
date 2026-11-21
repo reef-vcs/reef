@@ -3,7 +3,7 @@
 - Status: accepted
 - Date: 2026-11-19
 - Ticket: R3.11 ([brief](../dev-tickets/phase-3/R3.11-dependent-change-lifecycle.md)); fixes [#91](https://github.com/reef-vcs/reef/issues/91) and [#202](https://github.com/reef-vcs/reef/issues/202)
-- Amended by: [0087](0087-adopting-only-what-came-from-the-last-snapshot.md) (the walk's second condition also decides ADR 0018's adopt arm, for every clean, stale snapshot, with no operation limit), [0089](0089-another-clients-undo-keeps-a-workspaces-files.md) (a move counts only when its own operation's history reached its start)
+- Amended by: [0087](0087-adopting-only-what-came-from-the-last-snapshot.md) (the walk's second condition also decides ADR 0018's adopt arm, for every clean, stale snapshot, with no operation limit), [0089](0089-another-clients-undo-keeps-a-workspaces-files.md) (a move counts only when its own operation's history reached its start; since 2026-11-21, a git ref import only where it recorded a rewrite)
 
 ## Context
 
@@ -158,7 +158,7 @@ The regression tests of all six reviews pass against the derived carry with thei
 **What else changes.**
 
 - A daemon restart between a move and the follow no longer diverges the change: the operation log is still there (`a_restart_between_a_move_and_its_follow_still_carries`). One restart still does. A carried snapshot whose check-out failed keeps the tree it scanned in memory only, and a crash before its next snapshot loses that tree. The next snapshot then finds the workspace's own snapshot between its row's commit and the view's, cannot tell which edits that snapshot already took, and diverges. Both commits are kept. A crash between any carried snapshot's commit and its row does the same. [0039](0039-carrying-edits-through-a-write.md) accepted this window, and persisting the tree would need a schema change for it.
-- Any operation Reef writes that moves a workspace within its change is followed, with no code at the writer. That now includes a fetch or a git ref import that rebases a workspace's commit, which diverged a busy workspace before.
+- Any operation Reef writes that moves a workspace within its change is followed, with no code at the writer. That now includes a fetch or a git ref import that rebases a workspace's commit, which diverged a busy workspace before. Since [0089](0089-another-clients-undo-keeps-a-workspaces-files.md)'s amendment of 2026-11-21, a git ref import counts only where it recorded the new commit as a rewrite of the old one.
 - A workspace with unsnapshotted edits that garbage collection of operations separates from its last snapshot diverges, where the slot would still have carried. So does one whose follow comes more than 1,024 operations after the move, counting the operations of other clients beside it. A follow is queued by the move itself, so that takes a workspace whose snapshots fail for that long while the rest of the repository keeps writing. Operations before the move are not counted: a client that loaded the head long before it, and commits beside it, does not make the follow diverge.
 
 ## Consequences
