@@ -1358,7 +1358,9 @@ struct Followed {
 ///
 /// - another jj client's operation, whichever commit a merge then kept;
 /// - Reef's import of git refs that did not record the move as a rewrite
-///   of the commit it left (#368);
+///   of the commit it left (#368), or rebased the workspace's commit off
+///   a commit below that it did not rewrite into the new parent (#380,
+///   [`rewrote`]);
 /// - a merge of operation heads that left the workspace on a commit none
 ///   of the heads had (it rebased the commit over another client's
 ///   rewrite): no move leads to that commit;
@@ -1453,19 +1455,28 @@ fn leads(ops: &[Operation], moves: &[Move], from: &CommitId, to: Option<&CommitI
 /// `from`, the commit the workspace last snapshotted (#344): the operations
 /// since `from` moved the workspace there from `from` ([`leads`]). A move
 /// another jj client wrote, or Reef's import of git refs, counts only when
-/// it rewrote the commit it started at ([`origins`]), as a describe, a
-/// rebase or an import of a git-side amend does, and so does a merge of
-/// operation heads that rebased the workspace's commit. Checking
-/// the commit out then follows a decision someone made about `from`: an
-/// operation that had `from` rewrote it (and may have dropped files, as
-/// `jj restore` does), or Reef moved the workspace off it on purpose (an
-/// undo, an abandon, `reef move`).
+/// it rewrote the commit it started at by a decision about it
+/// ([`rewrote`]), as a describe, a rebase, or an import of a git-side
+/// amend of the commit or of one below it does, and so does a merge of
+/// operation heads that rebased the workspace's commit ([`origins`]).
+/// Checking the commit out then follows a decision someone made about
+/// `from`: an operation that had `from` rewrote it (and may have dropped
+/// files, as `jj restore` does), or Reef moved the workspace off it on
+/// purpose (an undo, an abandon, `reef move`).
 ///
 /// False for another client's `jj undo`, `jj op restore`, `jj op revert`
 /// or `jj abandon` of `from` (#357), and for an import of git refs that
 /// abandoned `from` because git no longer reaches it (#368): each puts the
 /// workspace on a commit made from nothing of `from`'s, and checking it
 /// out would take `from`'s files off disk.
+///
+/// False for the rebase jj gives a workspace stacked above such a move:
+/// another client's abandon, revert or `jj rebase -r` of the change below,
+/// an import that abandoned it because git no longer reaches it (#381),
+/// and an import of a branch moved back to an earlier commit of it (#380).
+/// The rebase is made from `from`, but nobody decided anything about
+/// `from`, and checking it out would take the change below's files off
+/// disk.
 ///
 /// False for a commit another jj client made from an older commit, having
 /// loaded the head before `from` was written, that the merge of its
@@ -1489,13 +1500,26 @@ async fn came_from(
         unfinished: None,
         limit: None,
     };
-    let Some(Since { ops, mut moves }) = walk.moves().await? else {
+    let Some(Since { ops, moves }) = walk.moves().await? else {
         return Ok(false);
     };
-    moves.retain(|step| reef_decided(&step.op) || origins(&step.op, &step.now).contains(&step.was));
+    let mut counted = Vec::with_capacity(moves.len());
+    for step in moves {
+        // A merge's rebase follows rewrites recorded in the heads it merged,
+        // not in the merge: it counts when made from the commit (ADR 0087).
+        let counts = reef_decided(&step.op)
+            || if step.merged {
+                origins(&step.op, &step.now).contains(&step.was)
+            } else {
+                rewrote(repo, &step.op, &step.was, &step.now).await?
+            };
+        if counts {
+            counted.push(step);
+        }
+    }
     Ok(leads(
         &ops,
-        &moves,
+        &counted,
         from,
         repo.view().get_wc_commit_id(name),
     ))
@@ -1764,6 +1788,71 @@ fn origins(op: &Operation, now: &CommitId) -> HashSet<CommitId> {
     origins
 }
 
+/// Whether `op` moved a workspace from `was` to `now` by a decision about
+/// `was` (ADR 0092): it recorded `now` as made from `was` ([`origins`]),
+/// and each parent of `was` that `now` does not have was left on purpose.
+/// Either the parent is still visible after `op`, so `op` moved `was` off
+/// it (a `jj rebase -r` of the workspace's own change), or `op` rewrote
+/// the parent into one of `now`'s and that move counts by this rule too
+/// (a describe, a `jj restore` or a git amend of the change below). A
+/// rebase jj made only because `op` hid the commit below without such a
+/// rewrite is no decision about `was`, and does not count: an abandon or a
+/// revert of the change below, an import of a git branch deleted from it
+/// (#381), or moved back to an earlier commit of it (#380).
+async fn rewrote(
+    repo: &ReadonlyRepo,
+    op: &Operation,
+    was: &CommitId,
+    now: &CommitId,
+) -> Result<bool, SnapshotError> {
+    if !origins(op, now).contains(was) {
+        return Ok(false);
+    }
+    let store = repo.store();
+    let was = store.get_commit_async(was).await?;
+    let now = store.get_commit_async(now).await?;
+    let left: Vec<&CommitId> = was
+        .parent_ids()
+        .iter()
+        .filter(|parent| !now.parent_ids().contains(parent))
+        .collect();
+    if left.is_empty() {
+        return Ok(true);
+    }
+    let view = op.view().await?;
+    for parent in left {
+        if visible(repo, parent, view.heads()).await? {
+            continue;
+        }
+        let mut rewritten = false;
+        for new in now.parent_ids() {
+            rewritten = Box::pin(rewrote(repo, op, parent, new)).await?;
+            if rewritten {
+                break;
+            }
+        }
+        if !rewritten {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Whether `commit` is an ancestor of one of `heads`.
+async fn visible(
+    repo: &ReadonlyRepo,
+    commit: &CommitId,
+    heads: &HashSet<CommitId>,
+) -> Result<bool, SnapshotError> {
+    for head in heads {
+        let ancestor = repo.index().is_ancestor(commit, head).await;
+        if ancestor.map_err(|error| BackendError::Other(error.into()))? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 impl Walk<'_> {
     /// The operations since `from`, each before every operation in its
     /// history, and the moves among them, in the same order: the operations
@@ -1883,7 +1972,8 @@ impl Walk<'_> {
 
     /// Whether `step` is a move of Reef's that kept the workspace's edits
     /// in their change. An import of git refs counts only when it recorded
-    /// the move as a rewrite ([`origins`]), as in [`came_from`] (#368).
+    /// the move as a rewrite by a decision about the commit ([`rewrote`]),
+    /// as in [`came_from`] (#368, #380).
     async fn reefs_move(&self, step: &Move, trail: &mut Trail) -> Result<bool, SnapshotError> {
         let Move { op, was, now, .. } = step;
         let class = super::oplog::classify(&super::oplog::entry(op));
@@ -1905,7 +1995,7 @@ impl Walk<'_> {
                 Some(mover) => !same_change(self.repo, op, &mover, now).await?,
                 None => false,
             },
-            Some(OpKind::ImportRefs) => origins(op, now).contains(was),
+            Some(OpKind::ImportRefs) => rewrote(self.repo, op, was, now).await?,
             Some(kind) => {
                 trail.undone |= kind == OpKind::Undo;
                 true

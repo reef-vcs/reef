@@ -1029,7 +1029,7 @@ fn move_branch_back(root: &Path, [first, _]: &[String; 2]) {
 // commit off it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_stacked_workspace_keeps_the_change_below_over_the_jj_clis_import_of_a_deleted_branch() {
-    stacked_over(Importer::JjCli, delete_branch, false).await;
+    Box::pin(stacked_over(Importer::JjCli, delete_branch, false)).await;
 }
 
 // Issue #380: the git branch on the lower workspace's last snapshot is
@@ -1038,7 +1038,7 @@ async fn a_stacked_workspace_keeps_the_change_below_over_the_jj_clis_import_of_a
 // it, without the last snapshot's file.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_stacked_workspace_keeps_the_change_below_over_reefs_import_of_a_branch_moved_back() {
-    stacked_over(Importer::Reef, move_branch_back, false).await;
+    Box::pin(stacked_over(Importer::Reef, move_branch_back, false)).await;
 }
 
 // Issue #380: the same with an edit in the upper workspace since its
@@ -1046,14 +1046,14 @@ async fn a_stacked_workspace_keeps_the_change_below_over_reefs_import_of_a_branc
 #[tokio::test(flavor = "multi_thread")]
 async fn a_busy_stacked_workspace_keeps_the_change_below_over_reefs_import_of_a_branch_moved_back()
 {
-    stacked_over(Importer::Reef, move_branch_back, true).await;
+    Box::pin(stacked_over(Importer::Reef, move_branch_back, true)).await;
 }
 
 // Issue #380: the same, imported by the jj CLI.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_stacked_workspace_keeps_the_change_below_over_the_jj_clis_import_of_a_branch_moved_back()
 {
-    stacked_over(Importer::JjCli, move_branch_back, false).await;
+    Box::pin(stacked_over(Importer::JjCli, move_branch_back, false)).await;
 }
 
 /// [`stacked`] workspaces, and a git amend of the lower workspace's last
@@ -1084,12 +1084,12 @@ async fn stacked_over_a_git_amend(importer: Importer) {
 // above follows it, whoever imports.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_stacked_workspace_follows_reefs_import_of_a_git_amend_below() {
-    stacked_over_a_git_amend(Importer::Reef).await;
+    Box::pin(stacked_over_a_git_amend(Importer::Reef)).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_stacked_workspace_follows_the_jj_clis_import_of_a_git_amend_below() {
-    stacked_over_a_git_amend(Importer::JjCli).await;
+    Box::pin(stacked_over_a_git_amend(Importer::JjCli)).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
