@@ -46,7 +46,7 @@ pub use reef::daemon::v0;
 /// The revision of `reef.api.v1` this build serves. It increases by one with
 /// every change to the schema, and [`API_DIGEST`] changes with it; v1 only
 /// grows (ADR 0029). `GetDaemonStatus` reports it.
-pub const API_REVISION: u32 = 44;
+pub const API_REVISION: u32 = 45;
 
 /// blake3 of the v1 descriptors without comments, one per revision, oldest
 /// first: entry `n - 1` is revision `n`'s. A schema change appends one entry
@@ -207,6 +207,9 @@ pub const API_DIGESTS: &[&str] = &[
     // `ATTENTION`, `Presence.automatic` and `attention`, and
     // `AutomaticStatus.retrying`.
     "f2a2a405346c251426f6e14fd6c6b3b62b71b03f8a0078710a98948ba9579317",
+    // #372: `InboxService.WatchInbox`, `InboxSectionChange`, `InboxBucket`
+    // and `InboxItem.bucket`.
+    "b492cc28a87971e2dd41becd9dc2842c9d7f941b444c7fa86d74f54640d23bbe",
 ];
 
 /// blake3 of the v1 descriptors without comments, as of [`API_REVISION`]:

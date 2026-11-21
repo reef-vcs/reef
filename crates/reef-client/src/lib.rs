@@ -2014,6 +2014,19 @@ impl Client {
         self.call("GetInbox", client.get_inbox(request)).await
     }
 
+    /// `InboxService.WatchInbox` (#372): the inbox, then every change to
+    /// it. No deadline, as [`Client::subscribe_operations`].
+    pub async fn watch_inbox(
+        &self,
+        request: v1::WatchInboxRequest,
+    ) -> Result<tonic::Streaming<v1::WatchInboxResponse>, ClientError> {
+        let mut client = v1::inbox_service_client::InboxServiceClient::with_interceptor(
+            self.channel.clone(),
+            self.agent.clone(),
+        );
+        self.call("WatchInbox", client.watch_inbox(request)).await
+    }
+
     /// `InboxService.MarkInboxSeen` (R3.33): moves the caller's marks
     /// forward.
     pub async fn mark_inbox_seen(

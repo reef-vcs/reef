@@ -45,6 +45,32 @@ service InboxService {
     option (reef.api.v1.access) = ACCESS_WRITE;
     option idempotency_level = IDEMPOTENT;
   }
+  // The inbox, then every change to it (#372, ADR 0091): the same caller
+  // and `repos` as GetInbox, and with no `repos` every repository,
+  // including one registered after the stream opened.
+  //
+  // The first frames carry every section whole; the frame that completes
+  // them, empty when there is none, has `synced` set, and so has every
+  // later frame. Later frames carry, per repository that changed, the items
+  // that entered or changed and the keys that left, with the section's
+  // state. The daemon reads a repository again when an operation or a
+  // presence entry that can change its inbox is recorded, so a client
+  // needs neither. A client that reads slowly misses intermediate states,
+  // never the latest: each frame is the difference between what this
+  // stream sent and the inbox now. There is no cursor: a new stream's
+  // first frames replace what the client held. A frame holds at most 1,000
+  // items and keys and 1 MiB; an empty frame follows 15 seconds without
+  // one. Read every stream opened on a connection, since they share its
+  // flow control window.
+  //
+  // Errors: as GetInbox for `repos`; UNAVAILABLE with reason
+  // TOO_MANY_SUBSCRIPTIONS (shared with SubscribeOperations), and with no
+  // reason, mid-stream, when the daemon shuts down or the inbox's reader
+  // stopped: subscribe again.
+  rpc WatchInbox(WatchInboxRequest) returns (stream WatchInboxResponse) {
+    option (reef.api.v1.access) = ACCESS_READ;
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
 }
 
 // Read the inbox.
@@ -64,7 +90,8 @@ message GetInboxResponse {
   // One per repository read, in the order read.
   repeated InboxSection sections = 1;
   // The operation kinds whose operations can change an inbox: a client
-  // reads a repository again when one is recorded in it.
+  // reads a repository again when one is recorded in it. WatchInbox does
+  // this for a client that can hold a stream.
   repeated OperationKind refresh_operations = 2;
   // The presence kinds whose entries, new, changed or ended, can change
   // an inbox.
@@ -116,6 +143,16 @@ enum InboxReason {
   INBOX_REASON_IN_FLIGHT = 10;
 }
 
+// Which bucket an item is in.
+enum InboxBucket {
+  // Not set: never a bucket the daemon returns.
+  INBOX_BUCKET_UNSPECIFIED = 0;
+  // What needs the caller now.
+  INBOX_BUCKET_NEEDS_YOU_NOW = 1;
+  // What the caller watches.
+  INBOX_BUCKET_WATCHING = 2;
+}
+
 // One item.
 message InboxItem {
   // `<object>:<repository id>:<object id>`, one per object whatever its
@@ -154,6 +191,9 @@ message InboxItem {
     // A workspace, as ListWorkspaces returns it.
     Workspace workspace = 13;
   }
+  // The bucket it is in, the one its reason places it in: a client of
+  // WatchInbox learns it here.
+  InboxBucket bucket = 14;
 }
 
 // What landed in one repository since a base.
@@ -227,4 +267,44 @@ message MarkInboxSeenRequest {
 message MarkInboxSeenResponse {
   // One per mark asked for, in the same order.
   repeated InboxMark marks = 1;
+}
+
+// Watch the inbox.
+message WatchInboxRequest {
+  // Repositories by id, name or path; empty for every registered one, and
+  // every one registered later. At most 256.
+  repeated string repos = 1;
+}
+
+// One frame of the inbox.
+message WatchInboxResponse {
+  // One per repository that changed, by repository id; a repository's
+  // change too large for one frame continues in the next.
+  repeated InboxSectionChange sections = 1;
+  // True from the frame that completes the first inbox onward.
+  bool synced = 2;
+}
+
+// What changed in one repository's inbox.
+message InboxSectionChange {
+  // The repository.
+  string repo_id = 1;
+  // Items that entered the section's lists or changed, moved to the other
+  // bucket included, each whole, newest first.
+  repeated InboxItem items = 2;
+  // Keys no longer listed: the item left the inbox, or fell past its
+  // bucket's 200 (the totals still count it).
+  repeated string left = 3;
+  // How many need the caller now.
+  uint32 needs_you_now_total = 4;
+  // How many the caller watches.
+  uint32 watching_total = 5;
+  // What landed since the caller's mark, or 24 hours ago for a caller with
+  // no identity. Unset only on a frame `removed` is set on.
+  LandedDigest landed = 6;
+  // Set while the repository fails to read; its items stand as last sent.
+  InboxError error = 7;
+  // The repository is no longer read (it was forgotten): drop the section.
+  // Its items are in `left`, and nothing else is set.
+  bool removed = 8;
 }

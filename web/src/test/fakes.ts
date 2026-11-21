@@ -5,6 +5,11 @@ import { timestampFromMs } from "@bufbuild/protobuf/wkt";
 import { Code, ConnectError, type Transport } from "@connectrpc/connect";
 import type { Connection } from "../api/connection";
 import { DaemonService } from "../gen/reef/api/v1/daemon_pb";
+import {
+  InboxService,
+  WatchInboxResponseSchema,
+  type WatchInboxResponse,
+} from "../gen/reef/api/v1/inbox_pb";
 import { ErrorDetailSchema } from "../gen/reef/api/v1/error_pb";
 import {
   OperationSchema,
@@ -201,6 +206,7 @@ export class FakeStreams {
     stream: Pushable<SubscribeOperationsResponse>;
   }[] = [];
   readonly presenceCalls: Pushable<SubscribePresenceResponse>[] = [];
+  readonly inboxCalls: Pushable<WatchInboxResponse>[] = [];
 
   subscribeOperations = (
     request: Partial<SubscribeOperationsRequest>,
@@ -217,6 +223,17 @@ export class FakeStreams {
   ): Pushable<SubscribePresenceResponse> => {
     const stream = new Pushable<SubscribePresenceResponse>(options.signal);
     this.presenceCalls.push(stream);
+    return stream;
+  };
+
+  /** Each stream starts with an empty inbox, synced, as a daemon with nothing in it sends. */
+  watchInbox = (
+    _request: unknown,
+    options: { signal: AbortSignal | undefined },
+  ): Pushable<WatchInboxResponse> => {
+    const stream = new Pushable<WatchInboxResponse>(options.signal);
+    stream.push(create(WatchInboxResponseSchema, { synced: true }));
+    this.inboxCalls.push(stream);
     return stream;
   };
 
@@ -239,6 +256,7 @@ export class FakeStreams {
       },
       [OperationService.typeName]: { subscribeOperations: this.subscribeOperations },
       [PresenceService.typeName]: { subscribePresence: this.subscribePresence },
+      [InboxService.typeName]: { watchInbox: this.watchInbox },
     };
     for (const [name, methods] of Object.entries(services))
       own[name] = { ...own[name], ...methods };
@@ -249,6 +267,12 @@ export class FakeStreams {
     const call = this.operationCalls.at(-1);
     if (!call) throw new Error("no operation stream is open");
     return call.stream;
+  }
+
+  lastInbox(): Pushable<WatchInboxResponse> {
+    const stream = this.inboxCalls.at(-1);
+    if (!stream) throw new Error("no inbox stream is open");
+    return stream;
   }
 
   lastPresence(): Pushable<SubscribePresenceResponse> {

@@ -617,6 +617,13 @@ async fn outputs_match_their_schemas() {
         needs.iter().filter(|item| item["reason"] == "help").count() >= 3,
         "{inbox}"
     );
+    // `inbox watch` (#372) prints the inbox, then the next help request.
+    script
+        .watch(&c_dir, "json", &["inbox", "watch"], &ask("asker-4"))
+        .await;
+    script
+        .watch(&c_dir, "brief", &["inbox", "watch"], &ask("asker-5"))
+        .await;
     script
         .both(&root, &["comment", "answer", &first_help, "-m", "TOML"])
         .await;

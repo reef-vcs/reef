@@ -626,21 +626,43 @@ impl OperationService for OperationsHandler {
         &self,
         request: Request<SubscribeOperationsRequest>,
     ) -> Result<Response<Self::SubscribeOperationsStream>, Status> {
-        let request = request.into_inner();
+        let subscriptions = &self.state.subscriptions;
+        let max = self.state.config.subscribe.max_subscriptions;
+        self.subscribe_admitted(request.into_inner(), || {
+            subscriptions.admit(max).map_err(status)
+        })
+        .await
+        .map(Response::new)
+    }
+}
+
+/// The repositories a subscription names, each once; `None` follows all.
+fn resolve_named(state: &AppState, repos: &[String]) -> Result<Option<Vec<RepoId>>, Status> {
+    if repos.is_empty() {
+        return Ok(None);
+    }
+    let mut ids = Vec::new();
+    for repo in repos {
+        let id = state.manager.resolve_repo(repo).map_err(status)?.id;
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    Ok(Some(ids))
+}
+
+impl OperationsHandler {
+    /// `SubscribeOperations` in the slot `admit` gives once the request is
+    /// valid, so a request that can never succeed is refused as such
+    /// first: the inbox's board (#372) passes a place it already holds.
+    pub(crate) async fn subscribe_admitted(
+        &self,
+        request: SubscribeOperationsRequest,
+        admit: impl FnOnce() -> Result<crate::subscribe::Slot, Status>,
+    ) -> Result<SubscribeOperationsStream, Status> {
         let state = &self.state;
         let limits = state.config.subscribe.clone();
-        let named = if request.repos.is_empty() {
-            None
-        } else {
-            let mut ids = Vec::new();
-            for repo in &request.repos {
-                let id = state.manager.resolve_repo(repo).map_err(status)?.id;
-                if !ids.contains(&id) {
-                    ids.push(id);
-                }
-            }
-            Some(ids)
-        };
+        let named = resolve_named(state, &request.repos)?;
         let scope = match named.as_deref() {
             Some([only]) => only.as_hex(),
             _ => String::new(),
@@ -650,10 +672,7 @@ impl OperationService for OperationsHandler {
             &scope,
             request.filter.unwrap_or_default(),
         )?);
-        let slot = state
-            .subscriptions
-            .admit(limits.max_subscriptions)
-            .map_err(status)?;
+        let slot = admit()?;
         let (given, after_operation) = match request.start {
             None => (BTreeMap::new(), false),
             Some(StartAt::Cursor(text)) => (cursor::decode(&text).map_err(status)?, false),
@@ -740,8 +759,8 @@ impl OperationService for OperationsHandler {
                 session::spawn(source, limits, state.shutdown.clone(), slot, start)
             }
         };
-        Ok(Response::new(Box::pin(
-            tokio_stream::wrappers::ReceiverStream::new(frames),
+        Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(
+            frames,
         )))
     }
 }
