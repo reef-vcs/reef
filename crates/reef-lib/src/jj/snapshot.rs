@@ -1357,6 +1357,8 @@ struct Followed {
 /// Reef's, and give `None`, ADR 0018's divergence:
 ///
 /// - another jj client's operation, whichever commit a merge then kept;
+/// - Reef's import of git refs that did not record the move as a rewrite
+///   of the commit it left (#368);
 /// - a merge of operation heads that left the workspace on a commit none
 ///   of the heads had (it rebased the commit over another client's
 ///   rewrite): no move leads to that commit;
@@ -1916,7 +1918,8 @@ impl Walk<'_> {
 /// Whether Reef moved workspace `workspace`'s working-copy commit from
 /// `from` to the commit `repo`'s view has for it, read from the operation
 /// log (ADR 0084): every operation since that moved it is one Reef wrote,
-/// and none is another workspace's snapshot of the same change (ADR 0018).
+/// an import of git refs among them only where it recorded a rewrite, and
+/// none is another workspace's snapshot of the same change (ADR 0018).
 /// A snapshot planned on `from` is then recorded on the view's commit
 /// ([`onto_moved`]); [`Repo::begin_snapshot`] asks the same of the commit
 /// its working copy was checked out from.
