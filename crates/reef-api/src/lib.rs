@@ -638,8 +638,8 @@ pub mod error {
     /// (`type`, `challenge`, `origin`, `rp`, `flags`, `signature`,
     /// `counter` or `passkey`).
     pub const PASSKEY_ASSERTION_INVALID: &str = "PASSKEY_ASSERTION_INVALID";
-    /// A registration of a credential id any passkey had, removed or not,
-    /// or of a live passkey's public key (R3.43). Metadata: `id`.
+    /// A registration of a credential id or a public key any passkey had,
+    /// removed or not (R3.43). Metadata: `id`.
     pub const PASSKEY_EXISTS: &str = "PASSKEY_EXISTS";
     /// No live passkey has the id (R3.43). Metadata: `id`.
     pub const PASSKEY_NOT_FOUND: &str = "PASSKEY_NOT_FOUND";
@@ -871,7 +871,9 @@ pub mod error {
     /// Metadata: `missing` (`pin`: the destination pins no passkey;
     /// `touch`: no passkey-verified sign-off; `pinned_touch`: only ones
     /// whose passkey is unpinned or removed), `change_id`, `commit_id`,
-    /// `tree_id` (empty for a conflicted tree), `destination`.
+    /// `tree_id` (empty for a conflicted tree), `destination`, and with
+    /// `pin`, `policy` (`no_policy`, `invalid_policy` or `no_pins`: the
+    /// first two land nothing from a terminal either).
     pub const VERIFIED_SIGNOFF_REQUIRED: &str = "VERIFIED_SIGNOFF_REQUIRED";
     /// `GetLanding` naming no landing, or a change with none (R3.13).
     /// Metadata: `id` or `change_id`.

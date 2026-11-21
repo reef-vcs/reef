@@ -372,8 +372,9 @@ async fn web_decline_and_comment_audited() {
 
     // A landing asked for from the page needs a person's touch on the
     // tree of a passkey the destination pins, so a destination with no
-    // policy takes none (`passkeys::a_web_landing_needs_a_touch` lands one
-    // with Accept's sign-off); the socket's needs none.
+    // policy takes none, and its first policy is committed by hand
+    // (`passkeys::a_web_landing_needs_a_touch` lands one with Accept's
+    // sign-off); the socket's needs none.
     let land = v1::LandChangeRequest {
         repo: repo.id.clone(),
         revision: landed.change_id.clone(),
@@ -382,11 +383,18 @@ async fn web_decline_and_comment_audited() {
         ..v1::LandChangeRequest::default()
     };
     let untouched = page.landing().land_change(land.clone()).await.unwrap_err();
+    let detail = reef_daemon::error::detail_of(&untouched).unwrap();
     assert_eq!(
-        reason(&untouched),
-        "VERIFIED_SIGNOFF_REQUIRED",
+        (
+            detail.reason.as_str(),
+            detail.metadata["missing"].as_str(),
+            detail.metadata["policy"].as_str(),
+        ),
+        ("VERIFIED_SIGNOFF_REQUIRED", "pin", "no_policy"),
         "{untouched:?}"
     );
+    assert_eq!(detail.next, ["reef", "policy", "init"]);
+    assert!(!detail.hint.contains("`reef land "), "{}", detail.hint);
     let landing = client
         .land_change(land)
         .await

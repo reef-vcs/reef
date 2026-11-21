@@ -2123,10 +2123,16 @@ fn web_land(repo: &str, change: &v1::Change) -> LandChangeRequest {
 }
 
 /// Asserts that `status` is the web landing's refusal for `change`, for
-/// want of `missing`, with a command that signs it off or, for a pin,
-/// prints the line that pins a passkey.
-fn assert_untouched(status: &Status, change: &v1::Change, missing: &str) {
+/// want of `want`: `touch` or `pinned_touch`, with a command that signs it
+/// off, or for want of a pin, the destination's policy state (`no_pins`,
+/// `no_policy` or `invalid_policy`), with the command to start pinning and
+/// `reef land` suggested only where a policy loads.
+fn assert_untouched(status: &Status, change: &v1::Change, want: &str) {
     let (code, reason, metadata) = refusal(status);
+    let (missing, policy) = match want {
+        "touch" | "pinned_touch" => (want, None),
+        policy => ("pin", Some(policy)),
+    };
     assert_eq!(
         (code, reason.as_str(), metadata["missing"].as_str()),
         (
@@ -2136,16 +2142,46 @@ fn assert_untouched(status: &Status, change: &v1::Change, missing: &str) {
         ),
         "{status:?}"
     );
+    assert_eq!(metadata.get("policy").map(String::as_str), policy);
     assert_eq!(metadata["tree_id"], change.tree_id);
     assert_eq!(metadata["commit_id"], change.commit_id);
     assert_eq!(metadata["change_id"], change.change_id);
     assert_eq!(metadata["destination"], "main");
-    let next = reef_daemon::error::detail_of(status).unwrap().next;
-    if missing == "pin" {
-        assert_eq!(next, ["reef", "identity", "passkey", "list"]);
-    } else {
-        assert_eq!(next.first().map(String::as_str), Some("reef"));
-        assert!(next.contains(&"--verified".to_owned()), "{next:?}");
+    let detail = reef_daemon::error::detail_of(status).unwrap();
+    let next = detail.next;
+    match policy {
+        None => {
+            assert_eq!(next.first().map(String::as_str), Some("reef"));
+            assert!(next.contains(&"--verified".to_owned()), "{next:?}");
+        }
+        Some("no_pins") => {
+            assert_eq!(next, ["reef", "identity", "passkey", "list"]);
+            assert!(
+                detail
+                    .hint
+                    .contains(&format!("`reef land {}`", change.change_id)),
+                "{}",
+                detail.hint
+            );
+        }
+        Some(policy) => {
+            let expected: Vec<&str> = if policy == "no_policy" {
+                vec!["reef", "policy", "init"]
+            } else {
+                vec![
+                    "reef",
+                    "policy",
+                    "eval",
+                    "--policy-revision",
+                    "main",
+                    "-r",
+                    &change.commit_id,
+                ]
+            };
+            assert_eq!(next, expected);
+            assert!(detail.hint.contains("by hand"), "{}", detail.hint);
+            assert!(!detail.hint.contains("`reef land "), "{}", detail.hint);
+        }
     }
 }
 
@@ -2377,7 +2413,7 @@ async fn a_passkey_a_web_session_registers_lands_nothing() {
     register(&page, &mut attacker, "alice", None).await.unwrap();
     web_only_signoff(client, &page, &repo.id, &change, &mut attacker).await;
     let refused = land_from_page(&page, &repo.id, &change).await.unwrap_err();
-    assert_untouched(&refused, &change, "pin");
+    assert_untouched(&refused, &change, "no_pins");
 
     // `main` pins a passkey of alice's, not the session's.
     let pinned = commit_on(
@@ -2518,5 +2554,233 @@ async fn a_touch_by_a_revoked_key_does_not_count() {
         .unwrap();
     let refused = land_from_page(&page, &repo.id, &change).await.unwrap_err();
     assert_needs_touch(&refused, &change);
+    daemon.stop().await;
+}
+
+/// Registers through `ui`, for `identity`, a passkey with `copied`'s public
+/// key under `carrier`'s credential id, approved by `approver` when given.
+/// Attestation `none` proves no possession, so the caller need hold no
+/// private key: the public key is in every certificate it approved.
+async fn register_copied_key(
+    ui: &Ui,
+    carrier: &mut Authenticator,
+    identity: &str,
+    copied: &Authenticator,
+    approver: Option<&mut Authenticator>,
+) -> Result<v1::Passkey, Status> {
+    let (_, mut request) = registration(ui, carrier, identity, &ui.origin, approver).await;
+    request.public_key = copied.passkey().spki().to_vec();
+    request.algorithm = i32::try_from(copied.passkey().algorithm().cose()).unwrap();
+    ui.identities()
+        .register_passkey(request)
+        .await
+        .map(|response| response.into_inner().passkey.unwrap())
+}
+
+/// Removes `passkey` through `ui`, approved by `by`'s assertion.
+async fn remove_with(ui: &Ui, passkey: &v1::Passkey, by: &mut Authenticator) {
+    let challenge = reef_evidence::webauthn::passkey_change_challenge(
+        reef_evidence::webauthn::PasskeyChange::Remove {
+            passkey: &passkey.id,
+        },
+    );
+    ui.identities()
+        .remove_passkey(RemovePasskeyRequest {
+            id: passkey.id.clone(),
+            assertion: Some(assertion(by, &ui.origin, &challenge)),
+            reason: "replaced".to_owned(),
+        })
+        .await
+        .unwrap();
+}
+
+/// Asserts that `status` refuses a registration of `existing`'s credential
+/// or public key.
+fn assert_exists(status: &Status, existing: &v1::Passkey) {
+    let (code, reason, metadata) = refusal(status);
+    assert_eq!(
+        (code, reason.as_str(), metadata["id"].as_str()),
+        (Code::AlreadyExists, "PASSKEY_EXISTS", existing.id.as_str()),
+        "{status:?}"
+    );
+}
+
+// Review of b9bf8767, F1 (P1): alice touches with her pinned passkey and
+// resets her passkeys before the landing is asked for, so the touch stops
+// counting. A leaked web session then registers her first passkey anew with
+// the old passkey's public key, copied from a certificate, and no private
+// key: refused, since a public key is never registered again, and the old
+// touch still lands nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reset_passkeys_public_key_never_comes_back() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    create_identity(client, "alice").await;
+    let page = ui(client).await;
+    let mut passkey = Authenticator::new(Algorithm::EdDsa);
+    let registered = register(&page, &mut passkey, "alice", None).await.unwrap();
+    let main = commit_on(
+        client,
+        &repo.id,
+        "root()",
+        &[("reef-policy.toml", &pinning(&registered.fingerprint))],
+    )
+    .await;
+    set_main(&repo, &main.commit_id).await;
+    let change = commit_on(client, &repo.id, "main", &[("a.txt", "a\n")]).await;
+    propose(client, &repo.id, &change).await;
+    accept_signoff(client, &page, &repo.id, &change, &mut passkey).await;
+    client
+        .reset_passkeys(ResetPasskeysRequest {
+            identity: "alice".to_owned(),
+            reason: "lost".to_owned(),
+        })
+        .await
+        .unwrap();
+    let refused = land_from_page(&page, &repo.id, &change).await.unwrap_err();
+    assert_untouched(&refused, &change, "pinned_touch");
+
+    let mut carrier = Authenticator::new(Algorithm::EdDsa);
+    let copied = register_copied_key(&page, &mut carrier, "alice", &passkey, None)
+        .await
+        .unwrap_err();
+    assert_exists(&copied, &registered);
+    let refused = land_from_page(&page, &repo.id, &change).await.unwrap_err();
+    assert_untouched(&refused, &change, "pinned_touch");
+    daemon.stop().await;
+}
+
+// Review of b9bf8767, F1 (P2): the pinned passkey's private key is stolen,
+// which is why alice resets. The thief cannot register that key again as
+// her first passkey, so it cannot approve a sign-off with it; a passkey of
+// its own registers, but `main` does not pin it, and the web lands nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stolen_pinned_key_lands_nothing_after_a_reset() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    create_identity(client, "alice").await;
+    let page = ui(client).await;
+    let mut stolen = Authenticator::new(Algorithm::EdDsa);
+    let registered = register(&page, &mut stolen, "alice", None).await.unwrap();
+    let main = commit_on(
+        client,
+        &repo.id,
+        "root()",
+        &[("reef-policy.toml", &pinning(&registered.fingerprint))],
+    )
+    .await;
+    set_main(&repo, &main.commit_id).await;
+    client
+        .reset_passkeys(ResetPasskeysRequest {
+            identity: "alice".to_owned(),
+            reason: "stolen".to_owned(),
+        })
+        .await
+        .unwrap();
+    let change = commit_on(client, &repo.id, "main", &[("evil.txt", "x\n")]).await;
+    propose(client, &repo.id, &change).await;
+
+    let mut carrier = Authenticator::new(Algorithm::EdDsa);
+    let copied = register_copied_key(&page, &mut carrier, "alice", &stolen, None)
+        .await
+        .unwrap_err();
+    assert_exists(&copied, &registered);
+    let mut own = Authenticator::new(Algorithm::EdDsa);
+    register(&page, &mut own, "alice", None).await.unwrap();
+    web_only_signoff(client, &page, &repo.id, &change, &mut own).await;
+    let refused = land_from_page(&page, &repo.id, &change).await.unwrap_err();
+    assert_untouched(&refused, &change, "pinned_touch");
+    daemon.stop().await;
+}
+
+// A removed passkey's public key is never registered again either, under a
+// new credential id, approved by a live passkey or, once the identity has
+// none left, with no approval at all.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_removed_passkeys_public_key_is_never_registered_again() {
+    let (daemon, _repo) = fixture().await;
+    let client = &daemon.client;
+    create_identity(client, "alice").await;
+    let page = ui(client).await;
+    let mut first = Authenticator::new(Algorithm::EdDsa);
+    let kept = register(&page, &mut first, "alice", None).await.unwrap();
+    let mut second = Authenticator::new(Algorithm::Es256);
+    let removed = register(&page, &mut second, "alice", Some(&mut first))
+        .await
+        .unwrap();
+    remove_with(&page, &removed, &mut second).await;
+    let mut carrier = Authenticator::new(Algorithm::Es256);
+    let copied = register_copied_key(&page, &mut carrier, "alice", &second, Some(&mut first))
+        .await
+        .unwrap_err();
+    assert_exists(&copied, &removed);
+    remove_with(&page, &kept, &mut first).await;
+    for (copied, passkey) in [(&first, &kept), (&second, &removed)] {
+        let mut carrier = Authenticator::new(copied.passkey().algorithm());
+        let refused = register_copied_key(&page, &mut carrier, "alice", copied, None)
+            .await
+            .unwrap_err();
+        assert_exists(&refused, passkey);
+    }
+    let mut fresh = Authenticator::new(Algorithm::EdDsa);
+    register(&page, &mut fresh, "alice", None).await.unwrap();
+    daemon.stop().await;
+}
+
+// Review of b9bf8767, F3 (P3): the change itself pins the session's own
+// passkey in reef-policy.toml, where `main` pins none. The pin is read at
+// `main`'s head, never from the change, so the web landing is refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_change_that_pins_its_own_passkey_lands_nothing_from_the_web() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    create_identity(client, "alice").await;
+    let page = ui(client).await;
+    let unpinned = commit_on(
+        client,
+        &repo.id,
+        "root()",
+        &[("reef-policy.toml", NO_SIGNOFF)],
+    )
+    .await;
+    set_main(&repo, &unpinned.commit_id).await;
+    let mut attacker = Authenticator::new(Algorithm::EdDsa);
+    let registered = register(&page, &mut attacker, "alice", None).await.unwrap();
+    let change = commit_on(
+        client,
+        &repo.id,
+        "main",
+        &[
+            ("reef-policy.toml", &pinning(&registered.fingerprint)),
+            ("evil.txt", "x\n"),
+        ],
+    )
+    .await;
+    propose(client, &repo.id, &change).await;
+    web_only_signoff(client, &page, &repo.id, &change, &mut attacker).await;
+    let refused = land_from_page(&page, &repo.id, &change).await.unwrap_err();
+    assert_untouched(&refused, &change, "no_pins");
+    daemon.stop().await;
+}
+
+// Review of b9bf8767, F3 (P4): `main`'s reef-policy.toml pins alice's
+// passkey but does not load, so it pins nothing, and nothing lands from a
+// terminal either: the refusal says to mend it by hand.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_policy_that_does_not_load_pins_nothing() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    create_identity(client, "alice").await;
+    let page = ui(client).await;
+    let mut passkey = Authenticator::new(Algorithm::EdDsa);
+    let registered = register(&page, &mut passkey, "alice", None).await.unwrap();
+    let broken = format!("{}\n[[[ not toml", pinning(&registered.fingerprint));
+    let main = commit_on(client, &repo.id, "root()", &[("reef-policy.toml", &broken)]).await;
+    set_main(&repo, &main.commit_id).await;
+    let change = commit_on(client, &repo.id, "main", &[("a.txt", "a\n")]).await;
+    propose(client, &repo.id, &change).await;
+    accept_signoff(client, &page, &repo.id, &change, &mut passkey).await;
+    let refused = land_from_page(&page, &repo.id, &change).await.unwrap_err();
+    assert_untouched(&refused, &change, "invalid_policy");
     daemon.stop().await;
 }

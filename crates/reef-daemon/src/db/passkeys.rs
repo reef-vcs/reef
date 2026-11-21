@@ -1,7 +1,8 @@
 //! Queries on `passkeys` (R3.43, ADR 0085): each person identity's
 //! `WebAuthn` passkeys, machine-wide like `identities`. A removed passkey's row stays,
 //! with when, why and through which web UI session it was removed; the
-//! credential id and the fingerprint are unique among live rows only.
+//! credential id and the fingerprint are unique among every row, removed
+//! or not, so neither is ever registered again.
 
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{OptionalExtension as _, Row, params, params_from_iter};
@@ -162,8 +163,8 @@ impl Db {
     }
 
     /// Stores `row` unless its identity already holds `limit` live
-    /// passkeys, any passkey, removed or not, had its credential id, or a
-    /// live one has its fingerprint.
+    /// passkeys, or any passkey, removed or not, had its credential id or
+    /// its fingerprint.
     pub fn insert_passkey(
         &self,
         row: &PasskeyRow,
@@ -178,14 +179,18 @@ impl Db {
             if usize::try_from(live).unwrap_or(usize::MAX) >= limit {
                 return Ok(PasskeyInserted::Full);
             }
-            // A credential id is never registered again, even after its
-            // passkey was removed: a registration that reuses a person's
-            // credential id with another key would otherwise pass for the
-            // person's authenticator wherever only the id is compared.
+            // Neither a credential id nor a public key is registered again,
+            // even after its passkey was removed. A registration that reuses
+            // a person's credential id with another key would pass for the
+            // person's authenticator wherever only the id is compared. One
+            // that reuses a removed passkey's public key needs no private
+            // key (attestation `none` proves no possession), and would bring
+            // back what a removal or reset ended: the fingerprint a policy
+            // pins, and any touch it approved before.
             let existing: Option<String> = tx
                 .query_row(
                     "SELECT id FROM passkeys
-                     WHERE credential_id = ?1 OR (removed_at IS NULL AND fingerprint = ?2)
+                     WHERE credential_id = ?1 OR fingerprint = ?2
                      ORDER BY removed_at IS NULL DESC LIMIT 1",
                     params![row.credential_id, row.fingerprint],
                     |found| found.get(0),

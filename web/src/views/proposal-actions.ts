@@ -142,14 +142,26 @@ export const MOVED_AFTER_SIGNING =
 /**
  * Why the web UI could not land a tree it signed off: the destination's
  * policy pins no passkey, or not the one that touched (ADR 0086 decision 2).
- * Null for any other refusal.
+ * A destination with no policy, or one that does not load, lands nothing
+ * from a terminal either, so its policy is committed by hand. Null for any
+ * other refusal.
  */
 export function unpinnedWords(metadata: Record<string, string>, commit: string): string | null {
   const destination = metadata.destination ?? "the destination";
+  const line = "the [passkeys] line that reef identity passkey list prints";
   const terminal = `or land it from a terminal: reef land ${commit.slice(0, 12)}`;
   switch (metadata.missing) {
     case "pin":
-      return `Signed off, but ${destination} pins no passkey, so the web UI cannot land on it. To land from here, add the [passkeys] line that reef identity passkey list prints to ${destination}'s reef-policy.toml; ${terminal}.`;
+      switch (metadata.policy) {
+        case "no_policy":
+          return `Signed off, but ${destination} has no reef-policy.toml, so nothing lands on it, from here or from a terminal. Commit a first one to ${destination} by hand (reef policy init writes a starter) with ${line}, then Accept again.`;
+        case "invalid_policy":
+          return `Signed off, but ${destination}'s reef-policy.toml does not load, so nothing lands on it, from here or from a terminal. Commit a fix to ${destination} by hand (reef policy check says what is wrong) with ${line}, then Accept again.`;
+        case "no_pins":
+          return `Signed off, but ${destination} pins no passkey, so the web UI cannot land on it. To land from here, land a change that adds ${line} to ${destination}'s reef-policy.toml from a terminal, then Accept again; ${terminal}.`;
+        default:
+          return null;
+      }
     case "pinned_touch":
       return `Signed off, but ${destination} does not pin the passkey you touched, so the web UI cannot land it. Accept again with a passkey ${destination}'s reef-policy.toml pins (reef identity passkey list shows the line that pins each); ${terminal}.`;
     default:

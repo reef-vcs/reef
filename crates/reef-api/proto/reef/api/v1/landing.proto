@@ -87,7 +87,8 @@ service LandingService {
   // `visible_commit_id`; a dependent whose own diff is unchanged is carried
   // first, R3.11), VERIFIED_SIGNOFF_REQUIRED (metadata `missing`:
   // `pin`, `touch` or `pinned_touch`, `change_id`, `commit_id`, `tree_id`,
-  // `destination`; through the web UI only, R3.31: no `signoff`/`pass` is
+  // `destination`, and with `pin`, `policy`: `no_policy`, `invalid_policy`
+  // or `no_pins`; through the web UI only, R3.31: no `signoff`/`pass` is
   // on the tree of the commit asked for by a person's key that a live
   // passkey the destination's `[passkeys]` pins approved),
   // STACK_DESTINATION_MISMATCH (metadata

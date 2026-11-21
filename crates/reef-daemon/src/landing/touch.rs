@@ -5,15 +5,15 @@
 //! the policy asks. Accept makes that sign-off before it asks. A leaked
 //! session or a script in the page can register a passkey (an identity's
 //! first needs no assertion), but it cannot pin one: the pin is a line in
-//! the destination's tree, and changing that tree takes a landing.
+//! the destination's tree, and changing that tree takes a landing. Nor can
+//! it bring back a pinned passkey a removal or reset ended: its public key
+//! is never registered again.
 //!
 //! The tree is the one of the commit asked for: the head of the stack
 //! prefix that lands. A sign-off on it counts for the members below it
 //! (R3.10), as Accept on a member's page accepts up to it. A web session
 //! belongs to no identity, so any pinned person's touch counts; the policy
 //! still decides whose sign-offs the landing needs.
-
-use std::sync::Arc;
 
 use futures::FutureExt as _;
 use reef_lib::error::ErrorChain;
@@ -34,9 +34,8 @@ use crate::service::policy as policy_input;
 /// `missing`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Missing {
-    /// The destination's policy pins no passkey (or it has no policy, or
-    /// its policy does not load), so no touch can count.
-    Pin,
+    /// The destination's policy pins no passkey, so no touch can count.
+    Pin(Unpinned),
     /// No passing sign-off by a person's passkey-verified key is on it.
     Touch,
     /// Its touches are by passkeys the destination's policy does not pin
@@ -48,7 +47,7 @@ impl Missing {
     /// Its metadata value.
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Pin => "pin",
+            Self::Pin(_) => "pin",
             Self::Touch => "touch",
             Self::PinnedTouch => "pinned_touch",
         }
@@ -57,11 +56,37 @@ impl Missing {
     /// The end of the refusal's message.
     fn words(self) -> &'static str {
         match self {
-            Self::Pin => "that policy pins no passkey",
+            Self::Pin(_) => "that policy pins no passkey",
             Self::Touch => "its tree has none",
             Self::PinnedTouch => {
                 "its tree's were approved with passkeys that policy does not pin, or that were removed"
             }
+        }
+    }
+}
+
+/// Why a destination pins no passkey: `VERIFIED_SIGNOFF_REQUIRED`'s
+/// `policy`, with `missing` `pin`. A destination with no policy, or one
+/// that does not load, lands nothing from a terminal either, so its first
+/// or mended policy is committed by hand (`docs/policy.md`); one that loads
+/// takes a change adding the pin through `reef land`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unpinned {
+    /// It has no `reef-policy.toml`.
+    NoPolicy,
+    /// Its `reef-policy.toml` does not load.
+    InvalidPolicy,
+    /// Its policy loads and has no `[passkeys]`.
+    NoPins,
+}
+
+impl Unpinned {
+    /// Its metadata value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NoPolicy => "no_policy",
+            Self::InvalidPolicy => "invalid_policy",
+            Self::NoPins => "no_pins",
         }
     }
 }
@@ -117,10 +142,31 @@ impl Untouched {
             "-r",
             commit,
         ];
+        let web = "Through the web UI, a landing counts only a touch of a passkey the destination's reef-policy.toml pins";
         match missing {
-            Missing::Pin => Advice::run(
+            Missing::Pin(Unpinned::NoPolicy) => Advice::run(
                 format!(
-                    "Through the web UI, a landing counts only a touch of a passkey the destination's reef-policy.toml pins, and {destination}'s pins none. Add the [passkeys] line `reef identity passkey list` prints to reef-policy.toml and land that from a terminal, or land this change from a terminal: `reef land {change}`."
+                    "{web}, and {destination} has no reef-policy.toml, so nothing lands on it, from the web UI or with `reef land`, until a first one is committed to it by hand: `reef policy init` writes a starter; add the [passkeys] line `reef identity passkey list` prints, check it with `reef policy check`, commit it to {destination} and Accept again."
+                ),
+                ["reef", "policy", "init"],
+            ),
+            Missing::Pin(Unpinned::InvalidPolicy) => Advice::run(
+                format!(
+                    "{web}, and {destination}'s reef-policy.toml does not load, so nothing lands on it, from the web UI or with `reef land`, until a fix is committed to it by hand. Evaluating it names each problem; mend them, add the [passkeys] line `reef identity passkey list` prints, commit it to {destination} and Accept again."
+                ),
+                [
+                    "reef",
+                    "policy",
+                    "eval",
+                    "--policy-revision",
+                    destination,
+                    "-r",
+                    commit,
+                ],
+            ),
+            Missing::Pin(Unpinned::NoPins) => Advice::run(
+                format!(
+                    "{web}, and {destination}'s pins none. Land a change that adds the [passkeys] line `reef identity passkey list` prints to it, with its owners' sign-off, from a terminal (`reef land`), then Accept again; or land this change from a terminal: `reef land {change}`."
                 ),
                 ["reef", "identity", "passkey", "list"],
             ),
@@ -143,13 +189,19 @@ impl Untouched {
     pub(crate) fn reason(&self) -> (&'static str, Vec<(&'static str, String)>) {
         (
             reef_api::error::VERIFIED_SIGNOFF_REQUIRED,
-            vec![
+            [
                 ("missing", self.missing.as_str().to_owned()),
                 ("change_id", self.change.clone()),
                 ("commit_id", self.commit.clone()),
                 ("tree_id", self.tree.clone()),
                 ("destination", self.destination.clone()),
-            ],
+            ]
+            .into_iter()
+            .chain(match self.missing {
+                Missing::Pin(unpinned) => Some(("policy", unpinned.as_str().to_owned())),
+                Missing::Touch | Missing::PinnedTouch => None,
+            })
+            .collect(),
         )
     }
 }
@@ -172,10 +224,15 @@ pub(crate) async fn require(
             destination: destination.to_owned(),
         })))
     };
-    let loaded = destination_policy(state, repo, destination).await?;
-    let policy = match loaded.as_deref() {
-        Some(Loaded::Policy(policy)) if policy.pins_passkeys() => policy,
-        _ => return refuse(Missing::Pin),
+    let loaded = match destination_policy(state, repo, destination).await? {
+        None => return refuse(Missing::Pin(Unpinned::NoPolicy)),
+        Some(Err(_)) => return refuse(Missing::Pin(Unpinned::InvalidPolicy)),
+        Some(Ok(bytes)) => state.policy.load(&bytes),
+    };
+    let policy = match &*loaded {
+        Loaded::Policy(policy) if policy.pins_passkeys() => policy,
+        Loaded::Policy(_) => return refuse(Missing::Pin(Unpinned::NoPins)),
+        Loaded::Invalid(_) => return refuse(Missing::Pin(Unpinned::InvalidPolicy)),
     };
     let found = match &info.tree_id {
         Some(tree) => {
@@ -198,13 +255,13 @@ pub(crate) async fn require(
     refuse(Missing::PinnedTouch)
 }
 
-/// The policy at `destination`'s head, loaded; `None` when it has none or
-/// the file cannot be read whole.
+/// The bytes of the policy at `destination`'s head: `None` when it has
+/// none, an error when the file cannot be read whole.
 async fn destination_policy(
     state: &AppState,
     repo: RepoId,
     destination: &str,
-) -> Result<Option<Arc<Loaded>>, LandingError> {
+) -> Result<Option<Result<Vec<u8>, String>>, LandingError> {
     let bookmark = destination.to_owned();
     let file = state
         .manager
@@ -232,9 +289,7 @@ async fn destination_policy(
             .boxed_local()
         })
         .await??;
-    Ok(file
-        .and_then(|file| file.bytes.ok())
-        .map(|bytes| state.policy.load(&bytes)))
+    Ok(file.map(|file| file.bytes))
 }
 
 /// Whether `policy` pins the passkey that approved `evidence`'s key, for
@@ -243,19 +298,24 @@ fn pinned(policy: &Policy, evidence: &Evidence) -> bool {
     policy.presence(&evidence.key) == Some(Presence::UserVerified)
 }
 
-/// Whether the passkey that approved `evidence`'s key is still one of its
-/// identity's live passkeys: a removal or a reset after the touch stops it
-/// counting.
+/// Whether the passkey that approved `evidence`'s key, as the daemon
+/// recorded when it certified the key, is still live: a removal or a reset
+/// after the touch stops it counting, whatever is registered since.
 fn live(state: &AppState, evidence: &Evidence) -> Result<bool, LandingError> {
     let key = &evidence.key;
-    if key.identity_id.is_empty() || key.passkey.is_empty() {
-        return Ok(false);
-    }
-    Ok(state
+    let approver = state
         .db
-        .passkeys(Some(&key.identity_id), false)?
-        .iter()
-        .any(|row| row.fingerprint == key.passkey))
+        .session_keys_by_id(&[key.id.as_str()])?
+        .into_iter()
+        .find_map(|row| row.passkey_id);
+    let Some(approver) = approver else {
+        return Ok(false);
+    };
+    Ok(state.db.passkey(&approver)?.is_some_and(|row| {
+        row.removed_at.is_none()
+            && row.identity_id == key.identity_id
+            && row.fingerprint == key.passkey
+    }))
 }
 
 /// Whether `evidence`, read with its signature valid, is a person's touch:

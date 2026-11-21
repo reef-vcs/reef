@@ -301,7 +301,7 @@ service IdentityService {
   // 64 bytes of text; FAILED_PRECONDITION with reason PASSKEY_REQUIRED
   // without `approval` when the identity has a passkey, or TOO_MANY_PASSKEYS;
   // ALREADY_EXISTS with reason PASSKEY_EXISTS (metadata `id`) for a credential
-  // id any passkey had, removed or not, or a public key already live; PERMISSION_DENIED with reason
+  // id or a public key any passkey had, removed or not; PERMISSION_DENIED with reason
   // PASSKEY_NEEDS_WEB or PASSKEY_OVER_REMOTE.
   rpc RegisterPasskey(RegisterPasskeyRequest) returns (RegisterPasskeyResponse) {
     option (reef.api.v1.access) = ACCESS_WRITE;

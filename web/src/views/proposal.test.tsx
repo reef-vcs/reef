@@ -251,29 +251,50 @@ describe("the proposal page", () => {
   it.each([
     [
       "pin",
-      /Signed off, but main pins no passkey, so the web UI cannot land on it\. .*reef identity passkey list.*reef land /,
+      "no_pins",
+      /Signed off, but main pins no passkey, so the web UI cannot land on it\. .*reef identity passkey list.*from a terminal, then Accept again; or land it from a terminal: reef land /,
+      true,
     ],
     [
       "pinned_touch",
+      "",
       /Signed off, but main does not pin the passkey you touched.*reef identity passkey list.*reef land /,
+      true,
     ],
-  ])("says what to pin when the landing refuses for want of %s", async (missing, words) => {
-    installAuthenticator();
-    const daemon = daemonWithDiff();
-    daemon.failures.landChange = daemonError(Code.FailedPrecondition, {
-      reason: "VERIFIED_SIGNOFF_REQUIRED",
-      metadata: { missing, destination: "main", commit_id: COMMIT },
-    });
-    await open(daemon);
-    await act(() => {
-      button("Accept").click();
-    });
-    await waitFor(() => {
-      expect(screen.queryByText(words)).not.toBeNull();
-    });
-    expect(screen.queryByText(new RegExp(`reef land ${COMMIT.slice(0, 12)}\\.`))).not.toBeNull();
-    expect(daemon.added).toHaveLength(1);
-  });
+    [
+      "pin",
+      "no_policy",
+      /Signed off, but main has no reef-policy\.toml, so nothing lands on it, from here or from a terminal\. Commit a first one to main by hand \(reef policy init writes a starter\) with the \[passkeys\] line that reef identity passkey list prints, then Accept again\./,
+      false,
+    ],
+    [
+      "pin",
+      "invalid_policy",
+      /Signed off, but main's reef-policy\.toml does not load, so nothing lands on it, from here or from a terminal\. Commit a fix to main by hand \(reef policy check says what is wrong\) with the \[passkeys\] line that reef identity passkey list prints, then Accept again\./,
+      false,
+    ],
+  ])(
+    "says what to pin when the landing refuses for want of %s (%s)",
+    async (missing, policy, words, landsFromATerminal) => {
+      installAuthenticator();
+      const daemon = daemonWithDiff();
+      daemon.failures.landChange = daemonError(Code.FailedPrecondition, {
+        reason: "VERIFIED_SIGNOFF_REQUIRED",
+        metadata: { missing, policy, destination: "main", commit_id: COMMIT },
+      });
+      await open(daemon);
+      await act(() => {
+        button("Accept").click();
+      });
+      await waitFor(() => {
+        expect(screen.queryByText(words)).not.toBeNull();
+      });
+      const terminal = screen.queryByText(new RegExp(`reef land ${COMMIT.slice(0, 12)}\\.`));
+      expect(terminal !== null).toBe(landsFromATerminal);
+      expect(screen.queryByText(/reef land /) !== null).toBe(landsFromATerminal);
+      expect(daemon.added).toHaveLength(1);
+    },
+  );
 
   it("explains Accept without a passkey, and still declines and comments", async () => {
     installAuthenticator();
