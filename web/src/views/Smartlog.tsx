@@ -23,6 +23,7 @@ import type { Presence } from "../gen/reef/api/v1/presence_pb";
 import type { Workspace } from "../gen/reef/api/v1/workspaces_pb";
 import { DEFAULT_LIMIT, logCommand, MAX_LIMIT, SMARTLOG_REVSET } from "../graph/revset";
 import { joinAgents, type AgentJoin } from "../fleet/agents";
+import { isAgentEntry } from "../live/kinds";
 import type { FrameScheduler } from "../live/frame";
 import type { Live } from "../live/share";
 import { AtBanner } from "../ui/AtBanner";
@@ -62,7 +63,7 @@ function presentAgents(
   }
   const out = new Map<string, Presence[]>();
   for (const entry of presence) {
-    if (entry.repoId !== repo) continue;
+    if (entry.repoId !== repo || !isAgentEntry(entry)) continue;
     const change = entry.changeId || byWorkspace.get(entry.workspaceId);
     if (!change) continue;
     let list = out.get(change);

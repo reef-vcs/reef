@@ -2666,8 +2666,9 @@ pub struct AutomaticStatus {
     pub state: String,
     /// What the gate said, or what it waits for.
     pub message: String,
-    /// `waiting`: the pairs asked for; `needs`: the failed pairs and the
-    /// missing evidence and sign-offs; at most 20.
+    /// `waiting`: the pairs asked for; `needs`: the failed pairs, the
+    /// missing evidence and sign-offs (kind `signoff`), and the rules that
+    /// block with nothing to ask for (kind `rule`); at most 20.
     pub missing: Vec<AutomaticNeed>,
     /// How many there are.
     pub missing_total: u32,
@@ -2679,6 +2680,8 @@ pub struct AutomaticStatus {
     pub reason: Option<String>,
     /// A command that shows or fixes it, as an argv.
     pub next: Vec<String>,
+    /// `returned`: the service queues it again by itself.
+    pub retrying: bool,
     /// When it was judged.
     pub evaluated_at: Option<String>,
 }
@@ -2717,6 +2720,7 @@ impl From<&v1::AutomaticStatus> for AutomaticStatus {
             landing_id: text(&status.landing_id),
             reason: text(&status.reason),
             next: status.next.clone(),
+            retrying: status.retrying,
             evaluated_at: status.evaluated_at.as_ref().map(rfc3339),
         }
     }
@@ -2725,9 +2729,14 @@ impl From<&v1::AutomaticStatus> for AutomaticStatus {
 impl AutomaticStatus {
     /// The status in a few words: `waiting test`, `needs signoff`.
     pub fn words(&self) -> String {
-        let kinds: Vec<&str> = self.missing.iter().map(|need| need.kind.as_str()).collect();
-        let mut kinds = kinds;
-        kinds.dedup();
+        // A blocking rule's need (kind `rule`) says no more than the reason.
+        let mut kinds: Vec<&str> = Vec::new();
+        for need in &self.missing {
+            let kind = need.kind.as_str();
+            if kind != "rule" && !kinds.contains(&kind) {
+                kinds.push(kind);
+            }
+        }
         match self.state.as_str() {
             "waiting" | "needs" if !kinds.is_empty() => {
                 format!("{} {}", self.state, kinds.join(","))
@@ -4008,6 +4017,23 @@ pub struct RestoredRepo {
 mod tests {
     use super::*;
 
+    #[test]
+    fn automatic_words_name_each_kind_once_and_no_rule() {
+        let need = |kind: &str| v1::PolicyEvidenceNeed {
+            kind: kind.to_owned(),
+            ..v1::PolicyEvidenceNeed::default()
+        };
+        let mut status = v1::AutomaticStatus {
+            missing: vec![need("test"), need("signoff"), need("rule"), need("test")],
+            reason: "policy".to_owned(),
+            ..v1::AutomaticStatus::default()
+        };
+        status.set_state(v1::AutomaticState::Needs);
+        assert_eq!(AutomaticStatus::from(&status).words(), "needs test,signoff");
+        status.missing = vec![need("rule")];
+        assert_eq!(AutomaticStatus::from(&status).words(), "needs policy");
+    }
+
     /// Fixed width at the edges RFC 3339 can write, `<millis>ms` past them.
     #[test]
     fn rfc3339_millis_edges() {
@@ -4337,7 +4363,8 @@ pub struct Presence {
     pub workspace_id: Option<String>,
     /// The change it is about, in hex.
     pub change_id: Option<String>,
-    /// `activity`, `editing`, `lease`, `progress`, or `job`.
+    /// `activity`, `editing`, `lease`, `progress`, `job`, `automatic` or
+    /// `attention`.
     #[schemars(schema_with = "presence_kind_schema")]
     pub kind: String,
     /// For `activity`.
@@ -4350,6 +4377,11 @@ pub struct Presence {
     pub lease: Option<Lease>,
     /// For `job` (R3.05): the job as of this report.
     pub job: Option<JobPresence>,
+    /// For `automatic` (R3.33): the proposal's status, without `missing`.
+    pub automatic: Option<AutomaticStatus>,
+    /// For `attention` (R3.33): why the workspace needs attention.
+    #[schemars(schema_with = "attention_name_schema_or_null")]
+    pub attention: Option<String>,
     /// Reported by the daemon itself.
     pub by_daemon: bool,
     /// When it was last reported.
@@ -4369,6 +4401,8 @@ pub fn presence_kind(kind: i32) -> &'static str {
         Ok(v1::PresenceKind::Lease) => "lease",
         Ok(v1::PresenceKind::Progress) => "progress",
         Ok(v1::PresenceKind::Job) => "job",
+        Ok(v1::PresenceKind::Automatic) => "automatic",
+        Ok(v1::PresenceKind::Attention) => "attention",
         _ => UNKNOWN,
     }
 }
@@ -4392,6 +4426,8 @@ impl From<&v1::Presence> for Presence {
             }),
             lease: presence.lease.as_ref().map(Lease::from),
             job: presence.job.as_ref().map(JobPresence::from),
+            automatic: presence.automatic.as_ref().map(AutomaticStatus::from),
+            attention: attention_name(presence.attention).map(str::to_owned),
             by_daemon: presence.by_daemon,
             updated_at: time(presence.updated_at.as_ref()),
             expires_at: time(presence.expires_at.as_ref()),

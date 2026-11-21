@@ -46,7 +46,8 @@ import {
   type Step,
 } from "./proposal-actions";
 import { ProposalModel, type ProposalRead, type StackMember } from "./proposal-model";
-import { proposalHref, proposalsHref } from "./proposal-route";
+import { inboxHref } from "./inbox-route";
+import { proposalHref } from "./proposal-route";
 import {
   automaticWords,
   changeLabel,
@@ -381,7 +382,16 @@ export function Proposal({
   onSessionInvalid: () => void;
 }) {
   const [model] = useState(
-    () => new ProposalModel(connection, live.operations, frame, onSessionInvalid, repo, change),
+    () =>
+      new ProposalModel(
+        connection,
+        live.operations,
+        live.presence,
+        frame,
+        onSessionInvalid,
+        repo,
+        change,
+      ),
   );
   useEffect(() => model.start(), [model]);
   const { read, error, fatal, repository } = useSyncExternalStore(
@@ -436,7 +446,7 @@ export function Proposal({
       <div className="proposal">
         <ErrorView error={fatal} />
         <p>
-          <Link to={proposalsHref({ repo })}>All open proposals</Link>
+          <Link to={inboxHref({ repo })}>The inbox</Link>
         </p>
       </div>
     );
@@ -502,7 +512,7 @@ export function Proposal({
   return (
     <div className="proposal">
       <p className="secondary crumb-line">
-        <Link to={proposalsHref({ repo })}>Proposals</Link> ›{" "}
+        <Link to={inboxHref({ repo })}>Inbox</Link> ›{" "}
         <span className="mono">{changeLabel(entry.changeId)}</span>
       </p>
       <header className="proposal-head">

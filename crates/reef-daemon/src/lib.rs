@@ -24,6 +24,7 @@ pub mod executor;
 pub mod fetch;
 pub mod history;
 pub mod identity;
+pub(crate) mod inbox;
 pub mod landing;
 pub mod lease;
 pub mod lifecycle;

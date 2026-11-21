@@ -16,10 +16,10 @@ import {
 import { TransitionActor } from "../gen/reef/api/v1/lifecycle_pb";
 import { Time } from "../ui/TimeLabel";
 import { plural } from "../ui/words";
+import { Answer, type RunAction } from "./AnswerBox";
 import type { LineAnchor } from "./ProposalDiff";
 
-/** Runs a write as the page's one action; resolves to the words it ended with. */
-export type RunAction = (write: () => Promise<string>) => void;
+export type { RunAction } from "./AnswerBox";
 
 const INSTRUCTION_WORDS: Record<InstructionState, string> = {
   [InstructionState.UNSPECIFIED]: "unknown",
@@ -77,64 +77,6 @@ function anchorWords(comment: Comment): string {
         : `:${String(anchor.startLine)}`
       : "";
   return `${anchor.path}${lines}${side}`;
-}
-
-function Answer({
-  repo,
-  change,
-  commit,
-  help,
-  connection,
-  run,
-  busy,
-}: {
-  repo: string;
-  change: string;
-  commit: string;
-  help: Comment;
-  connection: Connection;
-  run: RunAction;
-  busy: boolean;
-}) {
-  const [text, setText] = useState("");
-  function submit(event: SubmitEvent<HTMLFormElement>) {
-    event.preventDefault();
-    run(async () => {
-      const { comment } = await client(connection, CommentService).createComment({
-        repo,
-        revision: change,
-        expectedCommitId: commit,
-        kind: CommentKind.INSTRUCTION,
-        replyTo: help.id,
-        text,
-        actor: TransitionActor.HUMAN,
-        skipSnapshot: true,
-      });
-      setText("");
-      // Someone answered first: the daemon wrote this reply as an
-      // instruction that waits for its Confirm.
-      return comment?.instruction?.state === InstructionState.AWAITING_CONFIRMATION
-        ? "This question was already answered: your reply waits for your Confirm below."
-        : "Answer sent: the agent gets it as its next instruction.";
-    });
-  }
-  return (
-    <form className="comment-form" onSubmit={submit}>
-      <label>
-        Your answer
-        <textarea
-          required
-          value={text}
-          onChange={(event) => {
-            setText(event.target.value);
-          }}
-        />
-      </label>
-      <button type="submit" disabled={busy || !text.trim()}>
-        Answer
-      </button>
-    </form>
-  );
 }
 
 function CommentItem({

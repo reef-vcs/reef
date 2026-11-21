@@ -46,7 +46,7 @@ pub use reef::daemon::v0;
 /// The revision of `reef.api.v1` this build serves. It increases by one with
 /// every change to the schema, and [`API_DIGEST`] changes with it; v1 only
 /// grows (ADR 0029). `GetDaemonStatus` reports it.
-pub const API_REVISION: u32 = 43;
+pub const API_REVISION: u32 = 44;
 
 /// blake3 of the v1 descriptors without comments, one per revision, oldest
 /// first: entry `n - 1` is revision `n`'s. A schema change appends one entry
@@ -203,6 +203,10 @@ pub const API_DIGESTS: &[&str] = &[
     // R3.31: `web` on `ChangeTransition`, `CommentAuthor`, `Landing` and
     // `Operation`.
     "49512924a385f0570d163faf8061ed6da9284a5722e2c4821360764c231d1e5e",
+    // R3.33: `inbox.proto` (`InboxService`), `PRESENCE_KIND_AUTOMATIC` and
+    // `ATTENTION`, `Presence.automatic` and `attention`, and
+    // `AutomaticStatus.retrying`.
+    "f2a2a405346c251426f6e14fd6c6b3b62b71b03f8a0078710a98948ba9579317",
 ];
 
 /// blake3 of the v1 descriptors without comments, as of [`API_REVISION`]:
@@ -926,7 +930,8 @@ pub mod error {
     /// (R3.12). Metadata: `max`.
     pub const TOO_MANY_INSTRUCTIONS: &str = "TOO_MANY_INSTRUCTIONS";
     /// Through the remote listener, an instruction, or a take, from a token
-    /// linked to no operator identity (R3.12).
+    /// linked to no operator identity (R3.12); an inbox mark from one
+    /// (R3.33).
     pub const REMOTE_IDENTITY_REQUIRED: &str = "REMOTE_IDENTITY_REQUIRED";
     /// Through the remote listener, a move of an instruction another token
     /// wrote or claimed, or a claim of a change another token proposed
@@ -1243,8 +1248,9 @@ mod tests {
         // metadata, not jj state; and, as ADR 0066 amends it, a keyless
         // session key's registration, which changes no jj view either; and,
         // as ADR 0085 amends it, passkeys and approvals, which are identity
-        // records and memory, not jj state.
-        const EXCEPT: [&str; 18] = [
+        // records and memory, not jj state; and, as ADR 0088 amends it, the
+        // inbox's marks, a person's reading position.
+        const EXCEPT: [&str; 19] = [
             "RenewLease",
             "ReportPresence",
             "ClearPresence",
@@ -1263,6 +1269,7 @@ mod tests {
             "RemovePasskey",
             "RequestApproval",
             "ResolveApproval",
+            "MarkInboxSeen",
         ];
         for method in methods_of(&pool()) {
             if access(&path(&method)) != Some(v1::Access::Write) || EXCEPT.contains(&method.name())

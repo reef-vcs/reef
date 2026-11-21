@@ -26,6 +26,7 @@ pub mod files;
 pub mod git;
 pub mod history;
 pub mod identity;
+pub mod inbox;
 pub mod landing;
 pub mod maintenance;
 pub mod operations;

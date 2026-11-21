@@ -108,7 +108,7 @@ reef comment answer cmt_5d1e0a93c2b74f18 -m "Keep parse"              # the answ
 - **Waiting for it.** `reef ask --wait` takes the answer as it arrives, as `reef comment next --wait` does. Through MCP, `wait_for_operations` with kind `comment` returns it in `instructions`. A hook prints it at the turn's end or the next prompt. The answer is framed `Reef answer cmt_… to your help request cmt_…`; when finished, `reef comment done` (or a re-proposal) finishes it.
 - **What waits.** While a help request a workspace's session asked is open, or its answer is untaken, that workspace's `reef here` step is `await_help` and its `next` is `reef comment next --wait 10m`; other workspaces on the change keep their step. While one is open, automatic landing queues nothing more of the change's stack (`needs`, reason `help`, `next` `reef comment show cmt_…`). A landing already queued goes on (withdraw the proposal to stop it), and an explicit `reef land` is not held.
 - **Limits.** One open help request per change and asking session (`HELP_ALREADY_OPEN`), 16 open per change and 256 per repository (`TOO_MANY_HELP_REQUESTS`).
-- **How a person notices.** The web UI's activity feed says `asked for help`; `reef comment list --all --kind help --help-state open` lists them; a held proposal says so in `reef proposal show`. R3.33's inbox makes them the "needs you now" bucket.
+- **How a person notices.** The web UI's [inbox](inbox.md) lists every open help request under "needs you now", live, with its question and what the agent tried, and answers it in place; `reef inbox` lists them too. The activity feed says `asked for help`; `reef comment list --all --kind help --help-state open` lists them; a held proposal says so in `reef proposal show`.
 
 ## Trust
 
@@ -124,5 +124,4 @@ reef comment answer cmt_5d1e0a93c2b74f18 -m "Keep parse"              # the answ
 ## What later tickets add
 
 - **R3.46**: webhooks that push confirmed instructions to a runner the operator controls, and a runner's report of tokens and price into the estimate.
-- **R3.33**: unanswered help requests and instructions in flight in the triage inbox.
 - **R3.20**: compute budgets in policy, which may read stored estimates.

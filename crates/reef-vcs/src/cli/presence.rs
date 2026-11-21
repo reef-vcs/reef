@@ -162,6 +162,10 @@ enum KindArg {
     Progress,
     /// Executor jobs (R3.05), reported by the daemon.
     Job,
+    /// Open proposals' automatic statuses (R3.33), reported by the daemon.
+    Automatic,
+    /// Workspaces that need attention (R3.33), reported by the daemon.
+    Attention,
 }
 
 impl From<KindArg> for v1::PresenceKind {
@@ -172,6 +176,8 @@ impl From<KindArg> for v1::PresenceKind {
             KindArg::Lease => Self::Lease,
             KindArg::Progress => Self::Progress,
             KindArg::Job => Self::Job,
+            KindArg::Automatic => Self::Automatic,
+            KindArg::Attention => Self::Attention,
         }
     }
 }

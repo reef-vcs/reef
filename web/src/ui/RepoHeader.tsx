@@ -16,7 +16,8 @@ const PAGE_TITLES: Record<RepoPage, string> = {
   smartlog: "Smartlog",
   workspaces: "Workspaces",
   activity: "Activity",
-  proposals: "Proposals",
+  inbox: "Inbox",
+  proposal: "Proposal",
 };
 
 /** A repository's name: the last component of its root. */
@@ -42,6 +43,8 @@ export function RepoHeader({
   const { fatal, repository } = useSyncExternalStore(win.subscribe, win.getSnapshot);
   const name = repoName(repository?.root, repo);
   useEffect(() => {
+    // The inbox titles itself, with its count (inbox/needs.ts).
+    if (current === "inbox") return;
     document.title = `${name} · ${PAGE_TITLES[current]} — Reef`;
   }, [name, current]);
   return (
