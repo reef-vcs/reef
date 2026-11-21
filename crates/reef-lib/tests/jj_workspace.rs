@@ -1701,6 +1701,200 @@ async fn a_clean_workspace_keeps_its_snapshot_over_an_older_rebase() {
     assert_keeps(&fx, &mut y, &y_root, &c2).await;
 }
 
+/// `y` with one.txt snapshotted at C and then two.txt at C2, with `main`
+/// at C2's operation. Returns `y`, its root, C, C2, and the repository at
+/// C's operation.
+async fn snapshotted_twice(
+    fx: &mut Fixture,
+) -> (Repo, PathBuf, CommitIdHex, CommitIdHex, Arc<ReadonlyRepo>) {
+    let (mut y, y_root, c) = busy_workspace(fx, &[("one.txt", "one\n")]).await;
+    let before = Arc::clone(fx.main.head());
+    write(&y_root, "two.txt", "two\n");
+    y.set_head(Arc::clone(fx.main.head()));
+    let c2 = y
+        .snapshot("reef: snapshot workspace y")
+        .await
+        .unwrap()
+        .wc_commit;
+    fx.main.reload_at_head().await.unwrap();
+    (y, y_root, c, c2, before)
+}
+
+/// Another jj client's restore of `main`'s head to `to`'s view, described
+/// `description`, as `jj undo` and `jj op restore` write it: no `reef.*`
+/// attributes and no commit rewritten.
+async fn restore_as_client(fx: &mut Fixture, to: &ReadonlyRepo, description: &str) {
+    let mut tx = fx.main.head().start_transaction();
+    tx.repo_mut().set_view(to.view().store_view().clone());
+    let restored = tx.commit(description).await.unwrap();
+    fx.main.set_head(restored);
+}
+
+/// The jj CLI's description of `jj undo` back to `to`.
+fn jj_undo_description(to: &ReadonlyRepo) -> String {
+    format!("undo: restore to operation {}", to.op_id().hex())
+}
+
+// Issue #357: `jj undo` at the root undid `y`'s last snapshot. The jj CLI
+// describes its undo as Reef's spike once did, but it is another client's,
+// and it rewrote nothing: a clean `y` keeps two.txt and diverges.
+#[tokio::test]
+async fn a_clean_workspace_keeps_its_snapshot_over_a_jj_undo() {
+    let mut fx = Fixture::new().await;
+    let (mut y, y_root, c, c2, before) = snapshotted_twice(&mut fx).await;
+    restore_as_client(&mut fx, &before, &jj_undo_description(&before)).await;
+    let now = reef_lib::jj::view_wc_commit(fx.main.head(), &format!("reef-{Y}")).unwrap();
+    assert_eq!(now, c, "the undo put y back on C");
+
+    assert_keeps(&fx, &mut y, &y_root, &c2).await;
+}
+
+// Issue #357: the same with `jj op restore` to the operation before C2.
+#[tokio::test]
+async fn a_clean_workspace_keeps_its_snapshot_over_an_op_restore() {
+    let mut fx = Fixture::new().await;
+    let (mut y, y_root, _, c2, before) = snapshotted_twice(&mut fx).await;
+    let description = format!("restore to operation {}", before.op_id().hex());
+    restore_as_client(&mut fx, &before, &description).await;
+
+    assert_keeps(&fx, &mut y, &y_root, &c2).await;
+}
+
+// Issue #357: another client abandoned `y`'s last snapshot, which put `y`
+// on a new commit made from nothing of C2's.
+#[tokio::test]
+async fn a_clean_workspace_keeps_its_snapshot_over_a_clients_abandon() {
+    let mut fx = Fixture::new().await;
+    let (mut y, y_root, _, c2, _) = snapshotted_twice(&mut fx).await;
+    let id = CommitId::try_from_hex(c2.as_str()).unwrap();
+    let head = Arc::clone(fx.main.head());
+    let abandoned = head.store().get_commit_async(&id).await.unwrap();
+    let mut tx = head.start_transaction();
+    tx.repo_mut().record_abandoned_commit(&abandoned);
+    tx.repo_mut().rebase_descendants().await.unwrap();
+    fx.main.set_head(tx.commit("abandon commit").await.unwrap());
+    let now = reef_lib::jj::view_wc_commit(fx.main.head(), &format!("reef-{Y}")).unwrap();
+    assert_ne!(now, c2, "the abandon moved y");
+
+    assert_keeps(&fx, &mut y, &y_root, &c2).await;
+}
+
+// Issue #357: `y` has an edit since its last snapshot when `jj undo` undoes
+// that snapshot. The undo is not Reef's, so nothing is carried onto C: `y`
+// diverges with both files on disk.
+#[tokio::test]
+async fn a_busy_workspace_keeps_its_snapshot_over_a_jj_undo() {
+    let mut fx = Fixture::new().await;
+    let (mut y, y_root, _, c2, before) = snapshotted_twice(&mut fx).await;
+    write(&y_root, "three.txt", "three\n");
+    restore_as_client(&mut fx, &before, &jj_undo_description(&before)).await;
+
+    y.set_head(Arc::clone(fx.main.head()));
+    let pending = y
+        .begin_snapshot(Some(&c2), None, &IgnoreSources::default(), None)
+        .await
+        .unwrap();
+    assert!(
+        !pending.carried(),
+        "nothing is carried onto the undone commit"
+    );
+    assert_eq!(pending.plan().rewrite_of, c2);
+    assert!(pending.plan().divergent);
+    let committed = commit_snapshot(fx.main.head(), pending.plan(), &y_snapshot())
+        .await
+        .unwrap();
+    pending.finish(&committed.op_id).await.unwrap();
+    assert!(y_root.join("two.txt").is_file(), "two.txt stays on disk");
+    assert!(y_root.join("three.txt").is_file(), "and so does the edit");
+    for path in ["two.txt", "three.txt"] {
+        assert!(
+            file_in(&committed.repo, &committed.commit_id, path)
+                .await
+                .is_some(),
+            "{path} is in the workspace's commit"
+        );
+    }
+}
+
+/// Issue #357, from the #344 review (R4-1): Reef undid `y`'s last snapshot
+/// C2 on one operation head, back to C, while another jj client that
+/// loaded the head before C2 described C on the other. `main` is left at
+/// the merge of the two heads: the client's merged into Reef's, or with
+/// `clients_first` Reef's into the client's.
+async fn undone_beside_a_stale_describe(
+    clients_first: bool,
+) -> (Fixture, Repo, PathBuf, CommitIdHex) {
+    let mut fx = Fixture::new().await;
+    let (mut y, y_root, c) = busy_workspace(&mut fx, &[("one.txt", "one\n")]).await;
+    let stale = Arc::clone(fx.main.head());
+    write(&y_root, "two.txt", "two\n");
+    y.set_head(Arc::clone(fx.main.head()));
+    let snapshot = y.snapshot("reef: snapshot workspace y").await.unwrap();
+    fx.main.reload_at_head().await.unwrap();
+    reefs_undo(&mut fx, &snapshot.op_id).await;
+    let undone = Arc::clone(fx.main.head());
+    let clients = concurrent_describe(&stale, &c).await;
+    let heads = if clients_first {
+        [&clients, &undone]
+    } else {
+        [&undone, &clients]
+    };
+    merge_in_order(&mut fx, &heads).await;
+    (fx, y, y_root, snapshot.wc_commit)
+}
+
+/// The daemon's undo of `op` on `main`.
+async fn reefs_undo(fx: &mut Fixture, op: &reef_lib::jj::OperationIdHex) {
+    let undo = OpMeta::new(OpKind::Undo, format!("reef: undo operation {op}"));
+    fx.main
+        .revert_operation(op, &undo)
+        .await
+        .unwrap()
+        .expect("the undo changed the view");
+}
+
+// The client's describe started at C, which only the undo beside it
+// reached: the client never saw C2 or the undo. In either merge order a
+// clean `y` keeps two.txt.
+#[tokio::test]
+async fn a_stale_describe_beside_an_undo_keeps_the_snapshot_in_either_merge_order() {
+    for clients_first in [false, true] {
+        let (fx, mut y, y_root, c2) = undone_beside_a_stale_describe(clients_first).await;
+        assert_keeps(&fx, &mut y, &y_root, &c2).await;
+    }
+}
+
+// Reef's own undo of `y`'s last snapshot is still followed: someone asked
+// Reef to leave C2.
+#[tokio::test]
+async fn a_clean_workspace_follows_reefs_undo_of_its_snapshot() {
+    let mut fx = Fixture::new().await;
+    let (mut y, y_root, c) = busy_workspace(&mut fx, &[("one.txt", "one\n")]).await;
+    write(&y_root, "two.txt", "two\n");
+    y.set_head(Arc::clone(fx.main.head()));
+    let snapshot = y.snapshot("reef: snapshot workspace y").await.unwrap();
+    fx.main.reload_at_head().await.unwrap();
+    reefs_undo(&mut fx, &snapshot.op_id).await;
+
+    y.set_head(Arc::clone(fx.main.head()));
+    let pending = y
+        .begin_snapshot(
+            Some(&snapshot.wc_commit),
+            None,
+            &IgnoreSources::default(),
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(pending.adopted());
+    assert_eq!(pending.wc_commit(), Some(&c));
+    pending.finish(&fx.main.op_id()).await.unwrap();
+    assert!(
+        !y_root.join("two.txt").exists(),
+        "the undo took two.txt away"
+    );
+}
+
 /// `settings()`, with every operation stamped `stamp`: a jj client whose
 /// clock reads that, whatever the time.
 fn settings_at(stamp: &str) -> UserSettings {
