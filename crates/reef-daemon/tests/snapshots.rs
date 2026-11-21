@@ -20,16 +20,16 @@ use jj_lib::backend::CommitId;
 use jj_lib::repo::Repo as _;
 use jj_lib::repo_path::RepoPathBuf;
 use reef_api::v1::{
-    Attention, CreateWorkspaceRequest, WatcherKind, Workspace, create_workspace_request,
+    Attention, CreateWorkspaceRequest, IfNotJj, WatcherKind, Workspace, create_workspace_request,
 };
 #[cfg(target_os = "linux")]
 use reef_api::v1::{Backend, WatchState};
 use reef_daemon::model::WorkspaceId;
 use reef_daemon::snapshot::PauseGuard;
 use reef_daemon::workspace::SnapshotSpec;
-use reef_lib::jj::Repo;
 use reef_lib::jj::oplog::OpEntry;
 use reef_lib::jj::revset::RevisionError;
+use reef_lib::jj::{CommitIdHex, Repo};
 use reef_testing::synth::Preset;
 
 const OWNER: &str = "tester@host";
@@ -49,14 +49,46 @@ async fn fixture_with(
     // `TEST_LOG=reef_daemon=debug` also shows the daemons' logs.
     common::logs();
     TestDaemon::with_synthetic_repo_and(Preset::Small, |config| {
-        let watcher = &mut config.file.watcher;
-        watcher.debounce = Duration::from_millis(100);
-        watcher.min_interval = Duration::from_millis(100);
-        watcher.fallback_interval = FALLBACK;
-        watcher.watched_fallback_interval = FALLBACK;
+        intervals(config);
         configure(config);
     })
     .await
+}
+
+/// The brief's test intervals.
+fn intervals(config: &mut reef_daemon::config::Config) {
+    let watcher = &mut config.file.watcher;
+    watcher.debounce = Duration::from_millis(100);
+    watcher.min_interval = Duration::from_millis(100);
+    watcher.fallback_interval = FALLBACK;
+    watcher.watched_fallback_interval = FALLBACK;
+}
+
+/// [`fixture`]'s daemon with a registered repository colocated with git,
+/// whose one commit has `README`.
+async fn colocated_fixture() -> (TestDaemon, SyntheticRepo) {
+    common::logs();
+    let daemon = TestDaemon::start_with(intervals).await;
+    let root = daemon.tmp.path().join("colocated");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("README"), "colocated\n").unwrap();
+    let at = root.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut repo = pollster::block_on(Repo::init_colocated_git(&at, &test_settings())).unwrap();
+        pollster::block_on(repo.snapshot("snapshot")).unwrap();
+    })
+    .await
+    .unwrap();
+    let registered = daemon
+        .client
+        .register_repository(&root, IfNotJj::Fail)
+        .await
+        .unwrap();
+    let repo = SyntheticRepo {
+        root: std::fs::canonicalize(&root).unwrap(),
+        id: registered.repository.unwrap().id,
+    };
+    (daemon, repo)
 }
 
 async fn create(
@@ -650,6 +682,191 @@ async fn a_clean_workspace_keeps_its_file_over_a_jj_undo() {
         tree_has(&repo.root, &row.commit_id, "two.txt").await,
         "and its commit has the file"
     );
+}
+
+/// Runs git at `root` with `env` set, failing the test on an error; its
+/// standard output.
+fn git(root: &Path, env: &[(&str, &Path)], args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .envs(env.iter().copied())
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
+/// `git commit --amend` of `branch` at `root` that sets `path` to
+/// `contents`. The new commit keeps the old one's headers, jj's change id
+/// among them, as git's amend does. Returns its id.
+fn git_amend(root: &Path, branch: &str, path: &str, contents: &str) -> String {
+    let scratch = tempfile::tempdir().unwrap();
+    let file = scratch.path().join("object");
+    let file_arg = file.to_str().unwrap();
+    let index_file = scratch.path().join("index");
+    let index = [("GIT_INDEX_FILE", index_file.as_path())];
+    std::fs::write(&file, contents).unwrap();
+    let blob = git(root, &[], &["hash-object", "-w", file_arg]);
+    git(root, &index, &["read-tree", branch]);
+    let entry = format!("100644,{},{path}", blob.trim_end());
+    git(
+        root,
+        &index,
+        &["update-index", "--add", "--cacheinfo", &entry],
+    );
+    let tree = git(root, &index, &["write-tree"]);
+    let old_tree = git(root, &[], &["rev-parse", &format!("{branch}^{{tree}}")]);
+    let commit = git(root, &[], &["cat-file", "commit", branch]).replacen(
+        &format!("tree {}\n", old_tree.trim_end()),
+        &format!("tree {}\n", tree.trim_end()),
+        1,
+    );
+    std::fs::write(&file, commit).unwrap();
+    let amended = git(root, &[], &["hash-object", "-t", "commit", "-w", file_arg]);
+    let amended = amended.trim_end();
+    git(
+        root,
+        &[],
+        &["update-ref", &format!("refs/heads/{branch}"), amended],
+    );
+    amended.to_owned()
+}
+
+/// A workspace with `w/one.txt` and then `w/two.txt` snapshotted, the
+/// guard pausing its automatic snapshots, and its last snapshot's commit.
+async fn snapshotted_twice(
+    daemon: &TestDaemon,
+    repo: &SyntheticRepo,
+) -> (Workspace, PauseGuard, String) {
+    let ws = create(daemon, repo, None).await;
+    let hold = daemon.handle.state().manager.scheduler().pause(id_of(&ws));
+    for (path, contents) in [("w/one.txt", "one\n"), ("w/two.txt", "two\n")] {
+        write(&ws, path, contents);
+        daemon
+            .client
+            .snapshot_workspace(&repo.id, &ws.id, "")
+            .await
+            .unwrap();
+    }
+    let last = inspect(daemon, repo, &ws).await.commit_id;
+    (ws, hold, last)
+}
+
+/// A Reef write, which imports git refs first: a workspace create.
+async fn reefs_import(daemon: &TestDaemon, repo: &SyntheticRepo) {
+    create(daemon, repo, None).await;
+}
+
+/// `git branch review <commit>` at the root, Reef's import, `git branch -D
+/// review`, and Reef's import again, which abandons `commit` because git no
+/// longer reaches it. Asserts that the import moved `ws` off `commit`.
+async fn on_a_deleted_branch(
+    daemon: &TestDaemon,
+    repo: &SyntheticRepo,
+    ws: &Workspace,
+    commit: &str,
+) {
+    git(&repo.root, &[], &["branch", "review", commit]);
+    reefs_import(daemon, repo).await;
+    git(&repo.root, &[], &["branch", "-D", "review"]);
+    reefs_import(daemon, repo).await;
+    let now =
+        reef_lib::jj::view_wc_commit(open(&repo.root).await.head(), &format!("reef-{}", ws.id));
+    assert_ne!(
+        now.as_ref().map(CommitIdHex::as_str),
+        Some(commit),
+        "the import abandoned the workspace's commit"
+    );
+}
+
+/// Asserts that `ws`'s files `w/one.txt` and `w/two.txt`, and any `more`,
+/// are on disk and in its commit, which is marked divergent.
+async fn assert_keeps(daemon: &TestDaemon, repo: &SyntheticRepo, ws: &Workspace, more: &[&str]) {
+    let row = inspect(daemon, repo, ws).await;
+    for path in ["w/one.txt", "w/two.txt"].iter().chain(more) {
+        assert!(
+            Path::new(&ws.path).join(path).is_file(),
+            "{path} stays on disk"
+        );
+        assert!(
+            tree_has(&repo.root, &row.commit_id, path).await,
+            "{path} is in the workspace's commit"
+        );
+    }
+    assert!(row.divergent, "the change says it diverged");
+    assert_eq!(row.attention(), Attention::Divergent);
+}
+
+// Issue #368: someone puts a git branch on the agent's last snapshot and
+// deletes it again. Reef's own import of git refs before its next write
+// abandons the snapshot's commit, which git no longer reaches, and puts
+// the workspace on a new empty commit. The import rewrote nothing, so the
+// clean workspace keeps its files and diverges, as it does when the jj CLI
+// imports first.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_clean_workspace_keeps_its_files_over_reefs_import_of_a_deleted_branch() {
+    let (daemon, repo) = colocated_fixture().await;
+    let (ws, _hold, last) = snapshotted_twice(&daemon, &repo).await;
+    on_a_deleted_branch(&daemon, &repo, &ws, &last).await;
+
+    daemon
+        .client
+        .snapshot_workspace(&repo.id, &ws.id, "")
+        .await
+        .unwrap();
+    assert_keeps(&daemon, &repo, &ws, &[]).await;
+}
+
+// Issue #368: the same with an edit since the last snapshot. The import
+// left the snapshot's change, so nothing is carried onto the new commit.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_busy_workspace_keeps_its_files_over_reefs_import_of_a_deleted_branch() {
+    let (daemon, repo) = colocated_fixture().await;
+    let (ws, _hold, last) = snapshotted_twice(&daemon, &repo).await;
+    write(&ws, "w/three.txt", "three\n");
+    on_a_deleted_branch(&daemon, &repo, &ws, &last).await;
+
+    daemon
+        .client
+        .snapshot_workspace(&repo.id, &ws.id, "")
+        .await
+        .unwrap();
+    assert_keeps(&daemon, &repo, &ws, &["w/three.txt"]).await;
+}
+
+// Issue #368: someone amends, with git, a branch on the agent's last
+// snapshot. Reef's import records the amended commit as a rewrite of the
+// snapshot's, so the clean workspace follows it onto disk.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_clean_workspace_follows_a_git_amend_of_its_snapshot() {
+    let (daemon, repo) = colocated_fixture().await;
+    let (ws, _hold, last) = snapshotted_twice(&daemon, &repo).await;
+    git(&repo.root, &[], &["branch", "review", &last]);
+    reefs_import(&daemon, &repo).await;
+    let amended = git_amend(&repo.root, "review", "w/two.txt", "amended\n");
+    reefs_import(&daemon, &repo).await;
+
+    daemon
+        .client
+        .snapshot_workspace(&repo.id, &ws.id, "")
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(Path::new(&ws.path).join("w/two.txt")).unwrap(),
+        "amended\n",
+        "the amend is checked out"
+    );
+    let row = inspect(&daemon, &repo, &ws).await;
+    assert_eq!(
+        row.commit_id, amended,
+        "the workspace is on the amended commit"
+    );
+    assert!(!row.divergent, "and has not diverged");
 }
 
 // 8. The daemon sees the outside operation when it refreshes its head
