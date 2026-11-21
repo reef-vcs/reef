@@ -28,12 +28,15 @@
 
 mod judge;
 
+pub(crate) use judge::SIGNOFF_NEED;
+
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
 use futures::FutureExt as _;
+use reef_api::v1::{PresenceEndReason, PresenceKind};
 use reef_lib::error::ErrorChain;
 use reef_lib::jj::land::{self, LandError, StackMember};
 use reef_lib::jj::{ChangeIdHex, CommitIdHex, files};
@@ -46,6 +49,7 @@ use crate::daemon::AppState;
 use crate::db::{JobState, LifecycleRow};
 use crate::model::{RepoId, Timestamp};
 use crate::policy::Loaded;
+use crate::presence::{DaemonKey, PresenceHub, Report};
 use crate::service::policy as policy_input;
 use judge::{Budget, Judging};
 
@@ -169,6 +173,11 @@ pub struct Status {
 }
 
 impl Status {
+    /// A returned landing the service queues again by itself.
+    pub fn retrying(&self) -> bool {
+        self.state == State::Returned && self.retry_at.is_some()
+    }
+
     fn new(state: State, commit: &str) -> Status {
         Status {
             state,
@@ -208,6 +217,16 @@ impl Status {
         self.missing = needs.into_iter().take(MAX_MISSING).collect();
         self
     }
+}
+
+/// The presence key of `change`'s status: its repository and the first 64
+/// bits of its change id.
+fn presence_key(repo: RepoId, change: &str) -> DaemonKey {
+    let bits = change
+        .get(..16)
+        .and_then(|prefix| u64::from_str_radix(prefix, 16).ok())
+        .unwrap_or(0);
+    DaemonKey::Automatic(repo, bits)
 }
 
 /// The service's state; one in [`AppState`].
@@ -282,9 +301,61 @@ impl Automatic {
         self.evaluations.load(Ordering::Relaxed)
     }
 
-    fn set(&self, repo: RepoId, statuses: HashMap<String, Status>) {
-        self.with(|inner| inner.statuses.insert(repo, statuses));
+    /// Replaces `repo`'s statuses, and returns those that moved (new, or
+    /// another key or state), for the agents' instructions. Publishes the
+    /// `AUTOMATIC` entry of each judged status that moved or whose entry
+    /// lapsed, and ends those of proposals gone or now `OFF` (R3.33, #362).
+    fn set(
+        &self,
+        hub: &PresenceHub,
+        repo: RepoId,
+        statuses: &HashMap<String, Status>,
+    ) -> Vec<(String, Status)> {
+        let before = self
+            .with(|inner| inner.statuses.insert(repo, statuses.clone()))
+            .unwrap_or_default();
         self.changed.notify_waiters();
+        let moved: Vec<(String, Status)> = statuses
+            .iter()
+            .filter(|(change, status)| {
+                before
+                    .get(*change)
+                    .is_none_or(|old| old.key != status.key || old.state != status.state)
+            })
+            .map(|(change, status)| (change.clone(), status.clone()))
+            .collect();
+        let live: HashSet<DaemonKey> = hub.automatic_keys(repo).into_iter().collect();
+        let judged: HashSet<DaemonKey> = statuses
+            .keys()
+            .map(|change| presence_key(repo, change))
+            .collect();
+        for key in live.difference(&judged) {
+            hub.end_daemon(*key, PresenceEndReason::Cleared);
+        }
+        for (change, status) in statuses {
+            let key = presence_key(repo, change);
+            let had = live.contains(&key);
+            if status.state == State::Off {
+                if had {
+                    hub.end_daemon(key, PresenceEndReason::Cleared);
+                }
+                continue;
+            }
+            let changed = moved.iter().any(|(name, _)| name == change);
+            if changed || !had {
+                let mut message = super::messages::automatic_message(status);
+                message.missing.clear();
+                hub.publish_daemon(key, |_| Report {
+                    repo: Some(repo),
+                    change_id: change.clone(),
+                    kind: PresenceKind::Automatic,
+                    automatic: Some(message),
+                    ttl: crate::presence::STATE_TTL,
+                    ..Report::default()
+                });
+            }
+        }
+        moved
     }
 }
 
@@ -640,7 +711,7 @@ async fn pass(state: &Arc<AppState>, repo: RepoId) -> Result<bool, String> {
         cancel_unneeded(state, repo, &gone, &proposals, &needed);
     }
     if proposals.is_empty() {
-        state.automatic.set(repo, HashMap::new());
+        state.automatic.set(&state.presence, repo, &HashMap::new());
         return Ok(false);
     }
     let destinations = read(state, repo, &proposals).await?;
@@ -767,16 +838,7 @@ async fn pass(state: &Arc<AppState>, repo: RepoId) -> Result<bool, String> {
         destination.clone_into(&mut status.destination);
         status.automatic = automatic;
     }
-    let instruct: Vec<(String, Status)> = statuses
-        .iter()
-        .filter(|(change, status)| {
-            before
-                .get(*change)
-                .is_none_or(|old| old.key != status.key || old.state != status.state)
-        })
-        .map(|(change, status)| (change.clone(), status.clone()))
-        .collect();
-    state.automatic.set(repo, statuses);
+    let instruct = state.automatic.set(&state.presence, repo, &statuses);
     for (change, status) in instruct {
         if status.automatic {
             super::instruct::send(state, repo, &change, &status).await;

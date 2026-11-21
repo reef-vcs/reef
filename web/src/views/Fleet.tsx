@@ -19,6 +19,7 @@ import {
   type DiskStatus,
 } from "../gen/reef/api/v1/workspaces_pb";
 import { agentsOfWorkspace, joinAgents } from "../fleet/agents";
+import { isAgentEntry } from "../live/kinds";
 import { durationMs, expiry, type Health } from "../fleet/lease";
 import type { FrameScheduler } from "../live/frame";
 import type { Live } from "../live/share";
@@ -473,7 +474,7 @@ export function Fleet({
 
   const repoId = snapshot.repository?.id ?? params.repo;
   const presence = live.presence;
-  const entries: Presence[] = frozen ? [] : [...presence.entries.values()];
+  const entries: Presence[] = frozen ? [] : [...presence.entries.values()].filter(isAgentEntry);
   const join = joinAgents(entries, repoId);
   const endings = frozen ? [] : [...presence.endings.values()];
   const index = leaseIndex(entries, endings);

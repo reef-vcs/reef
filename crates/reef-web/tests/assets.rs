@@ -250,7 +250,7 @@ const PAGES: &[&str] = &[
     "src/views/States.tsx",
     "src/views/Passkeys.tsx",
     "src/views/Approve.tsx",
-    "src/views/Proposals.tsx",
+    "src/views/Inbox.tsx",
     "src/views/Proposal.tsx",
 ];
 
@@ -335,7 +335,8 @@ fn bundle_budget() {
     // KiB in R3.42 (user, 2026-11-09, stopgap); 500 KiB again since #252.
     let manifest = manifest();
     let routes: &[(&str, &[&str])] = &[
-        ("/", &[]),
+        // The home page is the inbox (R3.33).
+        ("/", &["src/views/Inbox.tsx"]),
         (
             "/repos/<id>/smartlog",
             &["src/views/RepoFrame.tsx", "src/views/Smartlog.tsx"],
@@ -352,8 +353,8 @@ fn bundle_budget() {
         ("/passkeys", &["src/views/Passkeys.tsx"]),
         ("/approve/<id>", &["src/views/Approve.tsx"]),
         (
-            "/repos/<id>/proposals",
-            &["src/views/RepoFrame.tsx", "src/views/Proposals.tsx"],
+            "/repos/<id>/inbox",
+            &["src/views/RepoFrame.tsx", "src/views/Inbox.tsx"],
         ),
         (
             "/repos/<id>/proposals/<change>",

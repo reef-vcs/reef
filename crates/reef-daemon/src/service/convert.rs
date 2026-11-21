@@ -184,7 +184,7 @@ pub(super) fn state_of(state: v1::WorkspaceState) -> Option<WorkspaceState> {
     }
 }
 
-fn attention(attention: Option<Attention>) -> v1::Attention {
+pub(crate) fn attention(attention: Option<Attention>) -> v1::Attention {
     match attention {
         None => v1::Attention::Unspecified,
         Some(Attention::Divergent) => v1::Attention::Divergent,

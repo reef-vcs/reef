@@ -1,19 +1,17 @@
-// The data of the Proposals tab and the proposal page (R3.31).
+// The data of the proposal page (R3.31).
 //
-// Both read live from the shared operation stream, as the workspaces page
+// It reads live from the shared operation stream, as the workspaces page
 // does: nothing is read until the stream is live, so an operation recorded
 // after a read arrives on it and asks for another, and refreshes are paced
 // (live/paced.ts). Any operation in the repository asks for one: a comment,
 // a transition and a landing are operations, and so is the automatic
 // service's queueing. Evidence is not: a check's result or a sign-off
-// records no operation, and it changes the policy's verdict and the
-// automatic status. So while something is in review, a read also follows
-// the last one by `POLL_MS`, paced the same way. `ListProposals` has no
-// `at_operation`, so neither page reads at an operation.
-//
-// The tab's list is held in place (the design's rule): rows keep their order,
-// a proposal that left review keeps its row with its new state, and new
-// proposals wait behind a count until the person shows them.
+// records no operation. Where the destination's policy judges the proposal,
+// its AUTOMATIC presence entry is replaced when new evidence changes its
+// status (R3.33, #362), and that asks for a read; where nothing judges it
+// (status `OFF`), a read also follows the last one by `POLL_MS` while it is
+// in review, paced the same way. `ListProposals` has no `at_operation`, so
+// the page never reads at an operation.
 //
 // The proposal page reads the proposal as a unit, in this order of the page:
 // the entry (`ListProposals` for its change, any state), the changes below it
@@ -24,7 +22,7 @@
 import { Code } from "@connectrpc/connect";
 import { client, type Connection } from "../api/connection";
 import { isSessionInvalid, reefError, type ReefError } from "../api/errors";
-import { ChangeService, type ProposalEntry } from "../gen/reef/api/v1/changes_pb";
+import { AutomaticState, ChangeService, type ProposalEntry } from "../gen/reef/api/v1/changes_pb";
 import { CommentService, type Comment } from "../gen/reef/api/v1/comments_pb";
 import { EvidenceService, type Evidence } from "../gen/reef/api/v1/evidence_pb";
 import { LifecycleState, type ChangeTransition } from "../gen/reef/api/v1/lifecycle_pb";
@@ -35,10 +33,13 @@ import {
 } from "../gen/reef/api/v1/policy_pb";
 import { ProvenanceService, type ProvenanceRecord } from "../gen/reef/api/v1/provenance_pb";
 import { RepositoryService, type Repository } from "../gen/reef/api/v1/repositories_pb";
+import { PresenceKind, type Presence } from "../gen/reef/api/v1/presence_pb";
 import { FrameNotifier, type FrameScheduler } from "../live/frame";
+import { stateSignature } from "../live/kinds";
 import type { OperationBatch, OperationStore } from "../live/operations";
 import { after, type Cancel } from "../live/backoff";
 import { Paced } from "../live/paced";
+import type { PresenceStore } from "../live/presence";
 import { hexFromEither } from "../ui/ids";
 
 /** Every lifecycle state a proposal page may find its change in. */
@@ -58,20 +59,7 @@ export const POLL_MS = 10_000;
 /** Comments the page reads at most, in pages; past it the page says so. */
 export const COMMENTS_SHOWN = 1_000;
 
-/** Open proposals the tab lists at most; past it the tab says so. */
-export const PROPOSALS_SHOWN = 200;
-
 export const NOT_A_PROPOSAL = "NOT_A_PROPOSAL";
-
-/** When an entry last moved: its latest transition, else never. */
-export function updatedAt(entry: ProposalEntry): number {
-  const at = entry.lifecycle?.last?.recordedAt;
-  return at ? Number(at.seconds) * 1000 + Math.floor(at.nanos / 1e6) : 0;
-}
-
-function newestFirst(a: ProposalEntry, b: ProposalEntry): number {
-  return updatedAt(b) - updatedAt(a) || a.changeId.localeCompare(b.changeId);
-}
 
 /** A read of one repository, refreshed on its operations, one in flight. */
 abstract class RepoReader<S extends { version: number }> {
@@ -84,9 +72,12 @@ abstract class RepoReader<S extends { version: number }> {
   private waiting = false;
   private poll: Cancel | undefined;
 
+  private signature = "";
+
   constructor(
     protected readonly connection: Connection,
     private readonly operations: OperationStore,
+    private readonly presence: PresenceStore,
     frame: FrameScheduler,
     protected readonly onSessionInvalid: () => void,
     protected readonly repo: string,
@@ -105,10 +96,14 @@ abstract class RepoReader<S extends { version: number }> {
     const unsubscribe = this.operations.subscribe((batch) => {
       this.onBatch(batch);
     });
+    const unsubscribePresence = this.presence.subscribe(() => {
+      this.onPresence();
+    });
     if (this.operations.live) this.requestFirst();
     return () => {
       this.stopped = true;
       unsubscribe();
+      unsubscribePresence();
       this.paced.stop();
       this.poll?.();
     };
@@ -126,8 +121,11 @@ abstract class RepoReader<S extends { version: number }> {
 
   protected abstract read(repo: string): Promise<void>;
 
-  /** Whether what was read is still in review, so evidence may arrive without an operation. */
+  /** Whether evidence may arrive with no event: in review, and judged by nothing. */
   protected abstract inReview(): boolean;
+
+  /** The live presence entries whose change asks for a read, as one string. */
+  protected abstract presenceSignature(entries: Iterable<Presence>): string;
 
   protected update(patch: Partial<S>) {
     this.snapshot = { ...this.snapshot, ...patch, version: this.snapshot.version + 1 };
@@ -154,6 +152,13 @@ abstract class RepoReader<S extends { version: number }> {
       if (typeof document !== "undefined" && document.visibilityState === "hidden") this.arm();
       else this.paced.request();
     });
+  }
+
+  private onPresence() {
+    const signature = this.presenceSignature(this.presence.entries.values());
+    if (signature === this.signature) return;
+    this.signature = signature;
+    if (this.requested && this.operations.live) this.paced.request();
   }
 
   private requestFirst() {
@@ -209,114 +214,6 @@ abstract class RepoReader<S extends { version: number }> {
   protected abstract onError(error: ReefError | null): void;
 }
 
-// ---- The Proposals tab ----
-
-export interface ProposalsSnapshot {
-  /** Rows in display order; null until the first read answers. */
-  rows: ProposalEntry[] | null;
-  /** Open proposals that arrived since, waiting behind the count. */
-  fresh: number;
-  /** Rows whose proposal left review since it was shown. */
-  left: number;
-  /** More open proposals than `PROPOSALS_SHOWN`. */
-  more: boolean;
-  repository: Repository | undefined;
-  /** A failed refresh; the last good rows stay. */
-  error: ReefError | null;
-  version: number;
-}
-
-export class ProposalsModel extends RepoReader<ProposalsSnapshot> {
-  /** Change ids in display order. */
-  private order: string[] = [];
-  private readonly entries = new Map<string, ProposalEntry>();
-  /** Open ones not shown yet, by change id. */
-  private readonly pending = new Map<string, ProposalEntry>();
-
-  constructor(
-    connection: Connection,
-    operations: OperationStore,
-    frame: FrameScheduler,
-    onSessionInvalid: () => void,
-    repo: string,
-  ) {
-    super(connection, operations, frame, onSessionInvalid, repo, {
-      rows: null,
-      fresh: 0,
-      left: 0,
-      more: false,
-      repository: undefined,
-      error: null,
-      version: 0,
-    });
-  }
-
-  /** "Show n new": new proposals go on top, and the rows that left review go. */
-  showNew() {
-    const fresh = [...this.pending.values()].sort(newestFirst);
-    for (const entry of fresh) this.entries.set(entry.changeId, entry);
-    this.pending.clear();
-    this.order = [
-      ...fresh.map((e) => e.changeId),
-      ...this.order.filter((id) => this.isOpen(this.entries.get(id))),
-    ];
-    for (const id of [...this.entries.keys()]) {
-      if (!this.order.includes(id)) this.entries.delete(id);
-    }
-    this.publish();
-  }
-
-  protected onRepository(repository: Repository | undefined) {
-    this.update({ repository });
-  }
-
-  protected onError(error: ReefError | null) {
-    if (error) this.update({ error });
-  }
-
-  protected inReview(): boolean {
-    return (this.snapshot.rows ?? []).some((entry) => this.isOpen(entry));
-  }
-
-  protected async read(repo: string) {
-    const changes = client(this.connection, ChangeService);
-    const listed = await changes.listProposals({ repo, pageSize: PROPOSALS_SHOWN });
-    if (this.isStopped()) return;
-    const open = new Map(listed.entries.map((e) => [e.changeId, e]));
-    // Rows that left review keep their place with their new state.
-    const gone = this.order.filter((id) => !open.has(id));
-    const closed =
-      gone.length > 0
-        ? (await changes.listProposals({ repo, changes: gone, states: ANY_STATE })).entries
-        : [];
-    if (this.isStopped()) return;
-    for (const entry of closed) this.entries.set(entry.changeId, entry);
-    const first = this.snapshot.rows === null;
-    for (const [id, entry] of open) {
-      if (this.entries.has(id) || first) this.entries.set(id, entry);
-      else this.pending.set(id, entry);
-    }
-    for (const id of [...this.pending.keys()]) if (!open.has(id)) this.pending.delete(id);
-    if (first) this.order = [...open.values()].sort(newestFirst).map((e) => e.changeId);
-    this.snapshot = { ...this.snapshot, more: listed.nextPageToken !== "", error: null };
-    this.publish();
-  }
-
-  private isOpen(entry: ProposalEntry | undefined): boolean {
-    const state = entry?.lifecycle?.state;
-    return state === LifecycleState.PROPOSED || state === LifecycleState.QUEUED;
-  }
-
-  private publish() {
-    const rows = this.order.flatMap((id) => this.entries.get(id) ?? []);
-    this.update({
-      rows,
-      fresh: this.pending.size,
-      left: rows.filter((e) => !this.isOpen(e)).length,
-    });
-  }
-}
-
 // ---- The proposal page ----
 
 /** A change below the proposal (R3.11), with its entry when it has one. */
@@ -361,12 +258,13 @@ export class ProposalModel extends RepoReader<ProposalSnapshot> {
   constructor(
     connection: Connection,
     operations: OperationStore,
+    presence: PresenceStore,
     frame: FrameScheduler,
     onSessionInvalid: () => void,
     repo: string,
     private readonly change: string,
   ) {
-    super(connection, operations, frame, onSessionInvalid, repo, {
+    super(connection, operations, presence, frame, onSessionInvalid, repo, {
       read: null,
       repository: undefined,
       error: null,
@@ -386,8 +284,18 @@ export class ProposalModel extends RepoReader<ProposalSnapshot> {
   }
 
   protected inReview(): boolean {
-    const state = this.snapshot.read?.entry.lifecycle?.state;
-    return state === LifecycleState.PROPOSED || state === LifecycleState.QUEUED;
+    const entry = this.snapshot.read?.entry;
+    const state = entry?.lifecycle?.state;
+    const open = state === LifecycleState.PROPOSED || state === LifecycleState.QUEUED;
+    const judged = entry?.automatic !== undefined && entry.automatic.state !== AutomaticState.OFF;
+    return open && !judged;
+  }
+
+  protected presenceSignature(entries: Iterable<Presence>): string {
+    const changeId = this.snapshot.read?.entry.changeId;
+    if (!changeId) return "";
+    const mine = [...entries].filter((p) => p.changeId === changeId);
+    return stateSignature(mine, PresenceKind.AUTOMATIC, "");
   }
 
   /** The change's comments, oldest first, page by page up to `COMMENTS_SHOWN`. */
@@ -428,7 +336,7 @@ export class ProposalModel extends RepoReader<ProposalSnapshot> {
           listed.entries.length > 1
             ? `${this.change} names more than one change in review.`
             : `${this.change} was never proposed in this repository.`,
-        hint: "Open a proposal from the Proposals tab.",
+        hint: "Open a proposal from the inbox.",
         next: [],
         metadata: {},
       });

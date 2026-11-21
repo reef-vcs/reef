@@ -610,6 +610,13 @@ async fn outputs_match_their_schemas() {
     script.run(&c_dir, &ask("asker-2")).await;
     let asked = script.json(&c_dir, &ask("asker-3")).await;
     let third_help = text(&asked["comment"]["id"]);
+    // The inbox (R3.33) lists the open help requests as needing a person.
+    let inbox = script.both(&root, &["inbox"]).await;
+    let needs = inbox["needs_you_now"].as_array().unwrap();
+    assert!(
+        needs.iter().filter(|item| item["reason"] == "help").count() >= 3,
+        "{inbox}"
+    );
     script
         .both(&root, &["comment", "answer", &first_help, "-m", "TOML"])
         .await;

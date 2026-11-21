@@ -23,8 +23,8 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde_json::{Value, json};
 
 use crate::cli::{
-    ask, comment, conflict, conflict_assign, guide, here, init, land, policy, presence, provider,
-    remote, ws, ws_run,
+    ask, comment, conflict, conflict_assign, guide, here, inbox, init, land, policy, presence,
+    provider, remote, ws, ws_run,
 };
 
 /// A schema of what a command prints, built in the document's generator
@@ -383,6 +383,7 @@ pub(crate) const OUTPUTS: &[OutputRow] = &[
             object::<ask::BriefAsked<'static>>,
         )
     },
+    row(&["inbox"], object::<inbox::Inbox>),
     OutputRow {
         note: Some(
             "`comment` and `frame` are null when there was none to take; with --hook (a harness's hook), the framed instruction as text or a decision object, or nothing, and always exit 0",

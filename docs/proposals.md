@@ -82,7 +82,7 @@ A change's own `reef rebase` onto another base is never carried: propose it agai
 
 ## Reviewing in the web UI
 
-The web UI's Proposals tab lists the repository's open proposals, newest update first; the list holds still while you read, and new ones wait behind a count. A proposal's page ([ADR 0086](adr/0086-reviewing-from-the-web-ui.md)) reads in the order a review needs:
+The web UI's [inbox](inbox.md), on its home page and each repository's Inbox tab, lists open proposals: one waiting on a person's sign-off, or returned by a landing, under "needs you now", the rest under "watching", each held in place while you read, with new ones behind a count. A proposal's page ([ADR 0086](adr/0086-reviewing-from-the-web-ui.md)) reads in the order a review needs:
 
 1. **Intent.** The description, the provenance the agent declared (task, model, harness), and the changes below it with their states, each linking to its own page. A change below that was declined or withdrawn holds the proposal, and the page says which.
 2. **Evidence.** The destination policy's verdict over the stack, each rule and what it still needs, and every evidence object on the tree: who signed it, and whether a person's passkey verified it and the policy pins that passkey. A stack the gate stops below the change shows the change that stops it.
@@ -101,4 +101,4 @@ To land from the web UI, pin your passkey on the destination once: `reef identit
 
 ## What later tickets add
 
-R3.11 carries the proposals of a stack's changes across a rewrite of the ones below, and returns dependents of a declined or withdrawn change to their owners and rebases dependents of a superseded one (see "Dependents" above); R3.12 attaches comments by change and round; R3.13 records `queued`, `landed` and the return to `proposed` with cause `landing`, and adds the state to the policy input; R3.31 shows them in the web UI (see "Reviewing in the web UI"), and R3.33's inbox lists them; R4.07 publishes them to a store.
+R3.11 carries the proposals of a stack's changes across a rewrite of the ones below, and returns dependents of a declined or withdrawn change to their owners and rebases dependents of a superseded one (see "Dependents" above); R3.12 attaches comments by change and round; R3.13 records `queued`, `landed` and the return to `proposed` with cause `landing`, and adds the state to the policy input; R3.31 shows them in the web UI (see "Reviewing in the web UI"), and the inbox lists them (R3.33); R4.07 publishes them to a store.

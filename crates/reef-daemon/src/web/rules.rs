@@ -51,6 +51,10 @@ pub(crate) enum Rule {
     /// destination pins approved, which the landing's gate checks once it
     /// knows the destination (`crate::landing`, `VERIFIED_SIGNOFF_REQUIRED`).
     Land,
+    /// The default person's inbox marks, moved forward only and never past
+    /// the newest transition (`crate::db::inbox`); the request has no other
+    /// field (R3.33).
+    Seen,
 }
 
 impl Rule {
@@ -67,6 +71,7 @@ impl Rule {
             Rule::Confirm => "confirm",
             Rule::Comment => "comment",
             Rule::Land => "land",
+            Rule::Seen => "seen",
         }
     }
 }
@@ -104,6 +109,7 @@ pub(crate) const TABLE: &[(&str, Rule)] = &[
         Rule::Confirm,
     ),
     ("/reef.api.v1.LandingService/LandChange", Rule::Land),
+    ("/reef.api.v1.InboxService/MarkInboxSeen", Rule::Seen),
 ];
 
 /// A web call `rule` refuses.

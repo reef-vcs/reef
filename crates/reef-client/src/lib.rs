@@ -2001,6 +2001,33 @@ impl Client {
 }
 
 impl Client {
+    /// `InboxService.GetInbox` (R3.33): what needs the caller now, what they
+    /// watch, and what landed since their mark.
+    pub async fn get_inbox(
+        &self,
+        request: v1::GetInboxRequest,
+    ) -> Result<v1::GetInboxResponse, ClientError> {
+        let mut client = v1::inbox_service_client::InboxServiceClient::with_interceptor(
+            self.channel.clone(),
+            self.agent.clone(),
+        );
+        self.call("GetInbox", client.get_inbox(request)).await
+    }
+
+    /// `InboxService.MarkInboxSeen` (R3.33): moves the caller's marks
+    /// forward.
+    pub async fn mark_inbox_seen(
+        &self,
+        request: v1::MarkInboxSeenRequest,
+    ) -> Result<v1::MarkInboxSeenResponse, ClientError> {
+        let mut client = v1::inbox_service_client::InboxServiceClient::with_interceptor(
+            self.channel.clone(),
+            self.agent.clone(),
+        );
+        self.call("MarkInboxSeen", client.mark_inbox_seen(request))
+            .await
+    }
+
     /// `PolicyService.EvaluatePolicy` (R3.07): the repository's policy
     /// evaluated over one change.
     pub async fn evaluate_policy(
