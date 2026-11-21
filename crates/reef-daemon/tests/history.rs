@@ -264,7 +264,6 @@ async fn follows_operations() {
     );
 }
 
-/// Test 7: open, landed, open again after a rewind, abandoned and back, undone.
 #[tokio::test(flavor = "multi_thread")]
 #[expect(clippy::too_many_lines, reason = "one fixture, every outcome")]
 async fn outcomes() {
@@ -295,8 +294,6 @@ async fn outcomes() {
         .change_when(&ws.change_id, |c| c.outcome() == ChangeOutcome::Landed)
         .await;
     assert!(landed.landed_at.is_some(), "seen landing: {landed:#?}");
-    // Moving main back leaves the change, which the workspace is on, open
-    // (#374): the import abandons only what no working copy uses.
     fx.git(&["update-ref", "refs/heads/main", &main_before]);
     let _trigger = fx.workspace("importer").await;
     let rewound = fx

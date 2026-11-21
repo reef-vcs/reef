@@ -2767,7 +2767,6 @@ async fn colocated_repository_imports_git_branches() {
     assert_eq!(resolved.commit_id, commit);
 }
 
-/// Runs git at `root` and returns its trimmed output.
 fn git_at(root: &Path, args: &[&str]) -> String {
     let output = std::process::Command::new("git")
         .args(args)
@@ -2782,8 +2781,6 @@ fn git_at(root: &Path, args: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
-// Issue #374: an import abandons what git no longer reaches, except a
-// commit a working copy is on or builds on.
 #[tokio::test]
 async fn import_keeps_the_commits_working_copies_use() {
     if !git_available() {
@@ -2830,7 +2827,6 @@ async fn import_keeps_the_commits_working_copies_use() {
     );
 }
 
-/// The visible heads of `repo`'s view.
 fn heads_of(repo: &Repo) -> BTreeSet<String> {
     repo.heads()
         .unwrap()

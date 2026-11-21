@@ -766,8 +766,6 @@ async fn reefs_import(daemon: &TestDaemon, repo: &SyntheticRepo) {
     create(daemon, repo, None).await;
 }
 
-/// `git branch review <commit>` at the root, Reef's import, `git branch -D
-/// review`, and Reef's import again. Git no longer reaches `commit`.
 async fn on_a_deleted_branch(daemon: &TestDaemon, repo: &SyntheticRepo, commit: &str) {
     git(&repo.root, &[], &["branch", "review", commit]);
     reefs_import(daemon, repo).await;
@@ -775,12 +773,11 @@ async fn on_a_deleted_branch(daemon: &TestDaemon, repo: &SyntheticRepo, commit: 
     reefs_import(daemon, repo).await;
 }
 
-/// The visible commits of `change`, and their descriptions.
 async fn visible_commits(
     daemon: &TestDaemon,
     repo: &SyntheticRepo,
     change: &str,
-) -> Vec<(String, String)> {
+) -> Vec<reef_api::v1::Change> {
     daemon
         .client
         .list_changes(reef_api::v1::ListChangesRequest {
@@ -794,13 +791,9 @@ async fn visible_commits(
         .into_iter()
         .filter_map(|entry| entry.change)
         .filter(|found| found.change_id == change)
-        .map(|found| (found.commit_id, found.description))
         .collect()
 }
 
-/// Asserts that `ws` is on `commit`, the one visible commit of its change
-/// `ws.change_id`, not divergent, and that `w/one.txt`, `w/two.txt` and
-/// any `more` are on disk and in that commit.
 async fn assert_unchanged(
     daemon: &TestDaemon,
     repo: &SyntheticRepo,
@@ -827,10 +820,6 @@ async fn assert_unchanged(
     assert_eq!(row.attention(), Attention::Unspecified);
 }
 
-// Issues #368, #374: someone puts a git branch on the agent's last
-// snapshot and deletes it again. Reef's own import of git refs before its
-// next write keeps the snapshot's commit, which the workspace is on, so
-// the workspace stays on it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_clean_workspace_stays_on_its_commit_over_reefs_import_of_a_deleted_branch() {
     let (daemon, repo) = colocated_fixture().await;
@@ -845,8 +834,6 @@ async fn a_clean_workspace_stays_on_its_commit_over_reefs_import_of_a_deleted_br
     assert_unchanged(&daemon, &repo, &ws, &last, &[]).await;
 }
 
-// Issues #368, #374: the same with an edit since the last snapshot, which
-// the next snapshot adds to the change.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_busy_workspace_stays_on_its_change_over_reefs_import_of_a_deleted_branch() {
     let (daemon, repo) = colocated_fixture().await;
@@ -864,10 +851,6 @@ async fn a_busy_workspace_stays_on_its_change_over_reefs_import_of_a_deleted_bra
     assert_unchanged(&daemon, &repo, &ws, &now, &["w/three.txt"]).await;
 }
 
-// Issue #374: a workspace on a change above the agent's. Deleting the git
-// branch on the lower change's snapshot keeps that commit, which the upper
-// change builds on, so the upper workspace keeps the lower change's files
-// and neither workspace moves.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_stacked_workspace_keeps_the_change_below_over_reefs_import_of_a_deleted_branch() {
     let (daemon, repo) = colocated_fixture().await;
@@ -904,9 +887,6 @@ async fn a_stacked_workspace_keeps_the_change_below_over_reefs_import_of_a_delet
     assert_unchanged(&daemon, &repo, &lower, &last, &[]).await;
 }
 
-// Issue #374: the first Reef write after the git branch on the agent's
-// snapshot is deleted runs the import that would abandon it. The describe
-// lands on the agent's change, not on an empty commit the import made.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_first_describe_after_a_deleted_branch_describes_the_agents_change() {
     let (daemon, repo) = colocated_fixture().await;
@@ -926,11 +906,11 @@ async fn the_first_describe_after_a_deleted_branch_describes_the_agents_change()
         .await
         .unwrap();
     let commits = visible_commits(&daemon, &repo, &ws.change_id).await;
-    let [(commit, description)] = commits.as_slice() else {
+    let [found] = commits.as_slice() else {
         panic!("one visible commit: {commits:?}");
     };
-    assert_eq!(description.trim_end(), "described by the agent");
-    assert_unchanged(&daemon, &repo, &ws, commit, &[]).await;
+    assert_eq!(found.description.trim_end(), "described by the agent");
+    assert_unchanged(&daemon, &repo, &ws, &found.commit_id, &[]).await;
 }
 
 /// Asserts that `ws`'s files `w/one.txt` and `w/two.txt`, and any `more`,
