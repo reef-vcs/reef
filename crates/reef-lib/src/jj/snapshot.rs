@@ -53,7 +53,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use futures::StreamExt as _;
+use futures::{StreamExt as _, TryStreamExt as _};
 use jj_lib::backend::{BackendError, CommitId, TreeId};
 use jj_lib::commit::Commit;
 use jj_lib::conflict_labels::ConflictLabels;
@@ -69,6 +69,7 @@ use jj_lib::operation::Operation;
 use jj_lib::ref_name::{WorkspaceName, WorkspaceNameBuf};
 use jj_lib::repo::{ReadonlyRepo, Repo as _, RewriteRootCommit};
 use jj_lib::repo_path::RepoPathBuf;
+use jj_lib::revset::{ResolvedRevsetExpression, RevsetEvaluationError};
 use jj_lib::transaction::TransactionCommitError;
 use jj_lib::working_copy::{
     CheckoutError, SnapshotOptions, SnapshotStats, UntrackedReason, WorkingCopyFreshness,
@@ -1454,11 +1455,10 @@ fn leads(ops: &[Operation], moves: &[Move], from: &CommitId, to: Option<&CommitI
 /// Whether the commit `repo`'s view has for workspace `name` came from
 /// `from`, the commit the workspace last snapshotted (#344): the operations
 /// since `from` moved the workspace there from `from` ([`leads`]). A move
-/// another jj client wrote, or Reef's import of git refs, counts only when
-/// it rewrote the commit it started at by a decision about it
-/// ([`rewrote`]), as a describe, a rebase, or an import of a git-side
-/// amend of the commit or of one below it does, and so does a merge of
-/// operation heads that rebased the workspace's commit ([`origins`]).
+/// another jj client wrote, Reef's import of git refs, or a merge of
+/// operation heads counts only when [`rewrote`] finds it a decision about
+/// the commit it started at, reading the move's own operation and, for a
+/// merge, the heads it merged ([`recorders`]).
 /// Checking the commit out then follows a decision someone made about
 /// `from`: an operation that had `from` rewrote it (and may have dropped
 /// files, as `jj restore` does), or Reef moved the workspace off it on
@@ -1473,10 +1473,11 @@ fn leads(ops: &[Operation], moves: &[Move], from: &CommitId, to: Option<&CommitI
 /// False for the rebase jj gives a workspace stacked above such a move:
 /// another client's abandon, revert or `jj rebase -r` of the change below,
 /// an import that abandoned it because git no longer reaches it (#381),
-/// and an import of a branch moved back to an earlier commit of it (#380).
-/// The rebase is made from `from`, but nobody decided anything about
-/// `from`, and checking it out would take the change below's files off
-/// disk.
+/// and an import of a branch moved back to an earlier commit of it (#380),
+/// whether the operation that rebased `from` made that move itself or
+/// merged a head that made it. The rebase is made from `from`, but nobody
+/// decided anything about `from`, and checking it out would take the
+/// change below's files off disk.
 ///
 /// False for a commit another jj client made from an older commit, having
 /// loaded the head before `from` was written, that the merge of its
@@ -1505,14 +1506,8 @@ async fn came_from(
     };
     let mut counted = Vec::with_capacity(moves.len());
     for step in moves {
-        // A merge's rebase follows rewrites recorded in the heads it merged,
-        // not in the merge: it counts when made from the commit (ADR 0087).
         let counts = reef_decided(&step.op)
-            || if step.merged {
-                origins(&step.op, &step.now).contains(&step.was)
-            } else {
-                rewrote(repo, &step.op, &step.was, &step.now).await?
-            };
+            || rewrote(repo, &recorders(&ops, &step), &step.was, &step.now).await?;
         if counts {
             counted.push(step);
         }
@@ -1788,69 +1783,160 @@ fn origins(op: &Operation, now: &CommitId) -> HashSet<CommitId> {
     origins
 }
 
-/// Whether `op` moved a workspace from `was` to `now` by a decision about
-/// `was` (ADR 0092): it recorded `now` as made from `was` ([`origins`]),
-/// and each parent of `was` that `now` does not have was left on purpose.
-/// Either the parent is still visible after `op`, so `op` moved `was` off
-/// it (a `jj rebase -r` of the workspace's own change), or `op` rewrote
-/// the parent into one of `now`'s and that move counts by this rule too
-/// (a describe, a `jj restore` or a git amend of the change below). A
-/// rebase jj made only because `op` hid the commit below without such a
-/// rewrite is no decision about `was`, and does not count: an abandon or a
-/// revert of the change below, an import of a git branch deleted from it
-/// (#381), or moved back to an earlier commit of it (#380).
+/// The operations whose records tell what `step` was made from: its own
+/// first, and for a merge of operation heads, those of `ops` (the
+/// operations since the workspace's last snapshot) in the merge's history.
+/// jj's merge of operation heads works out the rewrites and abandons
+/// between the heads from change ids and records predecessors only for the
+/// rebase it makes (jj-lib `MutableRepo::merge_view`), so the rewrite that
+/// rebase follows is recorded by the merged head that made it.
+fn recorders<'a>(ops: &'a [Operation], step: &'a Move) -> Vec<&'a Operation> {
+    let mut recorders = vec![&step.op];
+    if step.merged {
+        let since: HashMap<&OperationId, &Operation> = ops.iter().map(|op| (op.id(), op)).collect();
+        let mut found: Vec<&OperationId> = step.op.parent_ids().iter().collect();
+        let mut seen = HashSet::new();
+        while let Some(id) = found.pop() {
+            if let Some(op) = since.get(id).filter(|_| seen.insert(id)) {
+                recorders.push(op);
+                found.extend(op.parent_ids());
+            }
+        }
+    }
+    recorders
+}
+
+/// Whether following predecessors back from `now` reaches `old`, taking
+/// each commit's predecessors from the first of `recorders` that recorded
+/// any for it.
+fn made_from(recorders: &[&Operation], now: &CommitId, old: &CommitId) -> bool {
+    let predecessors = |commit: &CommitId| {
+        let recorded = recorders
+            .iter()
+            .find_map(|op| op.predecessors_for_commit(commit));
+        recorded.unwrap_or_default().to_vec()
+    };
+    let (mut found, mut seen) = (predecessors(now), HashSet::new());
+    while let Some(commit) = found.pop() {
+        if &commit == old {
+            return true;
+        }
+        if seen.insert(commit.clone()) {
+            found.extend(predecessors(&commit));
+        }
+    }
+    false
+}
+
+/// A commit's move to another, here or down the stack below it.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct Rebase {
+    was: CommitId,
+    now: CommitId,
+}
+
+/// A parent of a [`Rebase`]'s `was` that its `now` does not have.
+struct Left {
+    parent: CommitId,
+    /// The parents of `now` made from `parent` ([`made_from`]).
+    into: Vec<CommitId>,
+}
+
+/// Whether a move of a workspace from `was` to `now` was a decision about
+/// `was` (ADR 0092), read from the operations that recorded it
+/// ([`recorders`]), the move's own first. It was when they made `now` from
+/// `was` ([`made_from`]), and each parent of `was` that `now` does not
+/// have was left on purpose. Either the parent is still visible after the
+/// move, so the move took `was` off it (a `jj rebase -r` of the
+/// workspace's own change), or they rewrote the parent into one of
+/// `now`'s, and that rewrite counts by this rule too (a describe, a `jj
+/// restore` or a git amend of the change below). A rebase jj made only
+/// because the commit below was hidden without such a rewrite is no
+/// decision about `was`, and does not count: an abandon or a revert of the
+/// change below, an import of a git branch deleted from it (#381) or moved
+/// back to an earlier commit of it (#380), in the move's own operation or
+/// in a head that a merge of operation heads merged.
 async fn rewrote(
     repo: &ReadonlyRepo,
-    op: &Operation,
+    recorders: &[&Operation],
     was: &CommitId,
     now: &CommitId,
 ) -> Result<bool, SnapshotError> {
-    if !origins(op, now).contains(was) {
+    if !made_from(recorders, now, was) {
         return Ok(false);
     }
     let store = repo.store();
-    let was = store.get_commit_async(was).await?;
-    let now = store.get_commit_async(now).await?;
-    let left: Vec<&CommitId> = was
-        .parent_ids()
-        .iter()
-        .filter(|parent| !now.parent_ids().contains(parent))
-        .collect();
-    if left.is_empty() {
-        return Ok(true);
-    }
-    let view = op.view().await?;
-    for parent in left {
-        if visible(repo, parent, view.heads()).await? {
+    let first = Rebase {
+        was: was.clone(),
+        now: now.clone(),
+    };
+    let mut left: HashMap<Rebase, Vec<Left>> = HashMap::new();
+    let mut rebases = vec![first.clone()];
+    while let Some(rebase) = rebases.pop() {
+        if left.contains_key(&rebase) {
             continue;
         }
-        let mut rewritten = false;
-        for new in now.parent_ids() {
-            rewritten = Box::pin(rewrote(repo, op, parent, new)).await?;
-            if rewritten {
-                break;
+        let old = store.get_commit_async(&rebase.was).await?;
+        let new = store.get_commit_async(&rebase.now).await?;
+        let mut lost = Vec::new();
+        for parent in old.parent_ids() {
+            if new.parent_ids().contains(parent) {
+                continue;
             }
+            let into: Vec<CommitId> = new
+                .parent_ids()
+                .iter()
+                .filter(|new| made_from(recorders, new, parent))
+                .cloned()
+                .collect();
+            rebases.extend(into.iter().map(|new| Rebase {
+                was: parent.clone(),
+                now: new.clone(),
+            }));
+            lost.push(Left {
+                parent: parent.clone(),
+                into,
+            });
         }
-        if !rewritten {
-            return Ok(false);
-        }
+        left.insert(rebase, lost);
     }
-    Ok(true)
+    let parents: Vec<CommitId> = left
+        .values()
+        .flatten()
+        .map(|lost| lost.parent.clone())
+        .collect();
+    if parents.is_empty() {
+        return Ok(true);
+    }
+    let heads = recorders[0].view().await?.heads().iter().cloned().collect();
+    let visible: HashSet<CommitId> = ResolvedRevsetExpression::commits(parents)
+        .intersection(&ResolvedRevsetExpression::commits(heads).ancestors())
+        .evaluate(repo)
+        .map_err(RevsetEvaluationError::into_backend_error)?
+        .stream()
+        .try_collect()
+        .await
+        .map_err(RevsetEvaluationError::into_backend_error)?;
+    Ok(decided(&left, &visible, &first))
 }
 
-/// Whether `commit` is an ancestor of one of `heads`.
-async fn visible(
-    repo: &ReadonlyRepo,
-    commit: &CommitId,
-    heads: &HashSet<CommitId>,
-) -> Result<bool, SnapshotError> {
-    for head in heads {
-        let ancestor = repo.index().is_ancestor(commit, head).await;
-        if ancestor.map_err(|error| BackendError::Other(error.into()))? {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+/// Whether each parent `rebase` left is in `visible`, or was rewritten into
+/// a parent of its `now` by a rebase that is [`decided`] too.
+fn decided(
+    left: &HashMap<Rebase, Vec<Left>>,
+    visible: &HashSet<CommitId>,
+    rebase: &Rebase,
+) -> bool {
+    left[rebase].iter().all(|lost| {
+        visible.contains(&lost.parent)
+            || lost.into.iter().any(|new| {
+                let below = Rebase {
+                    was: lost.parent.clone(),
+                    now: new.clone(),
+                };
+                decided(left, visible, &below)
+            })
+    })
 }
 
 impl Walk<'_> {
@@ -1995,7 +2081,7 @@ impl Walk<'_> {
                 Some(mover) => !same_change(self.repo, op, &mover, now).await?,
                 None => false,
             },
-            Some(OpKind::ImportRefs) => rewrote(self.repo, op, was, now).await?,
+            Some(OpKind::ImportRefs) => rewrote(self.repo, &[op], was, now).await?,
             Some(kind) => {
                 trail.undone |= kind == OpKind::Undo;
                 true

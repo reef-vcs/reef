@@ -4,7 +4,7 @@
 - Date: 2026-11-20
 - Ticket: [#344](https://github.com/reef-vcs/reef/issues/344) ([brief](../dev-tickets/phase-3/issue-344-adopt-clock-skew.md))
 - Amends: [0018](0018-snapshot-staleness-and-divergence.md) (decision 3), [0084](0084-dependent-change-lifecycle.md) (the walk also runs for every clean, stale snapshot)
-- Amended by: [0089](0089-another-clients-undo-keeps-a-workspaces-files.md) (decision 1: another jj client's move, and since 2026-11-21 Reef's import of git refs, counts only when it rewrote the commit, and a move only when its own operation's history reached its start)
+- Amended by: [0089](0089-another-clients-undo-keeps-a-workspaces-files.md) (decision 1: another jj client's move, and since 2026-11-21 Reef's import of git refs, counts only when it rewrote the commit, and a move only when its own operation's history reached its start), [0092](0092-a-stacked-workspace-keeps-the-change-below.md) (decision 2: a merge's rebase of a workspace stacked above another change counts only when each parent it left is still visible, or the merge or the heads it merged rewrote it into a parent of the new commit by a move that counts by the same rule)
 
 ## Context
 
