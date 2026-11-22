@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use reef_api::v1::{self, GetInboxRequest, WatchInboxRequest};
 use reef_client::ClientError;
+use reef_client::inbox::News;
 use reef_client::json::{reverse_hex, rfc3339 as time};
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -83,6 +84,9 @@ pub(crate) struct Item {
     /// A help request's question or an instruction's text, as the agent or
     /// person wrote it.
     text: Option<String>,
+    /// Its raise (ADR 0093): the daemon's number for this needs-you-now
+    /// episode, kept across restarts; 0 under watching.
+    raised: u64,
 }
 
 /// One landed change.
@@ -201,6 +205,7 @@ impl From<&v1::InboxItem> for Item {
             change: some(item.change_id.clone()).map(|hex| reverse_hex(&hex)),
             next: (!item.next.is_empty()).then(|| item.next.join(" ")),
             text,
+            raised: item.raised,
         }
     }
 }
@@ -376,6 +381,15 @@ pub(crate) struct Change {
     /// True from the line that completes the first inbox on; false on
     /// the lines before it.
     synced: bool,
+    /// Keys of the needs-you-now items on this line that are news: raised
+    /// above what this watch had seen of the repository. Nothing the first
+    /// listing of a repository shows is news; what arrives after it is,
+    /// before or after `synced`, and so is what arrived while the daemon
+    /// was away.
+    new: Vec<String>,
+    /// The largest raise this line completes for the repository; 0 when it
+    /// completes none.
+    raised_through: u64,
 }
 
 impl TextRender for Change {
@@ -385,7 +399,9 @@ impl TextRender for Change {
             return writeln!(w, "{repo} forgotten");
         }
         for item in &self.items {
-            let bucket = if item.bucket == "needs_you_now" {
+            let bucket = if self.new.contains(&item.key) {
+                "needs you now (new)"
+            } else if item.bucket == "needs_you_now" {
                 "needs you now"
             } else {
                 "watching"
@@ -435,6 +451,7 @@ async fn watch(ctx: &Ctx, args: WatchArgs) -> Result<(), CliError> {
         printed: 0,
         held: BTreeMap::new(),
         synced: false,
+        news: News::default(),
     };
     run_until_stopped(watcher.run(request, deadline)).await?;
     Ok(())
@@ -452,6 +469,7 @@ struct Watcher<'a> {
     /// A first inbox was printed whole: every later line says `synced`,
     /// across reconnects.
     synced: bool,
+    news: News,
 }
 
 /// The line for a repository no longer read.
@@ -466,6 +484,8 @@ fn removed(repo_id: String, held: Held, synced: bool) -> Change {
         error: None,
         removed: true,
         synced,
+        new: Vec::new(),
+        raised_through: 0,
     }
 }
 
@@ -528,6 +548,7 @@ impl Watcher<'_> {
         first: &mut Option<BTreeMap<String, BTreeSet<String>>>,
     ) -> Result<Option<Stopped>, CliError> {
         let mut lines = Vec::new();
+        self.news.epoch(&frame.raise_epoch);
         for section in &frame.sections {
             lines.extend(self.fold(section, first));
         }
@@ -558,6 +579,12 @@ impl Watcher<'_> {
     ) -> Option<Change> {
         let synced = self.synced;
         let repo = section.repo_id.clone();
+        let new: Vec<String> = self
+            .news
+            .section(section)
+            .into_iter()
+            .map(|item| item.key.clone())
+            .collect();
         if section.removed {
             if let Some(first) = first.as_mut() {
                 first.remove(&repo);
@@ -603,6 +630,7 @@ impl Watcher<'_> {
             u64::from(section.watching_total),
         );
         let unchanged = items.is_empty()
+            && new.is_empty()
             && left.is_empty()
             && totals == (held.needs_you_now_total, held.watching_total)
             && landed == held.landed
@@ -620,6 +648,8 @@ impl Watcher<'_> {
             error,
             removed: false,
             synced,
+            new,
+            raised_through: section.raised_through,
         })
     }
 
@@ -662,6 +692,8 @@ impl Watcher<'_> {
                 error: held.error.clone(),
                 removed: false,
                 synced: self.synced,
+                new: Vec::new(),
+                raised_through: 0,
             });
         }
         lines

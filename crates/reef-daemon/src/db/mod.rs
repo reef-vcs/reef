@@ -104,8 +104,8 @@ pub use lifecycle::{
 /// `0022` is #262's), `0025_help_requests` (R3.32) and
 /// `0026_resolution_tiers` (R3.28, numbered after R3.32's, which merged
 /// first; `0024` is unused), `0027_dependent_lifecycle` (R3.11),
-/// `0028_passkeys` (R3.43), `0029_web_audit` (R3.31) and
-/// `0030_inbox_marks` (R3.33).
+/// `0028_passkeys` (R3.43), `0029_web_audit` (R3.31),
+/// `0030_inbox_marks` (R3.33) and `0031_inbox_raises` (R3.39).
 /// They are independent of each other, so a database may have a later one
 /// without an earlier one; see [`migrate`].
 const MIGRATIONS: &[(&str, &str)] = &[
@@ -205,6 +205,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0030_inbox_marks",
         include_str!("migrations/0030_inbox_marks.sql"),
+    ),
+    (
+        "0031_inbox_raises",
+        include_str!("migrations/0031_inbox_raises.sql"),
     ),
 ];
 
@@ -992,7 +996,8 @@ mod tests {
                 "0027_dependent_lifecycle",
                 "0028_passkeys",
                 "0029_web_audit",
-                "0030_inbox_marks"
+                "0030_inbox_marks",
+                "0031_inbox_raises"
             ]
         );
         // A newer daemon applied a migration this binary does not have, without
@@ -1049,7 +1054,8 @@ mod tests {
                 "0027_dependent_lifecycle",
                 "0028_passkeys",
                 "0029_web_audit",
-                "0030_inbox_marks"
+                "0030_inbox_marks",
+                "0031_inbox_raises"
             ]
         );
         let repo = "aaaa000000000001".parse().unwrap();

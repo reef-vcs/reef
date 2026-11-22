@@ -24,6 +24,7 @@ pub mod backup;
 pub mod brief;
 pub mod build;
 pub mod error;
+pub mod inbox;
 pub mod json;
 pub mod keyless;
 pub mod logging;
@@ -33,6 +34,7 @@ pub mod remote;
 pub mod schema;
 pub mod scip;
 pub mod symbol_text;
+pub mod web;
 
 /// The evidence format (R3.01, ADR 0055), which `reef evidence` signs and
 /// checks with.

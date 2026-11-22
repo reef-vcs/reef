@@ -1,13 +1,6 @@
-// The inbox stream (#372, ADR 0091): one `WatchInbox` per browser, beside
-// the operation and presence streams (live/share.ts). The daemon sends the
-// whole inbox, `synced` on the frame that completes it, then per repository
-// the items that entered or changed (each with its bucket), the keys that
-// left, and the section's state. There is no cursor: a new stream's first
-// inbox replaces what was held, and until it is complete the old one stays
-// on screen. The daemon decides when the inbox changed; this store only
-// folds what it says.
 import { create } from "@bufbuild/protobuf";
 import {
+  InboxListing,
   InboxSectionChangeSchema,
   WatchInboxResponseSchema,
   type InboxError,
@@ -29,6 +22,7 @@ export interface SectionState {
   landed: LandedDigest | undefined;
   /** Set while the repository fails to read; its items stand. */
   error: InboxError | undefined;
+  listed: boolean;
 }
 
 type Sections = Map<string, SectionState>;
@@ -39,7 +33,8 @@ function fold(sections: Sections, frame: WatchInboxResponse) {
       sections.delete(change.repoId);
       continue;
     }
-    const items = new Map(sections.get(change.repoId)?.items);
+    const held = sections.get(change.repoId);
+    const items = new Map(held?.items);
     for (const key of change.left) items.delete(key);
     for (const item of change.items) items.set(item.key, item);
     sections.set(change.repoId, {
@@ -49,6 +44,7 @@ function fold(sections: Sections, frame: WatchInboxResponse) {
       watchingTotal: change.watchingTotal,
       landed: change.landed,
       error: change.error,
+      listed: (held?.listed ?? false) || change.listing === InboxListing.END,
     });
   }
 }
@@ -72,9 +68,9 @@ export class InboxStore {
     return this.notifier.subscribe(listener);
   }
 
-  /** A new stream starts: its first inbox will replace the held one. */
   beginResync() {
-    this.next = new Map();
+    if (this.synced) this.next = new Map();
+    else this.sections = new Map();
     this.changed();
   }
 
@@ -111,6 +107,7 @@ export class InboxStore {
           watchingTotal: section.watchingTotal,
           landed: section.landed,
           error: section.error,
+          listing: section.listed ? InboxListing.END : InboxListing.UNSPECIFIED,
         }),
       ),
       synced: this.next === null && this.synced,

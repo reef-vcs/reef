@@ -7,6 +7,7 @@
 //! reads; a person's mark is the only stored state (`db::inbox`).
 
 pub(crate) mod board;
+pub(crate) mod raises;
 pub(crate) mod rules;
 #[cfg(test)]
 mod tests;
@@ -229,6 +230,7 @@ impl Item {
             next: self.next,
             record: Some(self.record),
             bucket: self.reason.bucket().wire().into(),
+            raised: 0,
         }
     }
 }

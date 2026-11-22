@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import {
   InboxBucket,
   InboxItemSchema,
+  InboxListing,
   WatchInboxResponseSchema,
   type InboxItem,
 } from "../gen/reef/api/v1/inbox_pb";
@@ -16,7 +17,13 @@ const item = (key: string, bucket = InboxBucket.NEEDS_YOU_NOW, headline = "asks"
   create(InboxItemSchema, { key, bucket, headline });
 
 const frame = (
-  sections: { repoId: string; items?: InboxItem[]; left?: string[]; removed?: boolean }[],
+  sections: {
+    repoId: string;
+    items?: InboxItem[];
+    left?: string[];
+    removed?: boolean;
+    listing?: InboxListing;
+  }[],
   synced = true,
 ) => create(WatchInboxResponseSchema, { sections, synced });
 
@@ -25,6 +32,36 @@ const keys = (store: InboxStore, repo: string) => [
 ];
 
 describe("the inbox store", () => {
+  it("shows each repository as it lists before the first inbox is whole", () => {
+    const store = new InboxStore(immediateFrames);
+    store.beginResync();
+    store.applyFrame(
+      frame([{ repoId: "b", items: [item("b1")], listing: InboxListing.END }], false),
+    );
+    expect(store.synced).toBe(false);
+    expect(keys(store, "b")).toEqual(["b1"]);
+    expect(store.sections.get("b")?.listed).toBe(true);
+    store.applyFrame(frame([{ repoId: "b", items: [item("b2")] }], false));
+    expect(keys(store, "b")).toEqual(["b1", "b2"]);
+    store.applyFrame(frame([{ repoId: "a", items: [item("a1")], listing: InboxListing.END }]));
+    expect(store.synced).toBe(true);
+    expect(keys(store, "a")).toEqual(["a1"]);
+  });
+
+  it("starts over if the first stream ends before its inbox is whole", () => {
+    const store = new InboxStore(immediateFrames);
+    store.beginResync();
+    store.applyFrame(
+      frame([{ repoId: "b", items: [item("gone")], listing: InboxListing.END }], false),
+    );
+    store.beginResync();
+    expect(store.sections.size).toBe(0);
+    store.applyFrame(
+      frame([{ repoId: "b", items: [item("b1")], listing: InboxListing.END }], false),
+    );
+    expect(keys(store, "b")).toEqual(["b1"]);
+  });
+
   it("folds items in, changes them by key, and drops what left or was removed", () => {
     const store = new InboxStore(immediateFrames);
     store.beginResync();

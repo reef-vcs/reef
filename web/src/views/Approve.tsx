@@ -16,6 +16,8 @@ import { ErrorView } from "../ui/ErrorView";
 import { FailureView } from "../ui/FailureView";
 import { reverseHex, shortId } from "../ui/ids";
 import { clock } from "../ui/time";
+import { hasPasskeySupport } from "../sign/passkey";
+import { NoPasskeysHere } from "./Handoff";
 
 export const APPROVAL_NOT_FOUND = "APPROVAL_NOT_FOUND";
 
@@ -352,7 +354,7 @@ export function Approve({
             <button
               type="button"
               className="primary"
-              disabled={!open || busy}
+              disabled={!open || busy || !hasPasskeySupport()}
               onClick={() => void run("approving")}
             >
               Approve
@@ -364,6 +366,7 @@ export function Approve({
           {action.kind === "approving" && (
             <p className="secondary">Touch your passkey to approve.</p>
           )}
+          {open && !hasPasskeySupport() && <NoPasskeysHere />}
         </>
       ) : (
         <Ended approval={shown} />

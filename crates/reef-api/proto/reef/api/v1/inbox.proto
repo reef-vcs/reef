@@ -49,19 +49,24 @@ service InboxService {
   // and `repos` as GetInbox, and with no `repos` every repository,
   // including one registered after the stream opened.
   //
-  // The first frames carry every section whole; the frame that completes
-  // them, empty when there is none, has `synced` set, and so has every
-  // later frame. Later frames carry, per repository that changed, the items
-  // that entered or changed and the keys that left, with the section's
-  // state. The daemon reads a repository again when an operation or a
-  // presence entry that can change its inbox is recorded, so a client
-  // needs neither. A client that reads slowly misses intermediate states,
-  // never the latest: each frame is the difference between what this
-  // stream sent and the inbox now. There is no cursor: a new stream's
-  // first frames replace what the client held. A frame holds at most 1,000
-  // items and keys and 1 MiB; an empty frame follows 15 seconds without
-  // one. Read every stream opened on a connection, since they share its
-  // flow control window.
+  // Each repository's first section is its whole inbox (`listing`), sent as
+  // soon as the daemon has read it, so a repository whose read is slow holds
+  // back no other. The frame that completes every repository's listing,
+  // empty when there is none, has `synced` set, and so has every later
+  // frame; a repository registered later lists after it. Other sections
+  // carry, per repository that changed, the items that entered or changed
+  // and the keys that left, with the section's state. To tell a
+  // needs-you-now item that is news from one the client has handled, it
+  // compares `InboxItem.raised` with `raised_through` (R3.39, ADR 0093), not
+  // the frame's place before or after `synced`. The daemon reads a
+  // repository again when an operation or a presence entry that can change
+  // its inbox is recorded, so a client needs neither. A client that reads
+  // slowly misses intermediate states, never the latest: each frame is the
+  // difference between what this stream sent and the inbox now. There is no
+  // cursor: a new stream's first frames replace what the client held. A
+  // frame holds at most 1,000 items and keys and 1 MiB; an empty frame
+  // follows 15 seconds without one. Read every stream opened on a
+  // connection, since they share its flow control window.
   //
   // Errors: as GetInbox for `repos`; UNAVAILABLE with reason
   // TOO_MANY_SUBSCRIPTIONS (shared with SubscribeOperations), and with no
@@ -194,6 +199,18 @@ message InboxItem {
   // The bucket it is in, the one its reason places it in: a client of
   // WatchInbox learns it here.
   InboxBucket bucket = 14;
+  // Its raise (R3.39, ADR 0093): the number the daemon gave this
+  // needs-you-now episode, kept across daemon restarts. An episode is the
+  // key, the reason and, for a proposal or a conflict, its commit: a new
+  // revision or a new ask is a new episode. A larger number is newer, in
+  // every repository of one ledger (`WatchInboxResponse.raise_epoch`). Set
+  // when `bucket` is needs-you-now and the daemon's inbox reader, which
+  // runs while a WatchInbox stream is open, has read the item since it
+  // entered; but a proposal the automatic service has not judged yet keeps
+  // the number its commit holds, or reads 0 until judged when it holds
+  // none. 0 otherwise. GetInbox reports numbers but never gives one: tell
+  // news from a WatchInbox stream.
+  uint64 raised = 15;
 }
 
 // What landed in one repository since a base.
@@ -281,8 +298,23 @@ message WatchInboxResponse {
   // One per repository that changed, by repository id; a repository's
   // change too large for one frame continues in the next.
   repeated InboxSectionChange sections = 1;
-  // True from the frame that completes the first inbox onward.
+  // True from the frame that completes every followed repository's
+  // listing onward.
   bool synced = 2;
+  // The raise ledger's id, on every frame: as GetInboxResponse's.
+  string raise_epoch = 3;
+}
+
+// Where a section stands in this stream's listing of its repository.
+enum InboxListing {
+  // A difference from what this stream sent of the repository, or a
+  // section of one not read yet (with `error`).
+  INBOX_LISTING_UNSPECIFIED = 0;
+  // Part of this stream's first listing of the repository: its items are
+  // the inbox the stream found, not changes.
+  INBOX_LISTING_PART = 1;
+  // The last part of that listing.
+  INBOX_LISTING_END = 2;
 }
 
 // What changed in one repository's inbox.
@@ -307,4 +339,14 @@ message InboxSectionChange {
   // The repository is no longer read (it was forgotten): drop the section.
   // Its items are in `left`, and nothing else is set.
   bool removed = 8;
+  // Whether this is the stream's first listing of the repository. A
+  // repository whose first read failed sends UNSPECIFIED with `error`, and
+  // lists once it reads.
+  InboxListing listing = 9;
+  // Set on the last part of a listing or a difference: every listed
+  // needs-you-now item of this repository whose `raised` is at most this
+  // has been sent on this stream. A client that keeps the largest it saw
+  // per repository treats an item raised above it as news; one that has
+  // none takes this at the listing's END. 0 on other parts.
+  uint64 raised_through = 10;
 }

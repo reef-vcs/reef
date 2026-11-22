@@ -102,5 +102,6 @@ This index is maintained by hand. Every PR that adds an ADR or changes a status 
 | [0088](0088-triage-inbox.md) | The triage inbox: one definition in the daemon, a person's mark, and presence for state that moves silently | accepted (amended by [0091](0091-watching-the-inbox.md)) |
 | [0089](0089-another-clients-undo-keeps-a-workspaces-files.md) | Another client's undo keeps a workspace's files | accepted (amended by [0090](0090-reefs-import-keeps-the-commits-workspaces-use.md), [0092](0092-a-stacked-workspace-keeps-the-change-below.md)) |
 | [0090](0090-reefs-import-keeps-the-commits-workspaces-use.md) | Reef's import of git refs keeps the commits workspaces use | accepted (amended by [0092](0092-a-stacked-workspace-keeps-the-change-below.md)) |
-| [0091](0091-watching-the-inbox.md) | Watching the inbox: one board the daemon reads again on a trigger, and a stream of its differences | accepted |
+| [0091](0091-watching-the-inbox.md) | Watching the inbox: one board the daemon reads again on a trigger, and a stream of its differences | accepted (amended by [0093](0093-the-desktop-shell-and-raised-items.md)) |
 | [0092](0092-a-stacked-workspace-keeps-the-change-below.md) | A stacked workspace keeps the change below | accepted |
+| [0093](0093-the-desktop-shell-and-raised-items.md) | The desktop shell, and the daemon numbering what needs you | accepted |

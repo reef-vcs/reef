@@ -18,6 +18,7 @@ import { lazyRoute } from "./ui/lazy-route";
 import type { RepoPage } from "./ui/RepoNav";
 import { match, navigate, usePath, useSearch } from "./ui/router";
 import { inboxHref } from "./views/inbox-route";
+import { ItemLink } from "./views/ItemLink";
 import { NoSession } from "./views/NoSession";
 import { NotFound } from "./views/NotFound";
 import { Overview } from "./views/Overview";
@@ -91,6 +92,8 @@ function Shell({
   const { status, error } = useDaemonStatus(connection, onSessionInvalid);
   const repo = repoRoute(path);
   const approval = match("/approve/:id", path)?.id;
+  const item = match("/repos/:repo/items/:key", path);
+  const isItem = item !== null;
   const oldTab = match("/repos/:repo/proposals", path)?.repo;
   useEffect(() => {
     if (oldTab) navigate(inboxHref({ repo: oldTab }), { replace: true });
@@ -103,10 +106,10 @@ function Shell({
   // The repository frame titles its own pages, once it knows the name.
   const inRepo = repo !== null;
   useEffect(() => {
-    if (inRepo || SELF_TITLED.has(path)) return;
+    if (inRepo || isItem || SELF_TITLED.has(path)) return;
     const page = PAGE_TITLES[path] ?? (approval ? "Approve a sign-off" : "Not found");
     document.title = `${page} — Reef`;
-  }, [inRepo, path, approval]);
+  }, [inRepo, isItem, path, approval]);
   return (
     <HeaderSlots.Provider value={slots}>
       <div className={repo ? "page repo-page" : "page"}>
@@ -126,6 +129,8 @@ function Shell({
               frame={frame}
               onSessionInvalid={onSessionInvalid}
             />
+          ) : item?.repo && item.key ? (
+            <ItemLink key={path} live={live} repo={item.repo} itemKey={item.key} />
           ) : repo ? (
             <RepoFrame
               key={repo.repo}

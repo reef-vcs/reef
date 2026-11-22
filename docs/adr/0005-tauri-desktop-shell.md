@@ -3,6 +3,7 @@
 - Status: accepted
 - Date: 2026-10-15
 - Ticket: R0.07
+- Amended by: [0093](0093-the-desktop-shell-and-raised-items.md) (the shell supervises the daemon through `reef daemon start` and never links it)
 
 Backfilled from design.md; decision predates this record.
 

@@ -8,6 +8,7 @@ import type {
   RegisterPasskeyRequestSchema,
   StartPasskeyRegistrationResponse,
 } from "../gen/reef/api/v1/identity_pb";
+import { embedded } from "../session";
 import { buffer, utf8 } from "./bytes";
 
 export type Assertion = MessageInitShape<typeof PasskeyAssertionSchema>;
@@ -44,7 +45,7 @@ export function failure(thrown: unknown): Failure {
 }
 
 export function hasPasskeySupport(): boolean {
-  return typeof PublicKeyCredential !== "undefined" && "credentials" in navigator;
+  return !embedded() && typeof PublicKeyCredential !== "undefined" && "credentials" in navigator;
 }
 
 function credentials(): CredentialsContainer {

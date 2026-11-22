@@ -37,6 +37,7 @@ pub(crate) struct Start {
     pub(crate) named: Option<Vec<RepoId>>,
     pub(crate) watch: Watch,
     pub(crate) slot: Slot,
+    pub(crate) raise_epoch: String,
 }
 
 /// Starts the stream's task; its frames arrive on the receiver.
@@ -48,6 +49,7 @@ pub(crate) fn spawn(state: Arc<AppState>, start: Start) -> mpsc::Receiver<Frame>
             named,
             watch,
             slot,
+            raise_epoch,
         } = start;
         let _slot = slot;
         let mut session = Session {
@@ -59,6 +61,7 @@ pub(crate) fn spawn(state: Arc<AppState>, start: Start) -> mpsc::Receiver<Frame>
             sent: BTreeMap::new(),
             frames: VecDeque::new(),
             synced: false,
+            raise_epoch,
         };
         let served = AssertUnwindSafe(session.serve(&tx)).catch_unwind().await;
         let error = match served {
@@ -79,6 +82,7 @@ pub(crate) fn spawn(state: Arc<AppState>, start: Start) -> mpsc::Receiver<Frame>
 struct Sent {
     board: Arc<RepoBoard>,
     landed: v1::LandedDigest,
+    listed: bool,
 }
 
 struct Session {
@@ -92,6 +96,7 @@ struct Session {
     frames: VecDeque<Vec<v1::InboxSectionChange>>,
     /// The first inbox has been sent whole.
     synced: bool,
+    raise_epoch: String,
 }
 
 fn shutting_down() -> Status {
@@ -162,7 +167,11 @@ impl Session {
                 continue;
             }
             self.synced = synced;
-            permit.send(Ok(WatchInboxResponse { sections, synced }));
+            permit.send(Ok(WatchInboxResponse {
+                sections,
+                synced,
+                raise_epoch: self.raise_epoch.clone(),
+            }));
             last_frame = Instant::now();
         }
     }
@@ -216,14 +225,21 @@ impl Session {
                     ),
                 };
             let error = now.error.clone().or(digest_error);
-            let unchanged = sent.is_some_and(|sent| {
-                items.is_empty()
-                    && left.is_empty()
-                    && sent.board.needs_you_now_total == now.needs_you_now_total
-                    && sent.board.watching_total == now.watching_total
-                    && sent.board.error == error
-                    && sent.landed == landed
-            });
+            let listed = sent.is_some_and(|sent| sent.listed);
+            let listing = if !listed && now.read {
+                v1::InboxListing::End
+            } else {
+                v1::InboxListing::Unspecified
+            };
+            let unchanged = listing == v1::InboxListing::Unspecified
+                && sent.is_some_and(|sent| {
+                    items.is_empty()
+                        && left.is_empty()
+                        && sent.board.needs_you_now_total == now.needs_you_now_total
+                        && sent.board.watching_total == now.watching_total
+                        && sent.board.error == error
+                        && sent.landed == landed
+                });
             if !unchanged {
                 changes.push(v1::InboxSectionChange {
                     repo_id: repo.as_hex(),
@@ -234,6 +250,8 @@ impl Session {
                     landed: Some(landed.clone()),
                     error: error.clone(),
                     removed: false,
+                    listing: listing.into(),
+                    raised_through: now.raised_through,
                 });
             }
             let mut held = Arc::clone(now);
@@ -248,6 +266,7 @@ impl Session {
                 Sent {
                     board: held,
                     landed,
+                    listed: listed || now.read,
                 },
             );
         }
@@ -296,6 +315,8 @@ mod tests {
             error: None,
             subjects: Arc::default(),
             restale_at: None,
+            read: true,
+            raised_through: 0,
         };
         Arc::new(Board {
             repos: BTreeMap::from([(repo, Arc::new(repo_board))]),
@@ -318,6 +339,7 @@ mod tests {
             named: None,
             watch: state.inbox.of(read),
             slot: state.subscriptions.admit(usize::MAX).unwrap(),
+            raise_epoch: String::new(),
         };
         let mut frames = spawn(Arc::clone(&state), start);
         let first = frames.recv().await.unwrap().unwrap();
@@ -346,5 +368,53 @@ mod tests {
         }
         assert!(count <= 2, "{count} frames for 200 boards read late");
         assert_eq!(held, [format!("help:{}:200", repo.as_hex())]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_first_read_is_no_listing() {
+        let (daemon, repo) =
+            TestDaemon::with_synthetic_repo(reef_testing::synth::Preset::Small).await;
+        let state = Arc::clone(daemon.handle.state());
+        let repo: RepoId = repo.id.parse().unwrap();
+        let error = v1::InboxError {
+            reason: "BUSY".to_owned(),
+            message: "busy".to_owned(),
+        };
+        let failed = Arc::new(Board {
+            repos: BTreeMap::from([(repo, Arc::new(RepoBoard::failed(None, error)))]),
+            ready: true,
+        });
+        let (publish, read) = watch::channel(failed);
+        let start = Start {
+            viewer: Viewer::Nobody,
+            named: None,
+            watch: state.inbox.of(read),
+            slot: state.subscriptions.admit(usize::MAX).unwrap(),
+            raise_epoch: "epoch".to_owned(),
+        };
+        let mut frames = spawn(Arc::clone(&state), start);
+        let first = frames.recv().await.unwrap().unwrap();
+        assert_eq!(first.raise_epoch, "epoch");
+        let section = &first.sections[0];
+        assert_eq!(section.listing(), v1::InboxListing::Unspecified);
+        assert!(section.error.is_some() && section.items.is_empty());
+
+        publish.send_replace(board(repo, 1));
+        let next = tokio::time::timeout(Duration::from_secs(5), frames.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let section = &next.sections[0];
+        assert_eq!(section.listing(), v1::InboxListing::End);
+        assert_eq!(section.items.len(), 1);
+
+        publish.send_replace(board(repo, 2));
+        let later = tokio::time::timeout(Duration::from_secs(5), frames.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(later.sections[0].listing(), v1::InboxListing::Unspecified);
     }
 }

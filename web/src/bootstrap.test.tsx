@@ -2,7 +2,7 @@
 // stored one is reused, and with neither the app shows the no-session page.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
-import { SESSION_KEY, takeSession } from "./session";
+import { EMBEDDED_KEY, embedded, SESSION_KEY, takeSession } from "./session";
 import { cleanup, render, screen } from "./test/testing-library";
 
 afterEach(() => {
@@ -33,6 +33,15 @@ describe("takeSession", () => {
     // Another tab of the origin shares localStorage and has no fragment.
     at("/states");
     expect(takeSession()).toBe("tok");
+  });
+
+  it("takes the embedded flag with the token and keeps it for the tab", () => {
+    at("/repos/r/proposals/c#session=tok&embedded=1");
+    expect(takeSession()).toBe("tok");
+    expect(window.location.hash).toBe("");
+    expect(sessionStorage.getItem(EMBEDDED_KEY)).toBe("1");
+    expect(embedded()).toBe(true);
+    sessionStorage.clear();
   });
 
   it("ignores a fragment that is not a session", () => {

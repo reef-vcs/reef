@@ -13,13 +13,14 @@ import {
   SessionPresence,
   type Identity,
 } from "../gen/reef/api/v1/identity_pb";
-import { failure, hasPasskeySupport, NO_SUPPORT, type Failure } from "../sign/passkey";
+import { failure, hasPasskeySupport, type Failure } from "../sign/passkey";
 import { signOff, type SignOffStep } from "../sign/signoff";
 import { ErrorView } from "../ui/ErrorView";
 import { FailureView } from "../ui/FailureView";
 import { reverseHex, shortId } from "../ui/ids";
 import { Link } from "../ui/router";
 import { Time } from "../ui/TimeLabel";
+import { NoPasskeysHere } from "./Handoff";
 
 export type Signer =
   | { kind: "loading" }
@@ -229,7 +230,7 @@ export function SignOff({
               touch
             </span>
           </p>
-          {!supported && <p className="secondary">{NO_SUPPORT}</p>}
+          {!supported && <NoPasskeysHere />}
           {supported && signer.passkeys === 0 && (
             <p className="secondary">
               {signer.identity.name} has no passkey. <Link to="/passkeys">Add one</Link> to sign
