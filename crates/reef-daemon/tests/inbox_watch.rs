@@ -542,7 +542,7 @@ async fn snapshots_alone_read_nothing_and_streams_share_a_read() {
     let mut first = Watched::open(client, &[]).await;
     let mut second = Watched::open(client, &[]).await;
     tokio::time::sleep(Duration::from_millis(600)).await;
-    let passes = state.inbox.passes();
+    let passes = state.inbox.reads();
 
     // Edits to a change nothing proposes record operations the inbox does
     // not read on.
@@ -557,10 +557,10 @@ async fn snapshots_alone_read_nothing_and_streams_share_a_read() {
         .workspace
         .unwrap();
     // The create's own read, paced, settles first.
-    let mut created = state.inbox.passes();
+    let mut created = state.inbox.reads();
     loop {
         tokio::time::sleep(Duration::from_millis(1_000)).await;
-        let now = state.inbox.passes();
+        let now = state.inbox.reads();
         if now == created {
             break;
         }
@@ -580,14 +580,14 @@ async fn snapshots_alone_read_nothing_and_streams_share_a_read() {
     // Longer than a paced read's spacing under load.
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert_eq!(
-        state.inbox.passes(),
+        state.inbox.reads(),
         created,
         "snapshots read nothing (a create read once: {passes} -> {created})"
     );
 
     // One help request: both streams see it after one read.
     let draft = commit_on(client, &repo.id, &main.commit_id, &[("d.txt", "d\n")]).await;
-    let before = state.inbox.passes();
+    let before = state.inbox.reads();
     let asked = ask(client, &repo.id, &draft.commit_id, "agent-d").await;
     let key = format!("help:{}:{}", repo.id, asked.id);
     first
@@ -597,9 +597,9 @@ async fn snapshots_alone_read_nothing_and_streams_share_a_read() {
         .until("the second stream", |w| w.item(&key).is_some())
         .await;
     assert!(
-        state.inbox.passes() - before <= 2,
+        state.inbox.reads() - before <= 2,
         "{} passes for one comment and two streams",
-        state.inbox.passes() - before
+        state.inbox.reads() - before
     );
 
     // Attention moves with no operation; its presence entry reaches the
@@ -628,7 +628,8 @@ async fn a_slow_reader_gets_the_latest_state_not_the_history() {
     let draft = commit_on(client, &repo.id, &main.commit_id, &[("d.txt", "d\n")]).await;
     let mut watched = Watched::open(client, &[]).await;
     let frames = watched.frames;
-    let passes = daemon.handle.state().inbox.passes();
+    let passes = daemon.handle.state().inbox.reads();
+    let storm = Instant::now();
 
     // While the client reads nothing, help requests come and go.
     let mut last = None;
@@ -656,15 +657,24 @@ async fn a_slow_reader_gets_the_latest_state_not_the_history() {
     // changes into: never a frame per change. (Holding the stream to one
     // built frame while its transport is blocked is
     // `session::tests::a_client_that_stops_reading_gets_the_latest_board`.)
-    let read = daemon.handle.state().inbox.passes() - passes;
+    let read = daemon.handle.state().inbox.reads() - passes;
+    let elapsed = storm.elapsed();
     let sent = u64::try_from(watched.frames - frames).unwrap();
     assert!(sent <= read + 1, "{sent} frames for {read} reads");
-    assert!(read < 100, "{read} reads for 401 changes");
+    // Reads of one repository start at most every 250 ms, however many
+    // changes land meanwhile.
+    let spaced = u64::try_from(elapsed.as_millis() / 250).unwrap() + 2;
+    assert!(
+        read <= spaced,
+        "{read} reads for 401 changes in {elapsed:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_daemon_with_no_repository_sends_one_empty_synced_frame() {
-    let daemon = TestDaemon::start().await;
+    // At one slot a stream still opens: the board's own subscription is
+    // taken past the cap.
+    let daemon = TestDaemon::start_with(|config| config.subscribe.max_subscriptions = 1).await;
     let mut stream = daemon
         .client
         .watch_inbox(WatchInboxRequest::default())
@@ -677,4 +687,156 @@ async fn a_daemon_with_no_repository_sends_one_empty_synced_frame() {
         .unwrap();
     assert!(frame.synced);
     assert_eq!(frame.sections, Vec::new());
+    let refused = daemon
+        .client
+        .watch_inbox(WatchInboxRequest::default())
+        .await
+        .unwrap_err();
+    assert_eq!(refused.reason(), reef_api::error::TOO_MANY_SUBSCRIPTIONS);
+}
+
+/// Reads frames until `key` is listed, and how long that took.
+async fn latency(watched: &mut Watched, what: &str, key: &str) -> Duration {
+    let asked = Instant::now();
+    watched.until(what, |w| w.item(key).is_some()).await;
+    asked.elapsed()
+}
+
+/// A second repository, registered.
+async fn second(daemon: &TestDaemon) -> String {
+    let other = daemon.tmp.path().join("other");
+    let at = other.clone();
+    tokio::task::spawn_blocking(move || {
+        reef_daemon::testing::init_synthetic_repo(&at, Preset::Small);
+    })
+    .await
+    .unwrap();
+    daemon
+        .client
+        .register_repository(&other, v1::IfNotJj::Fail)
+        .await
+        .unwrap()
+        .repository
+        .unwrap()
+        .id
+}
+
+/// Holds `repo`'s thread for `stall`, as a long git import holds it.
+fn hold(daemon: &TestDaemon, repo: &str, stall: Duration) -> tokio::task::JoinHandle<()> {
+    let held = daemon
+        .handle
+        .state()
+        .repos
+        .get(repo.parse().unwrap())
+        .unwrap()
+        .call(move |_| std::thread::sleep(stall));
+    tokio::spawn(async move { held.await.unwrap() })
+}
+
+const STALL: Duration = Duration::from_secs(5);
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_busy_repository_holds_back_only_itself() {
+    let (daemon, a) = fixture().await;
+    let client = &daemon.client;
+    let b = second(&daemon).await;
+    let on_a = commit_on(client, &a.id, "root()", &[("a.txt", "a\n")]).await;
+    let on_b = commit_on(client, &b, "root()", &[("b.txt", "b\n")]).await;
+    let mut watched = Watched::open(client, &[]).await;
+
+    let asked = ask(client, &b, &on_b.commit_id, "agent-b0").await;
+    let control = latency(&mut watched, "control", &format!("help:{b}:{}", asked.id)).await;
+
+    // A's thread is held, as a long git import holds it, right after a
+    // help request there.
+    let asked = ask(client, &a.id, &on_a.commit_id, "agent-a").await;
+    let stalled = Instant::now();
+    let held = hold(&daemon, &a.id, STALL);
+    let a_key = format!("help:{}:{}", a.id, asked.id);
+
+    let asked = ask(client, &b, &on_b.commit_id, "agent-b1").await;
+    let b_during = latency(
+        &mut watched,
+        "B while A is busy",
+        &format!("help:{b}:{}", asked.id),
+    )
+    .await;
+    watched
+        .until("A's help request", |w| w.item(&a_key).is_some())
+        .await;
+    let a_latency = stalled.elapsed();
+    held.await.unwrap();
+
+    let asked = ask(client, &b, &on_b.commit_id, "agent-b2").await;
+    let b_after = latency(
+        &mut watched,
+        "B after A was busy",
+        &format!("help:{b}:{}", asked.id),
+    )
+    .await;
+    let asked = ask(client, &a.id, &on_a.commit_id, "agent-a2").await;
+    let a_after = latency(
+        &mut watched,
+        "A after it was busy",
+        &format!("help:{}:{}", a.id, asked.id),
+    )
+    .await;
+
+    let report = format!(
+        "control={control:?} b_during={b_during:?} a_latency={a_latency:?} b_after={b_after:?} a_after={a_after:?}"
+    );
+    eprintln!("{report}");
+    // Waiting on A's thread is not work: neither repository's next read
+    // is spaced by it, and B's reads never wait for A's.
+    let quick = Duration::from_secs(2);
+    assert!(b_during < quick, "{report}");
+    assert!(a_latency < STALL + quick, "{report}");
+    assert!(b_after < quick, "{report}");
+    assert!(a_after < quick, "{report}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_board_started_while_a_repository_is_busy_sends_the_others_first() {
+    let (daemon, a) = fixture().await;
+    let client = &daemon.client;
+    let b = second(&daemon).await;
+    let on_b = commit_on(client, &b, "root()", &[("b.txt", "b\n")]).await;
+    ask(client, &b, &on_b.commit_id, "agent-b").await;
+
+    // No stream is open, so the board starts with A's thread held: a
+    // stream naming B is whole at once, and one of everything gets B
+    // before A and `synced` once A is read.
+    let stalled = Instant::now();
+    let held = hold(&daemon, &a.id, STALL);
+    let mut every = client
+        .watch_inbox(WatchInboxRequest::default())
+        .await
+        .unwrap();
+    let named = Watched::open(client, &[&b]).await;
+    let named_first = stalled.elapsed();
+    let mut b_first = None;
+    loop {
+        let frame = tokio::time::timeout(Duration::from_secs(30), every.message())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        if b_first.is_none() && frame.sections.iter().any(|section| section.repo_id == b) {
+            assert!(!frame.synced, "B came before A was read");
+            b_first = Some(stalled.elapsed());
+        }
+        if frame.synced {
+            break;
+        }
+    }
+    let every_synced = stalled.elapsed();
+    held.await.unwrap();
+    assert!(named.repos.contains_key(&b), "{:#?}", named.repos);
+    let report =
+        format!("named_first={named_first:?} b_first={b_first:?} every_synced={every_synced:?}");
+    eprintln!("{report}");
+    let quick = Duration::from_secs(2);
+    assert!(named_first < quick, "{report}");
+    assert!(b_first.is_some_and(|at| at < quick), "{report}");
+    assert!(every_synced + quick >= STALL, "{report}");
 }

@@ -326,11 +326,14 @@ impl Reads {
         let joined = tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let _entered = span.enter();
-            pollster::block_on(read())
+            crate::work::on_thread(|| pollster::block_on(read()))
         })
         .await;
         match joined {
-            Ok(value) => Ok(value),
+            Ok((value, used)) => {
+                crate::work::count(used);
+                Ok(value)
+            }
             Err(error) if error.is_panic() => {
                 tracing::error!(repo = %handle.id(), "read panicked; reopening the repository");
                 // Repositories loaded from the store the panic may have

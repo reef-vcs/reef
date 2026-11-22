@@ -498,7 +498,7 @@ impl InboxService for InboxHandler {
             .subscriptions
             .admit(self.state.config.subscribe.max_subscriptions)
             .map_err(status)?;
-        let watch = self.state.inbox.watch(&self.state).map_err(status)?;
+        let watch = self.state.inbox.watch(&self.state);
         let frames = session::spawn(
             Arc::clone(&self.state),
             session::Start {

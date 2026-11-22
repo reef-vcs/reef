@@ -9,8 +9,12 @@
 //! stale mark a repository dirty, and the next read replaces its snapshot.
 //! Any gap (the operation stream ending, presence lagging) marks every
 //! repository. So a restart is a fresh read, and nothing applies an event
-//! to state. Reads are paced by R2.19's rule: one pass at a time, starting
-//! no sooner than `max(250 ms, 4 × the last pass)` after the last began.
+//! to state. Each repository is read on its own, one read of it at a time,
+//! so a repository whose thread is busy holds back only its own reads.
+//! Reads are paced by R2.19's rule, counting the CPU time they used
+//! (`work::worked`), not the time they waited: batches of reads start at
+//! most every 250 ms, and each read, from its start, holds back the next
+//! batch for four times its work, laid end to end with every other read's.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::panic::AssertUnwindSafe;
@@ -18,6 +22,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::Duration;
 
+use futures::future::BoxFuture;
+use futures::stream::FuturesUnordered;
 use futures::{FutureExt as _, StreamExt as _};
 use reef_api::v1::{self, SubscribeOperationsRequest};
 use tokio::sync::{broadcast, watch};
@@ -29,12 +35,11 @@ use crate::inbox::board::RepoBoard;
 use crate::inbox::{refresh_operations, refresh_presence};
 use crate::model::{RepoId, Timestamp};
 use crate::presence::PresenceFilter;
-use crate::subscribe::{Slot, SubscribeError};
 
-/// The least time between the starts of two read passes.
+/// The least time between two starts of reads.
 const MIN_SPACING: Duration = Duration::from_millis(250);
-/// A pass starts no sooner than this many times the last one's length
-/// after it began, so reading takes at most a quarter of the task's time.
+/// A read holds back the next for this many times its work, so reading
+/// takes at most a quarter of the task's time.
 const SPACING_FACTOR: u32 = 4;
 /// The first retry of a repository that failed to read, doubled up to
 /// [`MAX_RETRY`].
@@ -45,7 +50,8 @@ const MAX_RETRY: Duration = Duration::from_mins(1);
 #[derive(Debug, Default)]
 pub(crate) struct Board {
     pub(crate) repos: BTreeMap<RepoId, Arc<RepoBoard>>,
-    /// Every repository registered when the task started has been read.
+    /// Every repository registered when this was set had been read; it
+    /// stays set.
     pub(crate) ready: bool,
 }
 
@@ -54,7 +60,7 @@ pub(crate) struct Board {
 pub struct InboxWatch {
     shared: Arc<Mutex<Weak<Shared>>>,
     marks: watch::Sender<u64>,
-    passes: Arc<AtomicU64>,
+    reads: Arc<AtomicU64>,
 }
 
 impl Default for InboxWatch {
@@ -62,7 +68,7 @@ impl Default for InboxWatch {
         InboxWatch {
             shared: Arc::new(Mutex::new(Weak::new())),
             marks: watch::Sender::new(0),
-            passes: Arc::new(AtomicU64::new(0)),
+            reads: Arc::new(AtomicU64::new(0)),
         }
     }
 }
@@ -84,17 +90,12 @@ pub(crate) struct Watch {
 }
 
 impl InboxWatch {
-    /// A watcher of the board, starting the task if none runs. The task
-    /// takes a subscription slot of its own for its operation stream,
-    /// refused here (`TOO_MANY_SUBSCRIPTIONS`) rather than retried later.
-    pub(crate) fn watch(&self, state: &Arc<AppState>) -> Result<Watch, SubscribeError> {
+    /// A watcher of the board, starting the task if none runs.
+    pub(crate) fn watch(&self, state: &Arc<AppState>) -> Watch {
         let mut held = self.shared.lock().unwrap_or_else(PoisonError::into_inner);
         let shared = if let Some(shared) = held.upgrade() {
             shared
         } else {
-            let slot = state
-                .subscriptions
-                .admit(state.config.subscribe.max_subscriptions)?;
             let (tx, rx) = watch::channel(Arc::new(Board::default()));
             let stop = state.shutdown.child_token();
             let shared = Arc::new(Shared {
@@ -103,13 +104,13 @@ impl InboxWatch {
             });
             let mine = Arc::downgrade(&shared);
             *held = mine.clone();
-            let (state, passes, owner) = (
+            let (state, reads, owner) = (
                 Arc::clone(state),
-                Arc::clone(&self.passes),
+                Arc::clone(&self.reads),
                 Arc::clone(&self.shared),
             );
             tokio::spawn(async move {
-                let ran = AssertUnwindSafe(run(state, tx, stop, passes, slot))
+                let ran = AssertUnwindSafe(run(state, tx, stop, reads))
                     .catch_unwind()
                     .await;
                 if ran.is_err() {
@@ -123,11 +124,11 @@ impl InboxWatch {
             });
             shared
         };
-        Ok(Watch {
+        Watch {
             board: shared.board.clone(),
             marks: self.marks.subscribe(),
             _shared: shared,
-        })
+        }
     }
 
     /// A watcher of a board a test publishes, with no task.
@@ -148,9 +149,9 @@ impl InboxWatch {
         self.marks.send_modify(|n| *n += 1);
     }
 
-    /// Read passes the task has run since the daemon started.
-    pub fn passes(&self) -> u64 {
-        self.passes.load(Ordering::Relaxed)
+    /// Repository reads the task has finished since the daemon started.
+    pub fn reads(&self) -> u64 {
+        self.reads.load(Ordering::Relaxed)
     }
 }
 
@@ -165,18 +166,61 @@ struct Task {
     open: HashSet<RepoId>,
     /// The registered repositories were listed since `open` last moved.
     listed: bool,
-    last_start: Option<Instant>,
-    last_length: Duration,
+    /// Repositories with a read in flight.
+    reading: HashSet<RepoId>,
+    pacing: Pacing,
     rev: u64,
-    passes: Arc<AtomicU64>,
+    reads: Arc<AtomicU64>,
 }
+
+/// When the next batch of reads may start.
+#[derive(Debug)]
+struct Pacing {
+    last_start: Option<Instant>,
+    /// Each read's work, times [`SPACING_FACTOR`], laid end to end from
+    /// its start.
+    paced: Instant,
+}
+
+impl Pacing {
+    fn new(now: Instant) -> Pacing {
+        Pacing {
+            last_start: None,
+            paced: now,
+        }
+    }
+
+    fn next(&self) -> Instant {
+        self.last_start
+            .map_or(self.paced, |at| self.paced.max(at + MIN_SPACING))
+    }
+
+    fn started(&mut self, at: Instant) {
+        self.last_start = Some(at);
+    }
+
+    fn finished(&mut self, started: Instant, worked: Duration) {
+        self.paced = self.paced.max(started) + worked * SPACING_FACTOR;
+    }
+}
+
+/// One repository's finished read.
+struct Read {
+    repo: RepoId,
+    last: Option<Arc<RepoBoard>>,
+    result: Result<RepoBoard, tonic::Status>,
+    started: Instant,
+    /// The time spent working for it, not waiting (`work::worked`).
+    worked: Duration,
+}
+
+type Reads = FuturesUnordered<BoxFuture<'static, Read>>;
 
 async fn run(
     state: Arc<AppState>,
     board: watch::Sender<Arc<Board>>,
     stop: CancellationToken,
-    passes: Arc<AtomicU64>,
-    slot: Slot,
+    reads: Arc<AtomicU64>,
 ) {
     // The triggers before the first read, so nothing between is missed.
     let filter = PresenceFilter {
@@ -184,27 +228,17 @@ async fn run(
         ..PresenceFilter::default()
     };
     let (_, mut presence) = state.presence.subscribe(&filter);
-    let mut operations = subscribe(&state, Some(slot)).await;
+    let mut operations = subscribe(&state).await;
     let mut events = state.events.changes();
-    let mut task = Task {
-        open: state.events.repos().into_iter().collect(),
-        listed: false,
-        state,
-        board,
-        dirty: BTreeSet::new(),
-        retry: HashMap::new(),
-        last_start: None,
-        last_length: Duration::ZERO,
-        rev: 0,
-        passes,
-    };
+    let mut task = Task::new(state, board, reads);
+    let mut reading = Reads::new();
     task.reconcile(true);
     // A refused subscription is retried like one that ended.
     let mut reconnect: Option<Instant> = operations.is_none().then(|| Instant::now() + FIRST_RETRY);
     let mut backoff = FIRST_RETRY;
     loop {
         if task.due(Instant::now()) {
-            task.pass().await;
+            task.start(&mut reading);
             continue;
         }
         // Repositories that could not be listed are listed again.
@@ -222,6 +256,7 @@ async fn run(
         tokio::select! {
             biased;
             () = stop.cancelled() => return,
+            Some(read) = reading.next(), if !reading.is_empty() => task.finish(read),
             frame = next(&mut operations) => {
                 if let Some(Ok(frame)) = frame {
                     backoff = FIRST_RETRY;
@@ -264,7 +299,7 @@ async fn run(
                 }
                 if reconnect.is_some_and(|at| at <= Instant::now()) {
                     reconnect = None;
-                    operations = subscribe(&task.state, None).await;
+                    operations = subscribe(&task.state).await;
                     if operations.is_none() {
                         reconnect = Some(Instant::now() + backoff);
                         backoff = (backoff * 2).min(MAX_RETRY);
@@ -281,9 +316,9 @@ type Frames = std::pin::Pin<
 >;
 
 /// The operations of every kind some inbox object changes on, in every
-/// repository, those registered later included, in `slot` or a new one;
-/// `None` when the subscription fails (it is retried).
-async fn subscribe(state: &Arc<AppState>, slot: Option<Slot>) -> Option<Frames> {
+/// repository, those registered later included; `None` when the
+/// subscription fails (it is retried).
+async fn subscribe(state: &Arc<AppState>) -> Option<Frames> {
     let handler = crate::service::operations::OperationsHandler::new(Arc::clone(state));
     let request = SubscribeOperationsRequest {
         filter: Some(v1::OperationFilter {
@@ -292,19 +327,15 @@ async fn subscribe(state: &Arc<AppState>, slot: Option<Slot>) -> Option<Frames> 
         }),
         ..SubscribeOperationsRequest::default()
     };
-    // The first subscription takes the slot admitted with the board's first
-    // watcher. One that follows a stream's end is the same one place back,
-    // taken past the cap, so clients holding every slot cannot leave the
-    // board without its triggers.
-    let slot = match slot {
-        Some(slot) => slot,
-        None => match state.subscriptions.admit(usize::MAX) {
-            Ok(slot) => slot,
-            Err(error) => {
-                tracing::warn!(%error, "the inbox could not follow the operation log");
-                return None;
-            }
-        },
+    // One subscription for the daemon, taken past the cap, so clients
+    // holding every slot cannot leave the board without its triggers, and
+    // a stream opens even at `max_subscriptions = 1`.
+    let slot = match state.subscriptions.admit(usize::MAX) {
+        Ok(slot) => slot,
+        Err(error) => {
+            tracing::warn!(%error, "the inbox could not follow the operation log");
+            return None;
+        }
     };
     match handler.subscribe_admitted(request, move || Ok(slot)).await {
         Ok(frames) => Some(frames),
@@ -325,9 +356,26 @@ async fn next(
 }
 
 impl Task {
+    fn new(state: Arc<AppState>, board: watch::Sender<Arc<Board>>, reads: Arc<AtomicU64>) -> Task {
+        Task {
+            open: state.events.repos().into_iter().collect(),
+            listed: false,
+            state,
+            board,
+            dirty: BTreeSet::new(),
+            retry: HashMap::new(),
+            reading: HashSet::new(),
+            pacing: Pacing::new(Instant::now()),
+            rev: 0,
+            reads,
+        }
+    }
+
     fn dirty_all(&mut self) {
         let repos: Vec<RepoId> = self.board.borrow().repos.keys().copied().collect();
         self.dirty.extend(repos);
+        // A read in flight may have read some sources before the gap.
+        self.dirty.extend(self.reading.iter().copied());
     }
 
     /// Follows repositories opened or forgotten: a new one is read, and a
@@ -365,52 +413,56 @@ impl Task {
             self.dirty.remove(repo);
             self.retry.remove(repo);
         }
+        let mut repos = board.repos.clone();
+        for repo in &gone {
+            repos.remove(repo);
+        }
         // With nothing to read, the board is complete as it stands.
-        let ready = board.ready || self.dirty.is_empty();
+        let ready = board.ready || registered.iter().all(|repo| repos.contains_key(repo));
         if !gone.is_empty() || ready != board.ready {
-            let mut repos = board.repos.clone();
-            for repo in &gone {
-                repos.remove(repo);
-            }
             self.board.send_replace(Arc::new(Board { repos, ready }));
         }
     }
 
-    /// When the next pass may start, as of `now`, if anything waits for
-    /// one.
+    /// When the next read may start, as of `now`, if any repository with
+    /// no read in flight waits for one.
     fn next_due(&self, now: Instant) -> Option<Instant> {
         let wall = Timestamp::now();
+        let idle = |repo: &RepoId| !self.reading.contains(repo);
         let restale = self
             .board
             .borrow()
             .repos
-            .values()
-            .filter_map(|repo| repo.restale_at)
+            .iter()
+            .filter(|(repo, _)| idle(repo))
+            .filter_map(|(_, repo)| repo.restale_at)
             .min()
             .map(|at| {
                 now + Duration::from_millis(at.0.saturating_sub(wall.0).max(0).unsigned_abs())
             });
-        let retry = self.retry.values().map(|(at, _)| *at).min();
-        let wanted = if self.dirty.is_empty() {
-            [restale, retry].into_iter().flatten().min()?
-        } else {
+        let retry = self
+            .retry
+            .iter()
+            .filter(|(repo, _)| idle(repo))
+            .map(|(_, (at, _))| *at)
+            .min();
+        let wanted = if self.dirty.iter().any(idle) {
             now
+        } else {
+            [restale, retry].into_iter().flatten().min()?
         };
-        let spaced = self
-            .last_start
-            .map(|at| at + (self.last_length * SPACING_FACTOR).max(MIN_SPACING));
-        Some(spaced.map_or(wanted, |spaced| spaced.max(wanted)))
+        Some(self.pacing.next().max(wanted))
     }
 
     fn due(&self, now: Instant) -> bool {
         self.next_due(now).is_some_and(|at| at <= now)
     }
 
-    /// Reads every repository due, and publishes what a stream could see.
-    async fn pass(&mut self) {
+    /// Starts a read of every repository due that has none in flight.
+    fn start(&mut self, reading: &mut Reads) {
         let start = Instant::now();
         let now = Timestamp::now();
-        let mut due: BTreeSet<RepoId> = std::mem::take(&mut self.dirty);
+        let mut due: BTreeSet<RepoId> = self.dirty.clone();
         for (repo, (at, _)) in &self.retry {
             if *at <= start {
                 due.insert(*repo);
@@ -421,113 +473,162 @@ impl Task {
                 due.insert(*repo);
             }
         }
-        if due.is_empty() {
-            // A deadline a moment early by the wall clock: wait the spacing.
-            self.last_start = Some(start);
-            return;
-        }
-        let scope = match due.iter().collect::<Vec<_>>().as_slice() {
-            [one] => one.as_hex(),
-            _ => String::new(),
-        };
-        let mut attention = super::attention(&self.state, &scope).await;
-        let mut read = Vec::with_capacity(due.len());
+        // A repository being read is read again once that read finishes.
+        due.retain(|repo| !self.reading.contains(repo));
+        // Even with nothing due (a deadline a moment early by the wall
+        // clock), the spacing holds.
+        self.pacing.started(start);
         for repo in due {
-            let workspaces = match &mut attention {
-                Ok(by_repo) => Ok(by_repo.remove(&repo.as_hex()).unwrap_or_default()),
-                Err(error) => Err(error.clone()),
-            };
+            self.dirty.remove(&repo);
+            self.reading.insert(repo);
             let last = self.board.borrow().repos.get(&repo).cloned();
-            let result = match workspaces {
-                Ok(workspaces) => self.read(repo, workspaces, last.as_deref()).await,
-                Err(error) => Err(error),
-            };
-            let board = match result {
-                Ok(board) => {
-                    self.retry.remove(&repo);
-                    board
-                }
-                Err(error) => {
-                    let wait = self.retry.get(&repo).map_or(FIRST_RETRY, |(_, wait)| *wait);
-                    self.retry
-                        .insert(repo, (Instant::now() + wait, (wait * 2).min(MAX_RETRY)));
-                    RepoBoard::failed(last.as_deref(), super::inbox_error(&error))
-                }
-            };
-            read.push((repo, last, board));
+            reading.push(read(Arc::clone(&self.state), repo, last).boxed());
         }
-        self.passes.fetch_add(1, Ordering::Relaxed);
-        // A repository forgotten during the pass leaves with `reconcile`.
-        let registered = super::registered(&self.state).ok();
-        if let Some(registered) = &registered {
-            self.retry.retain(|repo, _| registered.contains(repo));
-        }
-        let changed: Vec<(RepoId, RepoBoard)> = read
-            .into_iter()
-            .filter(|(repo, last, board)| {
-                registered
-                    .as_ref()
-                    .is_none_or(|registered| registered.contains(repo))
-                    && last.as_deref().is_none_or(|last| !last.same(board))
-            })
-            .map(|(repo, _, board)| (repo, board))
-            .collect();
-        let ready = !self.board.borrow().ready;
-        if !changed.is_empty() || ready {
-            self.board.send_modify(|board| {
-                let mut next = Board {
-                    repos: board.repos.clone(),
-                    ready: true,
-                };
-                for (repo, mut repo_board) in changed {
-                    self.rev += 1;
-                    repo_board.rev = self.rev;
-                    next.repos.insert(repo, Arc::new(repo_board));
-                }
-                *board = Arc::new(next);
-            });
-        }
-        self.last_start = Some(start);
-        self.last_length = start.elapsed();
     }
 
-    /// One repository's snapshot, its subjects reused from `last` when its
-    /// newest landings did not move.
-    async fn read(
-        &self,
-        repo: RepoId,
-        workspaces: Vec<v1::Workspace>,
-        last: Option<&RepoBoard>,
-    ) -> Result<RepoBoard, tonic::Status> {
-        let buckets = super::buckets(&self.state, repo, workspaces).await?;
-        let newest = super::newest_landed(&self.state, repo)?;
-        let subjects = match last {
-            Some(last)
-                if last.subjects.len() == newest.len()
-                    && newest
-                        .iter()
-                        .all(|row| last.subjects.contains_key(&row.change_id)) =>
-            {
-                Arc::clone(&last.subjects)
+    /// Publishes a finished read, if a stream could tell it from the last.
+    fn finish(&mut self, read: Read) {
+        let Read {
+            repo,
+            last,
+            result,
+            started,
+            worked,
+        } = read;
+        self.reading.remove(&repo);
+        self.reads.fetch_add(1, Ordering::Relaxed);
+        self.pacing.finished(started, worked);
+        let board = match result {
+            Ok(board) => {
+                self.retry.remove(&repo);
+                board
             }
-            _ => Arc::new(super::read_subjects(&self.state, &repo.as_hex(), &newest).await?),
+            Err(error) => {
+                let wait = self.retry.get(&repo).map_or(FIRST_RETRY, |(_, wait)| *wait);
+                self.retry
+                    .insert(repo, (Instant::now() + wait, (wait * 2).min(MAX_RETRY)));
+                RepoBoard::failed(last.as_deref(), super::inbox_error(&error))
+            }
         };
-        Ok(RepoBoard::read(repo, buckets, subjects))
+        // A repository forgotten during the read leaves with `reconcile`.
+        let registered = super::registered(&self.state).ok();
+        let kept = registered
+            .as_ref()
+            .is_none_or(|registered| registered.contains(&repo));
+        if !kept {
+            self.retry.remove(&repo);
+        }
+        let changed = kept && last.as_deref().is_none_or(|last| !last.same(&board));
+        let current = Arc::clone(&self.board.borrow());
+        let mut repos = current.repos.clone();
+        if changed {
+            self.rev += 1;
+            let mut board = board;
+            board.rev = self.rev;
+            repos.insert(repo, Arc::new(board));
+        }
+        let ready = current.ready
+            || registered
+                .is_some_and(|registered| registered.iter().all(|repo| repos.contains_key(repo)));
+        if changed || ready != current.ready {
+            self.board.send_replace(Arc::new(Board { repos, ready }));
+        }
     }
+}
+
+/// One repository's read, timed.
+async fn read(state: Arc<AppState>, repo: RepoId, last: Option<Arc<RepoBoard>>) -> Read {
+    let started = Instant::now();
+    let (result, worked) = crate::work::worked(snapshot(&state, repo, last.as_deref())).await;
+    Read {
+        repo,
+        last,
+        result,
+        started,
+        worked,
+    }
+}
+
+/// One repository's snapshot, its subjects reused from `last` when its
+/// newest landings did not move.
+async fn snapshot(
+    state: &Arc<AppState>,
+    repo: RepoId,
+    last: Option<&RepoBoard>,
+) -> Result<RepoBoard, tonic::Status> {
+    let hex = repo.as_hex();
+    let workspaces = super::attention(state, &hex)
+        .await?
+        .remove(&hex)
+        .unwrap_or_default();
+    let buckets = super::buckets(state, repo, workspaces).await?;
+    let newest = super::newest_landed(state, repo)?;
+    let subjects = match last {
+        Some(last)
+            if last.subjects.len() == newest.len()
+                && newest
+                    .iter()
+                    .all(|row| last.subjects.contains_key(&row.change_id)) =>
+        {
+            Arc::clone(&last.subjects)
+        }
+        _ => Arc::new(super::read_subjects(state, &hex, &newest).await?),
+    };
+    Ok(RepoBoard::read(repo, buckets, subjects))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::TestDaemon;
+
+    // #387 review: a gap while a repository's first read is in flight is
+    // that repository's too, though it is not on the board yet.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_gap_during_a_read_reads_that_repository_again() {
+        let (daemon, repo) =
+            TestDaemon::with_synthetic_repo(reef_testing::synth::Preset::Small).await;
+        let repo: RepoId = repo.id.parse().unwrap();
+        let (board, _watch) = watch::channel(Arc::new(Board::default()));
+        let mut task = Task::new(
+            Arc::clone(daemon.handle.state()),
+            board,
+            Arc::new(AtomicU64::new(0)),
+        );
+        task.reconcile(true);
+        let mut reading = Reads::new();
+        task.start(&mut reading);
+        assert!(task.reading.contains(&repo));
+        task.dirty_all();
+        let read = reading.next().await.unwrap();
+        task.finish(read);
+        assert!(task.dirty.contains(&repo), "read again after the gap");
+    }
 
     #[test]
-    fn spacing_is_a_quarter_of_the_time_at_most() {
-        let length = Duration::from_millis(100);
-        assert_eq!(
-            (length * SPACING_FACTOR).max(MIN_SPACING),
-            Duration::from_millis(400)
-        );
-        let short = Duration::from_millis(10);
-        assert_eq!((short * SPACING_FACTOR).max(MIN_SPACING), MIN_SPACING);
+    fn reads_take_at_most_a_quarter_of_the_time() {
+        let t0 = Instant::now();
+        let ms = Duration::from_millis;
+        let mut one = Pacing::new(t0);
+        one.started(t0);
+        one.finished(t0, ms(100));
+        assert_eq!(one.next(), t0 + ms(400));
+
+        let mut cheap = Pacing::new(t0);
+        cheap.started(t0);
+        cheap.finished(t0, ms(10));
+        assert_eq!(cheap.next(), t0 + MIN_SPACING);
+
+        // Reads that run at once are paid for one after another.
+        let mut batch = Pacing::new(t0);
+        batch.started(t0);
+        for _ in 0..3 {
+            batch.finished(t0, ms(100));
+        }
+        assert_eq!(batch.next(), t0 + ms(1_200));
+        // A later read is paid for from its own start once the batch is.
+        batch.started(t0 + ms(1_200));
+        batch.finished(t0 + ms(2_000), ms(50));
+        assert_eq!(batch.next(), t0 + ms(2_200));
     }
 }

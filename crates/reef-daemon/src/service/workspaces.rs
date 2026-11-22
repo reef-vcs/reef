@@ -379,7 +379,7 @@ async fn attach_provenance(state: &AppState, workspaces: &mut [Workspace]) -> Re
     let ids: Vec<String> = workspaces.iter().map(|w| w.id.clone()).collect();
     let provenance = Arc::clone(&state.provenance);
     let db = Arc::clone(&state.db);
-    let sessions = tokio::task::spawn_blocking(move || {
+    let sessions = crate::work::blocking(move || {
         let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
         db.live_provenance_sessions(&ids)?
             .into_iter()

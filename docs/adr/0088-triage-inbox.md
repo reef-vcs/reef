@@ -1,7 +1,7 @@
 # 0088. The triage inbox: one definition in the daemon, a person's mark, and presence for state that moves silently
 
 - Status: accepted
-- Amended by: [0091](0091-watching-the-inbox.md) (the daemon keeps the inbox as a board while someone watches, and the web page reads `WatchInbox`)
+- Amended by: [0091](0091-watching-the-inbox.md) (the daemon keeps the inbox as a board while someone watches, the web page reads `WatchInbox`, and a status first judged `OFF` is announced in presence)
 - Date: 2026-11-20
 - Ticket: R3.33 ([brief](../dev-tickets/phase-3/R3.33-triage-inbox.md))
 - Amends: [0086](0086-reviewing-from-the-web-ui.md) (decision 6: the Proposals tab is replaced by the inbox; decision 7 of [0085](0085-verified-human-presence.md) as 0086 amends it: the allowlist gains `MarkInboxSeen`), [0037](0037-presence-channel.md) (two presence kinds the daemon reports, `AUTOMATIC` and `ATTENTION`), [0081](0081-automatic-landing.md) (a sign-off rule's need is in a status's `missing`), [0029](0029-daemon-api-v1.md) (decision 12's exceptions gain `MarkInboxSeen`)

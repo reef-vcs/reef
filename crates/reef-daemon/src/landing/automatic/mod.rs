@@ -305,6 +305,9 @@ impl Automatic {
     /// another key or state), for the agents' instructions. Publishes the
     /// `AUTOMATIC` entry of each judged status that moved or whose entry
     /// lapsed, and ends those of proposals gone or now `OFF` (R3.33, #362).
+    /// A status first judged `OFF` is published and ended at once: the
+    /// inbox's words for it differ from an unjudged one's, and presence is
+    /// how the inbox learns that it moved (#387 review).
     fn set(
         &self,
         hub: &PresenceHub,
@@ -335,14 +338,14 @@ impl Automatic {
         for (change, status) in statuses {
             let key = presence_key(repo, change);
             let had = live.contains(&key);
-            if status.state == State::Off {
-                if had {
-                    hub.end_daemon(key, PresenceEndReason::Cleared);
-                }
-                continue;
-            }
             let changed = moved.iter().any(|(name, _)| name == change);
-            if changed || !had {
+            let off = status.state == State::Off;
+            let publish = if off {
+                changed && !had
+            } else {
+                changed || !had
+            };
+            if publish {
                 let mut message = super::messages::automatic_message(status);
                 message.missing.clear();
                 hub.publish_daemon(key, |_| Report {
@@ -353,6 +356,9 @@ impl Automatic {
                     ttl: crate::presence::STATE_TTL,
                     ..Report::default()
                 });
+            }
+            if off && (had || publish) {
+                hub.end_daemon(key, PresenceEndReason::Cleared);
             }
         }
         moved
@@ -1007,6 +1013,38 @@ pub(crate) async fn wait_for_evidence(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::presence::PresenceFilter;
+    use crate::testing::TestDaemon;
+
+    // #387 review: the inbox reads a proposal's words again on its
+    // `AUTOMATIC` presence, so a status first judged `OFF` is announced.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_status_first_judged_off_is_announced_then_ended() {
+        // A repository the daemon's own task never judges.
+        let daemon = TestDaemon::start().await;
+        let state = daemon.handle.state();
+        let repo: RepoId = "aaaa000000000001".parse().unwrap();
+        let change = "a".repeat(32);
+        let (_, mut changes) = state.presence.subscribe(&PresenceFilter::default());
+        let statuses = HashMap::from([(change.clone(), Status::new(State::Off, "c1"))]);
+        state.automatic.set(&state.presence, repo, &statuses);
+        let mut seen = Vec::new();
+        while let Ok(seen_change) = changes.try_recv() {
+            if seen_change.presence.change_id == change {
+                seen.push(seen_change.end.is_some());
+            }
+        }
+        assert_eq!(seen, [false, true], "published, then ended");
+        assert!(
+            state
+                .presence
+                .current(&PresenceFilter::default())
+                .is_empty()
+        );
+        // Judged `OFF` again, it says nothing.
+        state.automatic.set(&state.presence, repo, &statuses);
+        assert!(changes.try_recv().is_err());
+    }
 
     #[test]
     fn lands_unasked_only_while_the_service_may_act_on_this_proposal() {

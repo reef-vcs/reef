@@ -110,34 +110,17 @@ fn board_ended(state: &AppState) -> Status {
 
 impl Session {
     async fn serve(&mut self, tx: &mpsc::Sender<Frame>) -> Result<(), Status> {
-        // The first inbox waits for the board's first read of everything,
-        // and of each repository the request named, with keepalives.
+        // Each repository is sent as the board reads it, so one whose
+        // thread is busy holds back no other; `synced` marks the frame
+        // that completes the first inbox.
         let mut last_frame = Instant::now();
-        loop {
-            let board = Arc::clone(&self.watch.board.borrow_and_update());
-            if self.complete(&board) {
-                break;
-            }
-            tokio::select! {
-                biased;
-                () = self.state.shutdown.cancelled() => return Err(shutting_down()),
-                () = tx.closed() => return Ok(()),
-                changed = self.watch.board.changed() => {
-                    if changed.is_err() {
-                        return Err(board_ended(&self.state));
-                    }
-                }
-                () = tokio::time::sleep_until(last_frame + self.keepalive) => {
-                    // A client that is not reading needs none.
-                    let _ = tx.try_send(Ok(WatchInboxResponse::default()));
-                    last_frame = Instant::now();
-                }
-            }
-        }
         let mut marks_moved = false;
+        let mut first = true;
+        // The board the frames in hand were cut from held the first inbox.
+        let mut whole = false;
         loop {
             let mut keepalive = false;
-            if self.frames.is_empty() && self.synced && !marks_moved {
+            if self.frames.is_empty() && !marks_moved && !first {
                 tokio::select! {
                     biased;
                     () = self.state.shutdown.cancelled() => return Err(shutting_down()),
@@ -156,6 +139,7 @@ impl Session {
                     () = tokio::time::sleep_until(last_frame + self.keepalive) => keepalive = true,
                 }
             }
+            first = false;
             let permit = tokio::select! {
                 biased;
                 () = self.state.shutdown.cancelled() => return Err(shutting_down()),
@@ -168,30 +152,26 @@ impl Session {
                 marks_moved |= self.watch.marks.has_changed().unwrap_or(false);
                 self.watch.marks.borrow_and_update();
                 let board = Arc::clone(&self.watch.board.borrow_and_update());
+                whole = self.complete(&board);
                 let changes = self.changes(&board, std::mem::take(&mut marks_moved)).await;
                 self.frames = board::frames(changes).into();
             }
             let sections = self.frames.pop_front().unwrap_or_default();
-            if sections.is_empty() && self.synced && !keepalive {
+            let synced = self.synced || (self.frames.is_empty() && whole);
+            if sections.is_empty() && synced == self.synced && !keepalive {
                 continue;
             }
-            self.synced |= self.frames.is_empty();
-            permit.send(Ok(WatchInboxResponse {
-                sections,
-                synced: self.synced,
-            }));
+            self.synced = synced;
+            permit.send(Ok(WatchInboxResponse { sections, synced }));
             last_frame = Instant::now();
         }
     }
 
     /// Whether `board` holds every repository this stream's first inbox
-    /// shows: all once read, and each named one still registered.
+    /// shows: all once read, or each named one still registered.
     fn complete(&self, board: &Board) -> bool {
-        if !board.ready {
-            return false;
-        }
         let Some(named) = &self.named else {
-            return true;
+            return board.ready;
         };
         let missing: Vec<&RepoId> = named
             .iter()
