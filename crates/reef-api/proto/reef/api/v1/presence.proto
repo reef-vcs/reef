@@ -105,7 +105,8 @@ enum PresenceKind {
   // daemon only. One entry per proposal its destination's policy judges,
   // replaced when the status's state or evaluation key changes (new
   // evidence on its trees changes the key), ended when it leaves review or
-  // nothing judges it.
+  // nothing judges it. A status first judged OFF is published and ended at
+  // once, so a reader of the proposal reads its words again (#372).
   PRESENCE_KIND_AUTOMATIC = 6;
   // An active workspace's attention (R3.33, #145), reported by the daemon
   // only. One entry per active workspace that needs attention, ended when

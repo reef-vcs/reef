@@ -1,7 +1,8 @@
 // W6: one set of streams per browser, shared across tabs through a Web Lock
 // and a BroadcastChannel.
-import { toBinary } from "@bufbuild/protobuf";
+import { create, toBinary } from "@bufbuild/protobuf";
 import { describe, expect, it } from "vitest";
+import { WatchInboxResponseSchema } from "../gen/reef/api/v1/inbox_pb";
 import { SubscribeOperationsResponseSchema } from "../gen/reef/api/v1/operations_pb";
 import {
   sessionInvalid as sessionInvalidError,
@@ -88,6 +89,78 @@ describe("shared streams", () => {
     expect(joiner.live.state).toBe("live");
     leader.live.close();
     joiner.live.close();
+  });
+
+  it("shares one inbox stream: a joining tab gets the inbox, and frames reach every tab (#372)", async () => {
+    const { streams, tab } = browser();
+    const leader = tab();
+    await settle();
+    streams.lastInbox().push(
+      create(WatchInboxResponseSchema, {
+        sections: [{ repoId: "r", items: [{ key: "help:r:1" }] }],
+        synced: true,
+      }),
+    );
+    await settle(20);
+    const joiner = tab();
+    await settle(20);
+    expect(streams.inboxCalls).toHaveLength(1);
+    expect([...(joiner.live.inbox.sections.get("r")?.items.keys() ?? [])]).toEqual(["help:r:1"]);
+    streams.lastInbox().push(
+      create(WatchInboxResponseSchema, {
+        sections: [{ repoId: "r", left: ["help:r:1"] }],
+        synced: true,
+      }),
+    );
+    await settle(20);
+    expect(joiner.live.inbox.sections.get("r")?.items.size).toBe(0);
+    streams.lastInbox().push(
+      create(WatchInboxResponseSchema, {
+        sections: [{ repoId: "r", items: [{ key: "help:r:2" }] }],
+        synced: true,
+      }),
+    );
+    await settle(20);
+    leader.live.close();
+    await settle(20);
+    expect(joiner.live.leading).toBe(true);
+    expect(streams.inboxCalls, "the next holder watches again").toHaveLength(2);
+    streams.lastInbox().push(
+      create(WatchInboxResponseSchema, {
+        sections: [{ repoId: "s", items: [{ key: "help:s:1" }] }],
+        synced: true,
+      }),
+    );
+    await settle(20);
+    expect(
+      [...joiner.live.inbox.sections.keys()],
+      "the new stream's inbox replaces the old",
+    ).toEqual(["s"]);
+    joiner.live.close();
+  });
+
+  it("a joining tab ignores inbox frames that come before its welcome (#372)", async () => {
+    const { streams, tab, bus } = browser();
+    const leader = tab();
+    await settle();
+    streams.lastInbox().push(
+      create(WatchInboxResponseSchema, {
+        sections: [{ repoId: "r", items: [{ key: "help:r:1" }] }],
+        synced: true,
+      }),
+    );
+    await settle(20);
+    const joiner = tab();
+    // A keepalive the leader sent before it answered the joiner's hello.
+    const keepalive = create(WatchInboxResponseSchema, { synced: true });
+    bus.channel().postMessage({ t: "inbox", frame: toBinary(WatchInboxResponseSchema, keepalive) });
+    await Promise.resolve();
+    expect(joiner.live.inbox.synced, "an empty inbox is not the inbox").toBe(false);
+    await settle(20);
+    expect(joiner.live.inbox.synced).toBe(true);
+    expect([...(joiner.live.inbox.sections.get("r")?.items.keys() ?? [])]).toEqual(["help:r:1"]);
+    joiner.live.close();
+    leader.live.close();
   });
 
   it("when the leader goes, the next holder resumes from the last cursor it saw", async () => {

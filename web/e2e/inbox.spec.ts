@@ -3,8 +3,10 @@
 // you now" behind a count, without a reload; the person answers it in place
 // and the agent's session takes the answer as its next instruction (the
 // Phase 3 exit criterion); a proposal under a sign-off rule arrives the same
-// way once the daemon judges it; a landing shows in the digest, which is
-// marked seen once on screen, so a reload says nothing new has landed.
+// way once the daemon judges it; a repository registered while the page is
+// open is followed too (#372: the daemon owns the inbox's triggers); a
+// landing shows in the digest, which is marked seen once on screen, so a
+// reload says nothing new has landed.
 import type { Page } from "@playwright/test";
 import { expect, test, type Reef } from "./reef";
 
@@ -139,6 +141,32 @@ test("the inbox: a help request answered in place, a sign-off asked for, a diges
       .click({ timeout: 30_000 });
     await expect(needs(page).getByRole("link", { name: "Add the answer" })).toBeVisible();
     await expect(needs(page).getByText(`Needs a sign-off from ${reef.identity}`)).toBeVisible();
+  });
+
+  await test.step("a repository registered while the page is open is followed", async () => {
+    const other = await reef.registerAnother("e2e-other");
+    const ws = await reef.workspace("e2e other repository", other);
+    await reef.edit(ws, { "notes.txt": "which branch?\n" });
+    await reef.reef(
+      [
+        "ask",
+        "--workspace",
+        ws.id,
+        "-m",
+        "Which branch should this go to?",
+        "--tried",
+        "read the README",
+        "--reason",
+        "unclear",
+        "--client-session",
+        "e2e-other-session",
+      ],
+      { agent: AGENT },
+    );
+    await needs(page)
+      .getByRole("button", { name: /^Show 1 new item/ })
+      .click({ timeout: 30_000 });
+    await expect(needs(page).getByText("Which branch should this go to?")).toBeVisible();
   });
 
   await test.step("the landing shows in the digest, seen once on screen", async () => {

@@ -1205,7 +1205,7 @@ async fn blocking<T: Send + 'static>(
     work: impl FnOnce(&AppState) -> Result<T, AssignError> + Send + 'static,
 ) -> Result<T, AssignError> {
     let state = Arc::clone(state);
-    tokio::task::spawn_blocking(move || work(&state))
+    crate::work::blocking(move || work(&state))
         .await
         .map_err(|error| AssignError::Read(Box::new(error)))?
 }

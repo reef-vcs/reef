@@ -56,7 +56,9 @@ pub(crate) fn leaf_commands() -> Vec<Vec<String>> {
             // of the contract.
             .filter(|child| child.get_name() != "help" && !child.is_hide_set())
             .collect();
-        if children.is_empty() {
+        // A command that runs by itself beside its subcommands (`inbox`
+        // and `inbox watch`) is one too.
+        if children.is_empty() || command.is_args_conflicts_with_subcommands_set() {
             out.push(path.clone());
         }
         for child in children {

@@ -384,6 +384,7 @@ pub(crate) const OUTPUTS: &[OutputRow] = &[
         )
     },
     row(&["inbox"], object::<inbox::Inbox>),
+    lines(&["inbox", "watch"], object::<inbox::Change>),
     OutputRow {
         note: Some(
             "`comment` and `frame` are null when there was none to take; with --hook (a harness's hook), the framed instruction as text or a decision object, or nothing, and always exit 0",

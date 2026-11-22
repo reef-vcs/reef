@@ -577,6 +577,10 @@ pub(super) const NOT_TOOLS: &[(&str, &str)] = &[
         "a person's reading position, moved by the web UI",
     ),
     (
+        "/reef.api.v1.InboxService/WatchInbox",
+        "a stream; an agent supervising others runs `reef inbox watch`",
+    ),
+    (
         "/reef.api.v1.GitService/FetchGitRemote",
         "rebase_change fetches; an agent rarely needs a fetch alone",
     ),

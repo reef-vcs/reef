@@ -174,6 +174,8 @@ pub struct AppState {
     pub build: Arc<crate::build::BuildLimit>,
     /// Changed paths by commit, for overlaps (#263).
     pub overlaps: reef_lib::jj::overlap::PathCache,
+    /// The board `WatchInbox` streams read (#372).
+    pub inbox: crate::service::inbox::watch::InboxWatch,
 }
 
 impl fmt::Debug for AppState {
@@ -487,6 +489,7 @@ impl Daemon {
             assignments: Arc::new(crate::assign::Assignments::default()),
             build,
             overlaps: reef_lib::jj::overlap::PathCache::default(),
+            inbox: crate::service::inbox::watch::InboxWatch::default(),
         });
 
         // Before any snapshot can run (R2.10).

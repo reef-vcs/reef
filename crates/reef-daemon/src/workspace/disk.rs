@@ -242,7 +242,7 @@ impl Manager {
     /// The machine's disk status. Blocking parts run off the async workers.
     pub async fn disk_status(self: &Arc<Self>, purgeable: Purgeable) -> Status {
         let manager = Arc::clone(self);
-        tokio::task::spawn_blocking(move || manager.disk_status_blocking(purgeable))
+        crate::work::blocking(move || manager.disk_status_blocking(purgeable))
             .await
             .unwrap_or_default()
     }

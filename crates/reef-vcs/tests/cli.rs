@@ -1678,6 +1678,21 @@ fn help_commands(state: &Path, path: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// Whether the command at `path` runs without a subcommand though it has
+/// some: its help's usage has a line naming no `<COMMAND>`.
+fn runs_alone(state: &Path, path: &[String]) -> bool {
+    if path.is_empty() {
+        return false;
+    }
+    let output = reef_in(state).args(path).arg("--help").output().unwrap();
+    let text = stdout(&output);
+    let mut usage = text
+        .lines()
+        .skip_while(|line| !line.starts_with("Usage:"))
+        .take_while(|line| !line.is_empty());
+    usage.any(|line| !line.contains("<COMMAND>"))
+}
+
 /// Whether `next` is `reef`, then global flags with their values, then a
 /// command's words and its arguments.
 fn is_real_command(next: &[String], commands: &[Vec<String>]) -> bool {
@@ -1749,7 +1764,9 @@ fn guide_json_lists_every_leaf_command() {
             child_path.push(child.clone());
             pending.push(child_path);
         }
-        if children.is_empty() {
+        // A command that runs by itself beside its subcommands prints a
+        // usage line without `<COMMAND>`.
+        if children.is_empty() || runs_alone(&state, &path) {
             walked.push(path);
         }
     }
@@ -2036,8 +2053,11 @@ async fn every_command_completes_with_stdin_closed() {
     let state = daemon.state_dir().to_owned();
     let mut lines: Vec<Vec<String>> = Vec::new();
     for mut command in leaf_commands(&state) {
-        // `op watch` and `presence watch` wait 30 s by default.
-        if command == ["op", "watch"] || command == ["presence", "watch"] {
+        // `op watch`, `presence watch` and `inbox watch` wait 30 s by default.
+        if command == ["op", "watch"]
+            || command == ["presence", "watch"]
+            || command == ["inbox", "watch"]
+        {
             command.extend(["--for".to_owned(), "1".to_owned()]);
         }
         // `executor run` serves until stopped.

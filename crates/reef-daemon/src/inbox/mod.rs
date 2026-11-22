@@ -6,6 +6,7 @@
 //! object's rule table ([`rules`]) that admits it. Nothing is kept between
 //! reads; a person's mark is the only stored state (`db::inbox`).
 
+pub(crate) mod board;
 pub(crate) mod rules;
 #[cfg(test)]
 mod tests;
@@ -74,6 +75,9 @@ impl Object {
                     O::Rebase,
                     O::Describe,
                     O::Abandon,
+                    // Another jj client's operation: `jj describe` at the
+                    // root, the jj CLI's undo (#372).
+                    O::External,
                 ],
                 &[PresenceKind::Automatic],
             ),
@@ -97,6 +101,15 @@ pub(crate) fn key(object: Object, repo: RepoId, id: &str) -> String {
 pub(crate) enum Bucket {
     NeedsYouNow,
     Watching,
+}
+
+impl Bucket {
+    pub(crate) const fn wire(self) -> v1::InboxBucket {
+        match self {
+            Bucket::NeedsYouNow => v1::InboxBucket::NeedsYouNow,
+            Bucket::Watching => v1::InboxBucket::Watching,
+        }
+    }
 }
 
 /// `v1::InboxReason`, one to one; each rule table names its reasons once
@@ -215,18 +228,20 @@ impl Item {
             commit_id: self.commit_id,
             next: self.next,
             record: Some(self.record),
+            bucket: self.reason.bucket().wire().into(),
         }
     }
 }
 
 /// One repository's buckets: newest first, cut at [`BUCKET_CAP`], with
-/// totals.
-#[derive(Debug, Default)]
+/// totals, as their words read at `now`.
+#[derive(Debug)]
 pub(crate) struct Buckets {
     pub needs_you_now: Vec<Item>,
     pub needs_you_now_total: usize,
     pub watching: Vec<Item>,
     pub watching_total: usize,
+    pub now: Timestamp,
 }
 
 /// Places every record of `sources` by the first rule of its object that
@@ -274,7 +289,13 @@ pub(crate) fn classify(sources: Sources) -> Buckets {
         }
     }
     items.sort_by(|a, b| b.since.cmp(&a.since).then_with(|| a.key.cmp(&b.key)));
-    let mut buckets = Buckets::default();
+    let mut buckets = Buckets {
+        needs_you_now: Vec::new(),
+        needs_you_now_total: 0,
+        watching: Vec::new(),
+        watching_total: 0,
+        now,
+    };
     for item in items {
         match item.reason.bucket() {
             Bucket::NeedsYouNow => {

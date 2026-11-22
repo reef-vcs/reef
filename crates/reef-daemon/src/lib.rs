@@ -55,6 +55,7 @@ pub mod symbols;
 pub mod testing;
 pub mod watcher;
 pub mod web;
+pub(crate) mod work;
 pub mod workspace;
 
 pub use reef_client as client;

@@ -286,19 +286,23 @@ impl RepoHandle {
         let id = self.id;
         let (reply, result) = oneshot::channel();
         let job = Box::new(move |head: &mut RepoHead| {
-            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(head)));
+            let (outcome, used) = crate::work::on_thread(|| {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(head)))
+            });
             let outcome = outcome.map_err(|_| {
                 tracing::error!(repo = %id, "repository job panicked");
                 head.note_panicked();
                 RepoThreadError::Panicked { id }
             });
             // The caller may have stopped waiting; the job ran either way.
-            let _ = reply.send(outcome);
+            let _ = reply.send((outcome, used));
         });
         let sent = self.tx.send(Message::Job(job));
         async move {
             sent.map_err(|_| RepoThreadError::Closed { id })?;
-            result.await.map_err(|_| RepoThreadError::Closed { id })?
+            let (outcome, used) = result.await.map_err(|_| RepoThreadError::Closed { id })?;
+            crate::work::count(used);
+            outcome
         }
     }
 

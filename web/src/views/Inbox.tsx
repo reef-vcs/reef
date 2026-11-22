@@ -366,7 +366,7 @@ export function Inbox({
   onSessionInvalid: () => void;
 }) {
   const [model] = useState(
-    () => new InboxModel(connection, live.operations, live.presence, frame, onSessionInvalid, repo),
+    () => new InboxModel(connection, live.inbox, frame, onSessionInvalid, repo),
   );
   useEffect(() => model.start(), [model]);
   const snapshot = useSyncExternalStore(model.subscribe, model.getSnapshot);

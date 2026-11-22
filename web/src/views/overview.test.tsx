@@ -14,7 +14,8 @@ import {
   RepositoryService,
   type Repository,
 } from "../gen/reef/api/v1/repositories_pb";
-import { InboxService } from "../gen/reef/api/v1/inbox_pb";
+import { WatchInboxResponseSchema } from "../gen/reef/api/v1/inbox_pb";
+import { InboxStore } from "../live/inbox";
 import { OperationStore } from "../live/operations";
 import { PresenceStore } from "../live/presence";
 import type { Live } from "../live/share";
@@ -74,9 +75,6 @@ function setup(daemon: Partial<Daemon> = {}, live = true) {
         return page;
       },
     });
-    service(InboxService, {
-      getInbox: () => ({ sections: [] }),
-    });
     service(OperationService, {
       async listOperations(request) {
         await state.listOperations(request.repo);
@@ -87,12 +85,16 @@ function setup(daemon: Partial<Daemon> = {}, live = true) {
   });
   const operations = new OperationStore(immediateFrames);
   const presence = new PresenceStore(immediateFrames);
-  if (live) operations.applyFrame(operationsFrame({ live: true, cursor: "c0" }));
+  const inbox = new InboxStore(immediateFrames);
+  if (live) {
+    operations.applyFrame(operationsFrame({ live: true, cursor: "c0" }));
+    inbox.applyFrame(create(WatchInboxResponseSchema, { synced: true }));
+  }
   const onSessionInvalid = vi.fn();
   render(
     <Overview
       connection={{ transport, label: "test" }}
-      live={{ operations, presence } as unknown as Live}
+      live={{ operations, presence, inbox } as unknown as Live}
       frame={immediateFrames}
       onSessionInvalid={onSessionInvalid}
     />,

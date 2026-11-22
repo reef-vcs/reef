@@ -1,20 +1,21 @@
-// One operation stream and one presence stream per browser, shared by every
-// tab of the origin (R2.18, ADR 0047). On loopback the browser speaks
+// One operation stream, one presence stream and one inbox stream (#372) per
+// browser, shared by every tab of the origin (R2.18, ADR 0047). On loopback the browser speaks
 // HTTP/1.1, where each open stream holds one of six connections per origin,
 // so streams per tab would starve unary calls by the third tab.
 //
-// The tab holding the Web Lock `reef-live` leads: it opens both streams and
+// The tab holding the Web Lock `reef-live` leads: it opens the streams and
 // republishes every frame, still encoded, on the `BroadcastChannel`
 // `reef-live`, as it arrives (never on an animation frame, which a hidden
 // leader does not get). Other tabs decode the same frames. A tab that joins
-// says `hello`, and the leader answers with its presence set and its
-// operation stream's position. When the leader closes, the lock passes to
+// says `hello`, and the leader answers with its presence set, its inbox and
+// its operation stream's position. When the leader closes, the lock passes to
 // another tab, which resumes from the last cursor it saw and resubscribes to
-// presence. Without `navigator.locks`, every tab leads alone.
+// presence and the inbox. Without `navigator.locks`, every tab leads alone.
 import { fromBinary, toBinary } from "@bufbuild/protobuf";
 import { client, type Connection } from "../api/connection";
 import { isSessionInvalid, reefError } from "../api/errors";
 import { DaemonService } from "../gen/reef/api/v1/daemon_pb";
+import { InboxService, WatchInboxResponseSchema } from "../gen/reef/api/v1/inbox_pb";
 import {
   OperationService,
   SubscribeOperationsResponseSchema,
@@ -22,6 +23,7 @@ import {
 import { PresenceService, SubscribePresenceResponseSchema } from "../gen/reef/api/v1/presence_pb";
 import { Backoff, sleep } from "./backoff";
 import { animationFrame, FrameNotifier, type FrameScheduler } from "./frame";
+import { InboxStore, runInbox } from "./inbox";
 import { OperationStore, positionFrame, runOperations } from "./operations";
 import { PresenceStore, runPresence } from "./presence";
 
@@ -39,12 +41,15 @@ type Message =
       to: string;
       operations: Uint8Array;
       presence: Uint8Array;
+      inbox: Uint8Array;
       state: ConnectionState;
     }
   | { t: "operations"; frame: Uint8Array }
   | { t: "reset" }
   | { t: "resync" }
   | { t: "presence"; frame: Uint8Array }
+  | { t: "inboxResync" }
+  | { t: "inbox"; frame: Uint8Array }
   | { t: "state"; state: ConnectionState }
   | { t: "ended" };
 
@@ -75,6 +80,7 @@ export function browserEnvironment(): LiveEnvironment {
 export class Live {
   readonly operations: OperationStore;
   readonly presence: PresenceStore;
+  readonly inbox: InboxStore;
   state: ConnectionState = "connecting";
   /** This tab holds the lock and the streams. */
   leading = false;
@@ -85,6 +91,13 @@ export class Live {
   private releaseLock: (() => void) | undefined;
   private operationsFailing = false;
   private presenceFailing = false;
+  private inboxFailing = false;
+  /**
+   * A follower folds the leader's inbox frames only from its `welcome` or a
+   * new stream's start: a frame before them is a change to an inbox it does
+   * not hold yet, and the welcome already counts it.
+   */
+  private inboxJoined = false;
   private everLive = false;
   /** Names this tab's `hello`, so only it applies the answer. */
   private readonly id = Math.random().toString(36).slice(2);
@@ -102,6 +115,7 @@ export class Live {
   ) {
     this.operations = new OperationStore(env.frame);
     this.presence = new PresenceStore(env.frame);
+    this.inbox = new InboxStore(env.frame);
     this.stateNotifier = new FrameNotifier(env.frame);
   }
 
@@ -153,6 +167,7 @@ export class Live {
     const { signal } = this.stop;
     const operations = client(this.connection, OperationService);
     const presence = client(this.connection, PresenceService);
+    const inbox = client(this.connection, InboxService);
     const shared = {
       signal,
       sleep: this.env.sleep,
@@ -201,6 +216,23 @@ export class Live {
         this.updateState();
       },
     });
+    void runInbox((signal) => inbox.watchInbox({}, { signal }), this.inbox, {
+      ...shared,
+      backoff: new Backoff(),
+      onResync: () => {
+        this.post({ t: "inboxResync" });
+        this.updateState();
+      },
+      onFrame: (frame) => {
+        this.inboxFailing = false;
+        this.post({ t: "inbox", frame: toBinary(WatchInboxResponseSchema, frame) });
+        this.updateState();
+      },
+      onRetry: () => {
+        this.inboxFailing = true;
+        this.updateState();
+      },
+    });
   }
 
   private receive(message: Message) {
@@ -212,6 +244,7 @@ export class Live {
           to: message.from,
           operations: toBinary(SubscribeOperationsResponseSchema, positionFrame(this.operations)),
           presence: toBinary(SubscribePresenceResponseSchema, this.presence.snapshotFrame()),
+          inbox: toBinary(WatchInboxResponseSchema, this.inbox.snapshotFrame()),
           state: this.state,
         });
       }
@@ -225,6 +258,9 @@ export class Live {
         if (message.to !== this.id) return;
         this.presence.beginResync();
         this.presence.applyFrame(fromBinary(SubscribePresenceResponseSchema, message.presence));
+        this.inbox.beginResync();
+        this.inbox.applyFrame(fromBinary(WatchInboxResponseSchema, message.inbox));
+        this.inboxJoined = true;
         this.operations.applyFrame(
           fromBinary(SubscribeOperationsResponseSchema, message.operations),
         );
@@ -251,6 +287,15 @@ export class Live {
         return;
       case "presence":
         this.presence.applyFrame(fromBinary(SubscribePresenceResponseSchema, message.frame));
+        return;
+      case "inboxResync":
+        this.inbox.beginResync();
+        this.inboxJoined = true;
+        return;
+      case "inbox":
+        if (this.inboxJoined) {
+          this.inbox.applyFrame(fromBinary(WatchInboxResponseSchema, message.frame));
+        }
         return;
       case "state":
         this.setState(message.state);
@@ -285,8 +330,10 @@ export class Live {
     const live =
       this.operations.live &&
       this.presence.synced &&
+      this.inbox.synced &&
       !this.operationsFailing &&
-      !this.presenceFailing;
+      !this.presenceFailing &&
+      !this.inboxFailing;
     if (live) this.everLive = true;
     this.setState(live ? "live" : this.everLive ? "reconnecting" : "connecting");
   }

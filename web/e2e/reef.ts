@@ -152,9 +152,26 @@ export class Reef {
     for (let i = 0; i < 2; i++) await this.workspace("e2e smoke");
   }
 
-  /** A new workspace on the repository's trunk, released at the end. */
-  async workspace(purpose: string): Promise<Workspace> {
-    const ws = (await this.reef(["ws", "create", "--repo", this.repo, "--purpose", purpose])) as {
+  /** Another git repository, registered now; its id. */
+  async registerAnother(name: string): Promise<string> {
+    const dir = join(this.root, name);
+    await mkdir(dir);
+    await this.git("-C", dir, "init", "-q", "-b", "main");
+    await writeFile(join(dir, "README.md"), `The ${name} fixture.\n`);
+    await this.git("-C", dir, "add", "README.md");
+    await this.git("-C", dir, "commit", "-q", "-m", "fixture");
+    const registered = (await this.reef(["repo", "register", dir])) as {
+      id?: string;
+      repository?: { id: string };
+    };
+    const id = registered.repository?.id ?? registered.id ?? "";
+    expect(id, "repo register printed an id").not.toBe("");
+    return id;
+  }
+
+  /** A new workspace on the repository's trunk (or `repo`'s), released at the end. */
+  async workspace(purpose: string, repo = this.repo): Promise<Workspace> {
+    const ws = (await this.reef(["ws", "create", "--repo", repo, "--purpose", purpose])) as {
       id: string;
       change_id_reverse_hex: string;
       path: string;

@@ -70,7 +70,7 @@ time.workspace = true
 anyhow.workspace = true          # main.rs and run_main only
 walkdir.workspace = true
 blake3.workspace = true          # store lockfile hashes (R1.20)
-nix = { workspace = true, features = ["hostname", "user", "signal", "resource"] }   # the default identity and jj's operation.hostname/username; killing a store build's process group (R1.20); the open-file limit (R2.22)
+nix = { workspace = true, features = ["hostname", "user", "signal", "resource", "time"] }   # the default identity and jj's operation.hostname/username; killing a store build's process group (R1.20); the open-file limit (R2.22); a thread's CPU time (#372)
 tokio.workspace = true
 tokio-stream.workspace = true
 tokio-util.workspace = true
