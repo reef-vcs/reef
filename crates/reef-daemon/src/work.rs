@@ -64,13 +64,13 @@ pub(crate) async fn blocking<T: Send + 'static>(
 
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
-
     use super::*;
 
+    /// Spins until this thread has used `for_` of CPU, however long a busy
+    /// machine takes to give it that.
     fn spin(for_: Duration) {
-        let began = Instant::now();
-        while began.elapsed() < for_ {
+        let began = cpu();
+        while cpu().saturating_sub(began) < for_ {
             std::hint::black_box(());
         }
     }
