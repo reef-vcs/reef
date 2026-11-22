@@ -1360,8 +1360,8 @@ struct Followed {
 /// - another jj client's operation, whichever commit a merge then kept;
 /// - Reef's import of git refs that did not record the move as a rewrite
 ///   of the commit it left (#368), or rebased the workspace's commit off
-///   a commit below that it did not rewrite into the new parent (#380,
-///   [`rewrote`]);
+///   a commit below that is hidden and that it did not rewrite into the
+///   new parent (#380, [`rewrote`]);
 /// - a merge of operation heads that left the workspace on a commit none
 ///   of the heads had (it rebased the commit over another client's
 ///   rewrite): no move leads to that commit;
@@ -1477,7 +1477,9 @@ fn leads(ops: &[Operation], moves: &[Move], from: &CommitId, to: Option<&CommitI
 /// whether the operation that rebased `from` made that move itself or
 /// merged a head that made it. The rebase is made from `from`, but nobody
 /// decided anything about `from`, and checking it out would take the
-/// change below's files off disk.
+/// change below's files off disk. False too for a reorder of the stack,
+/// whichever change moved: both directions write the same commits and
+/// predecessor records ([`rewrote`]).
 ///
 /// False for a commit another jj client made from an older commit, having
 /// loaded the head before `from` was written, that the merge of its
@@ -1847,15 +1849,20 @@ struct Left {
 /// ([`recorders`]), the move's own first. It was when they made `now` from
 /// `was` ([`made_from`]), and each parent of `was` that `now` does not
 /// have was left on purpose. Either the parent is still visible after the
-/// move, so the move took `was` off it (a `jj rebase -r` of the
-/// workspace's own change), or they rewrote the parent into one of
-/// `now`'s, and that rewrite counts by this rule too (a describe, a `jj
-/// restore` or a git amend of the change below). A rebase jj made only
+/// move, so the move took `was` off it (a `jj rebase -s`, or `jj rebase
+/// -r -d`, of the workspace's own change onto another parent), or they
+/// rewrote the parent into one of `now`'s, and that rewrite counts by this
+/// rule too (a describe, a `jj restore` or a git amend of the change
+/// below). A rebase jj made only
 /// because the commit below was hidden without such a rewrite is no
 /// decision about `was`, and does not count: an abandon or a revert of the
 /// change below, an import of a git branch deleted from it (#381) or moved
 /// back to an earlier commit of it (#380), in the move's own operation or
-/// in a head that a merge of operation heads merged.
+/// in a head that a merge of operation heads merged. Nor does a reorder of
+/// the stack, `jj rebase -r <was> -B <parent>` or `jj rebase -r <parent> -A
+/// <was>`: the parent is hidden and rewritten into a child of `now`. The
+/// two write the same commits and predecessor records, so the second, which takes the parent out
+/// from under `was`, cannot be refused without the first (ADR 0092).
 async fn rewrote(
     repo: &ReadonlyRepo,
     recorders: &[&Operation],

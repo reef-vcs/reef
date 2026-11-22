@@ -1294,6 +1294,61 @@ async fn a_stacked_workspace_follows_another_clients_rebase_of_its_change() {
     assert!(!row.divergent, "and the change has not diverged");
 }
 
+/// [`stacked`] workspaces reordered by another client, so that the upper
+/// workspace's commit sits on the lower change's parent and the lower
+/// change's last snapshot on it: `jj rebase -r <above> -B <last>` when
+/// `upper_moves`, else `jj rebase -r <last> -A <above>`. Both write the
+/// same commits and predecessor records, so Reef cannot tell a decision about the upper
+/// commit from the lower change taken out from under it (ADR 0092). Asserts
+/// that the upper workspace keeps every file and diverges.
+async fn reordered(upper_moves: bool) {
+    let (daemon, repo) = colocated_fixture().await;
+    let stack = stacked(&daemon, &repo).await;
+    let (above, last) = (stack.above.clone(), stack.snapshots[1].clone());
+    another_client(&repo, "rebase commit", move |repo| {
+        let below = commit_of(repo, &last);
+        let above = CommitId::try_from_hex(&above).unwrap();
+        let location = if upper_moves {
+            jj_lib::rewrite::MoveCommitsLocation {
+                new_parent_ids: below.parent_ids().to_vec(),
+                new_child_ids: vec![below.id().clone()],
+                target: jj_lib::rewrite::MoveCommitsTarget::Commits(vec![above]),
+            }
+        } else {
+            jj_lib::rewrite::MoveCommitsLocation {
+                new_parent_ids: vec![above],
+                new_child_ids: vec![],
+                target: jj_lib::rewrite::MoveCommitsTarget::Commits(vec![below.id().clone()]),
+            }
+        };
+        let options = jj_lib::rewrite::RebaseOptions::default();
+        pollster::block_on(jj_lib::rewrite::move_commits(repo, &location, &options)).unwrap();
+    })
+    .await;
+
+    stack.snapshot(&daemon, &repo).await;
+    assert_keeps(&daemon, &repo, &stack.upper, &["w/b.txt"]).await;
+}
+
+// #388 review, F1: another client's `jj rebase -r` of the upper
+// workspace's own commit before the lower change's last snapshot. Its old
+// parent is rewritten, not left visible, so the user chose divergence over
+// following: the upper workspace keeps the lower change's files.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stacked_workspace_diverges_over_another_clients_rebase_of_its_change_before_the_change_below()
+ {
+    Box::pin(reordered(true)).await;
+}
+
+// #388 review, F1: the same graph from the other direction, another
+// client's `jj rebase -r` of the lower change's last snapshot after the
+// upper workspace's commit.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stacked_workspace_diverges_over_another_clients_rebase_of_the_change_below_after_its_change()
+ {
+    Box::pin(reordered(false)).await;
+}
+
 // Another client's `jj abandon` of the lower workspace's last snapshot
 // rebases the upper workspace's commit off it. That is no decision about
 // the upper commit: it keeps the lower change's files and diverges.
