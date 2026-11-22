@@ -4,6 +4,7 @@
 - Date: 2026-11-21
 - Ticket: [#374](https://github.com/reef-vcs/reef/issues/374) ([brief](../dev-tickets/phase-3/issue-374-import-keeps-used-commits.md))
 - Amends: [0089](0089-another-clients-undo-keeps-a-workspaces-files.md) (its amendment of 2026-11-21: Reef's import no longer abandons a workspace's commit, so the case it decides arises only when the jj CLI imports first)
+- Amended by: [0092](0092-a-stacked-workspace-keeps-the-change-below.md) (its Consequences on a branch moved back and on the jj CLI's import, for a workspace stacked above)
 
 ## Context
 
@@ -28,12 +29,12 @@ The flag cannot simply be turned off. In jj-lib 0.47 it also decides whether the
 
 ## Consequences
 
-- Deleting, pruning or squash-merging away the git branch on an agent's change, or resetting it to another change, no longer moves any Reef workspace: not the agent's, not one stacked above it. The first write after it acts on the agent's change, and nothing diverges. A reset back to an earlier snapshot of the same change still moves the workspace, by decision 2.
+- Deleting, pruning or squash-merging away the git branch on an agent's change, or resetting it to another change, no longer moves any Reef workspace: not the agent's, not one stacked above it. The first write after it acts on the agent's change, and nothing diverges. A reset back to an earlier snapshot of the same change still moves the workspace, by decision 2, and jj rebases a workspace stacked above onto the earlier snapshot. Until [0092](0092-a-stacked-workspace-keeps-the-change-below.md) that workspace followed and lost the later snapshot's files; it now keeps them and diverges.
 - After the workspace is released, the change stays in `reef log` until someone abandons it or a later import does (decision 3). A squash merge on a forge, fetched, lands a new change and leaves the agent's open, as [0044](0044-history-index-and-query-layer.md) already says for a fetch.
 - Moving `main` back with git after it landed a workspace's change leaves that change open if a Reef workspace is on it or builds on it when the import runs, where the import abandoned it. The change then stays visible after release (decision 3), because jj reconsiders a commit only when an import moves a ref that reached it. If no Reef workspace uses the change when `main` moves back, the import abandons it as before.
 - A Reef workspace whose working-copy commit is hidden (another client rewrote or abandoned it, and the workspace has not followed yet) is still pinned, so the import keeps that commit's visible ancestors until the workspace moves off it or is released.
 - The root checkout behaves as on main. When the import abandons the commit `default` is on or builds on, jj rebases `default`'s commit or moves it to a new one in the view. Reef's import itself changes no files in the root. In a root the user drives with git, where git's HEAD moved, the next `jj` command checks out a new commit on git's HEAD, as with the jj CLI alone. Where git's HEAD did not move, the next `jj` command reports the working copy stale, and `jj workspace update-stale` updates the files; the jj CLI alone does both in one command.
-- The jj CLI's own import still abandons with jj's rules. When it runs first, [0089](0089-another-clients-undo-keeps-a-workspaces-files.md) keeps a single workspace's files by diverging, and a workspace stacked above still follows the rebase.
+- The jj CLI's own import still abandons with jj's rules. When it runs first, [0089](0089-another-clients-undo-keeps-a-workspaces-files.md) keeps a single workspace's files by diverging. A workspace stacked above followed the rebase and lost the change below's files until [0092](0092-a-stacked-workspace-keeps-the-change-below.md), which keeps them by diverging too.
 - The import evaluates one more set of revisions, the working-copy commits' ancestors, inside the revset jj already evaluates. No new state, API, schema or threat-model row.
 
 ## Alternatives considered
