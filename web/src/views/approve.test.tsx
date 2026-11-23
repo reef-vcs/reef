@@ -4,8 +4,10 @@
 import { Code } from "@connectrpc/connect";
 import { timestampFromMs } from "@bufbuild/protobuf/wkt";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { DEVICE_READS } from "../device";
 import { equal } from "../sign/bytes";
 import { daemonError, settle } from "../test/fakes";
+import { paired } from "../test/paired";
 import { IdentityDaemon, passkey, REPO, TREE } from "../test/identity-daemon";
 import { act, cleanup, render, screen, waitFor } from "../test/testing-library";
 import { installAuthenticator, removeAuthenticator } from "../test/webauthn";
@@ -44,6 +46,17 @@ function fact(term: string): string {
 }
 
 describe("the approval page", () => {
+  it("on a paired phone, neither approves nor declines", async () => {
+    paired();
+    installAuthenticator();
+    const daemon = daemonWithPasskey();
+    const approval = await daemon.pending();
+    await setup(daemon, approval.id);
+    expect(button("Approve").disabled).toBe(true);
+    expect(button("Decline").disabled).toBe(true);
+    expect(screen.getByText(DEVICE_READS)).toBeTruthy();
+  });
+
   it("names the identity, the sign-off, the change, its tree, who asked and the time left", async () => {
     const daemon = daemonWithPasskey();
     const authenticator = installAuthenticator();

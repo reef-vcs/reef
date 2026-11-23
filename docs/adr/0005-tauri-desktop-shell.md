@@ -3,7 +3,7 @@
 - Status: accepted
 - Date: 2026-10-15
 - Ticket: R0.07
-- Amended by: [0093](0093-the-desktop-shell-and-raised-items.md) (the shell supervises the daemon through `reef daemon start` and never links it)
+- Amended by: [0093](0093-the-desktop-shell-and-raised-items.md) (the shell supervises the daemon through `reef daemon start` and never links it), [0095](0095-paired-devices.md) (the phone's app is the web app on the Home Screen; no mobile build of the shell is planned, so "the same shell also builds for iOS and Android" and the two app stores below no longer hold)
 
 Backfilled from design.md; decision predates this record.
 

@@ -61,7 +61,8 @@ export function RepoFrame({
     // Proposals are read live: `ListProposals` has no `at_operation`.
     body = <Proposal key={change} {...shared} repo={repo} change={change} />;
   } else if (page === "inbox") {
-    body = <Inbox {...shared} repo={repo} at={at} />;
+    const item = new URLSearchParams(search).get("item") ?? "";
+    body = <Inbox key={item} {...shared} repo={repo} at={at} item={item} />;
   } else {
     // The feed follows `at` itself, from the window it shares with the scrubber.
     body = <Activity {...shared} window={win} params={activityParams(repo, search)} />;
@@ -74,6 +75,7 @@ export function RepoFrame({
         at={at}
         window={win}
         connection={connection}
+        live={live}
         onSessionInvalid={onSessionInvalid}
       />
       {body}

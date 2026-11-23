@@ -257,13 +257,18 @@ fn reason_in(headers: &http::HeaderMap) -> String {
 /// `path` called over native gRPC with `token` and a default request
 /// body: the status's headers (a trailers-only answer, or the trailers).
 async fn call_raw(addr: SocketAddr, path: &str, token: &str) -> http::HeaderMap {
+    call_at(addr, &format!("localhost:{}", addr.port()), path, token).await
+}
+
+/// [`call_raw`], at the authority `host`.
+async fn call_at(addr: SocketAddr, host: &str, path: &str, token: &str) -> http::HeaderMap {
     let bearer = format!("Bearer {token}");
     let response = open(
         addr,
         true,
         request(
             Method::POST,
-            &format!("localhost:{}", addr.port()),
+            host,
             path,
             &[
                 ("content-type", "application/grpc"),
@@ -582,7 +587,7 @@ async fn scopes_cover_every_method() {
             let denied = reason_in(&headers) == reef_api::error::REMOTE_ACCESS_DENIED;
             let allowed = match access {
                 Some(Access::Read) => true,
-                Some(Access::Write) => scope == "write",
+                Some(Access::Write) => scope == "write" && path != REDEEM,
                 _ => false,
             };
             assert_eq!(denied, !allowed, "{path} with a {scope} token: {headers:?}");
@@ -741,9 +746,16 @@ async fn create(client: &Client, repo: &SyntheticRepo) -> v1::Workspace {
 }
 
 async fn remote_repo() -> (TestDaemon, SyntheticRepo, SocketAddr, String) {
+    remote_repo_with(|_| {}).await
+}
+
+async fn remote_repo_with(
+    configure: impl FnOnce(&mut Config),
+) -> (TestDaemon, SyntheticRepo, SocketAddr, String) {
     let (daemon, repo) = TestDaemon::with_synthetic_repo_and(Preset::Small, |config| {
         remote_on(config);
         no_automatic_snapshots(config);
+        configure(config);
     })
     .await;
     let addr = listening(&daemon).await;
@@ -1517,7 +1529,12 @@ async fn audit_log_and_no_secrets() {
         .with_max_level(tracing::Level::DEBUG)
         .with_ansi(false)
         .init();
-    let (daemon, repo, addr, fingerprint) = remote_repo().await;
+    let (daemon, repo, addr, fingerprint) = remote_repo_with(|config| {
+        paired_at(config);
+        config.remote_limits.backoff = Duration::from_millis(200);
+        config.remote_limits.pairing_wrong_codes = 2;
+    })
+    .await;
     let read = token(&daemon, "reader", RemoteScope::Read).await;
     let write = token(&daemon, "writer", RemoteScope::Write).await;
     let rotated = daemon
@@ -1546,6 +1563,22 @@ async fn audit_log_and_no_secrets() {
         bad.daemon_status(true).await.unwrap_err();
     }
     daemon.client.revoke_remote_token("reader").await.unwrap();
+    // R3.40 7: a pairing, from an address not in backoff.
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let code = start_pairing(&daemon, "phone").await;
+    redeem(addr, "ZZZZZZZZ").await.unwrap_err();
+    let (paired, device) = redeem(addr, &code).await.unwrap();
+    assert_eq!(redeem(addr, &code).await.unwrap_err(), PAIRING_CODE_INVALID);
+    // One that takes its place, one that a token beat to the name, and
+    // enough wrong codes to end the next.
+    let code = start_pairing(&daemon, "phone").await;
+    let (_, again) = redeem(addr, &code).await.unwrap();
+    let code = start_pairing(&daemon, "taken").await;
+    let taken = token(&daemon, "taken", RemoteScope::Read).await;
+    redeem(addr, &code).await.unwrap_err();
+    start_pairing(&daemon, "tablet").await;
+    redeem(addr, "ZZZZZZZZ").await.unwrap_err();
+    redeem(addr, "ZZZZZZZZ").await.unwrap_err();
     let text = String::from_utf8(sink.0.lock().unwrap().clone()).unwrap();
     let audit: Vec<&str> = text
         .lines()
@@ -1575,10 +1608,20 @@ async fn audit_log_and_no_secrets() {
     assert_eq!(refused, 2, "{audit:#?}");
     assert!(has("refusal_count=9"), "{audit:#?}");
     assert!(has("remote address in backoff"), "{audit:#?}");
-    for secret in [&read, &write, &rotated] {
+    assert!(has("pairing started") && has("device paired"), "{audit:#?}");
+    assert!(has(&paired.id), "{audit:#?}");
+    assert!(
+        has(&format!("revoked_token_id=\"{}\"", paired.id)),
+        "{audit:#?}"
+    );
+    assert!(has("pairing failed after its code was taken"), "{audit:#?}");
+    assert!(has("every code waiting ended"), "{audit:#?}");
+    for secret in [&read, &write, &rotated, &device, &again, &taken] {
         let raw = &secret[22..];
         assert!(!text.contains(raw), "a secret reached the log");
     }
+    assert!(!text.contains(&code), "a pairing code reached the log");
+    assert!(!text.contains("ZZZZZZZZ"), "a wrong code reached the log");
 }
 
 // #258, 15: a publish runs the user's git credentials, so no remote caller
@@ -1633,4 +1676,688 @@ async fn build_environment_is_local_only() {
     let local = daemon.client.get_build_environment("", "").await.unwrap();
     assert!(!local.jobserver.is_empty(), "{local:?}");
     daemon.stop().await;
+}
+
+// ---- paired devices (R3.40) ----
+
+const REDEEM: &str = "/reef.api.v1.RemoteService/RedeemPairing";
+const STATUS: &str = "/reef.api.v1.DaemonService/GetDaemonStatus";
+const PAIRING_CODE_INVALID: &str = reef_api::error::PAIRING_CODE_INVALID;
+/// `[remote] origin` in these tests, which reach it at another port, as a
+/// phone behind a port forward does.
+const ORIGIN: &str = "https://phone.test:7470";
+const AT_ORIGIN: &str = "phone.test:7470";
+
+fn paired_at(config: &mut Config) {
+    config.file.remote.names.push("phone.test".to_owned());
+    ORIGIN.clone_into(&mut config.file.remote.origin);
+}
+
+async fn start_pairing(daemon: &TestDaemon, name: &str) -> String {
+    daemon
+        .client
+        .start_pairing(name, "", None)
+        .await
+        .unwrap()
+        .code
+}
+
+/// Redeems `code` at the authority `host`: the token and its secret, or the
+/// refusal's reason.
+async fn redeem_at(
+    addr: SocketAddr,
+    host: &str,
+    code: &str,
+) -> Result<(v1::RemoteToken, String), String> {
+    let bearer = format!("Bearer reef_pair_{code}");
+    let (parts, body, _) = send(
+        addr,
+        false,
+        request(
+            Method::POST,
+            host,
+            REDEEM,
+            &[
+                ("content-type", "application/grpc-web+proto"),
+                ("origin", &format!("https://{host}")),
+                ("authorization", &bearer),
+            ],
+            frame(&v1::RedeemPairingRequest {}),
+        ),
+    )
+    .await;
+    let refused = reason_in(&parts.headers);
+    if !refused.is_empty() || parts.status != StatusCode::OK {
+        return Err(refused);
+    }
+    let length = u32::from_be_bytes(body[1..5].try_into().unwrap()) as usize;
+    let answer: v1::RedeemPairingResponse = prost::Message::decode(&body[5..5 + length]).unwrap();
+    Ok((answer.token.unwrap(), answer.secret))
+}
+
+async fn redeem(addr: SocketAddr, code: &str) -> Result<(v1::RemoteToken, String), String> {
+    redeem_at(addr, AT_ORIGIN, code).await
+}
+
+/// A paired device's bearer string.
+async fn device(daemon: &TestDaemon, addr: SocketAddr, name: &str) -> String {
+    let code = start_pairing(daemon, name).await;
+    redeem(addr, &code).await.unwrap().1
+}
+
+/// `path` called at `[remote] origin`: the reason it was refused, or empty.
+async fn reason_at_origin(addr: SocketAddr, path: &str, token: &str) -> String {
+    reason_in(&call_at(addr, AT_ORIGIN, path, token).await)
+}
+
+// R3.40 1: pairing starts on the socket alone, and needs an address to pair at.
+#[tokio::test(flavor = "multi_thread")]
+async fn pairing_starts_on_the_socket() {
+    let (daemon, addr, _) = daemon_with(|config| {
+        config.file.remote.names = vec!["mac.example".to_owned(), "10.0.0.1".to_owned()];
+    })
+    .await;
+    let error = daemon
+        .client
+        .start_pairing("phone", "", None)
+        .await
+        .unwrap_err();
+    assert_eq!(reason(&error), reef_api::error::REMOTE_ORIGIN_REQUIRED);
+    let line = format!("origin = \"https://mac.example:{}\"", addr.port());
+    assert!(error.advice().unwrap().hint.contains(&line), "{error:?}");
+
+    let (daemon, addr, _) = daemon_with(paired_at).await;
+    assert_eq!(remote_status(&daemon).await.origin, ORIGIN);
+    let start = "/reef.api.v1.RemoteService/StartPairing";
+    let write = token(&daemon, "writer", RemoteScope::Write).await;
+    for token in [&write, &device(&daemon, addr, "phone").await] {
+        assert_eq!(
+            reason_at_origin(addr, start, token).await,
+            reef_api::error::REMOTE_ACCESS_DENIED
+        );
+    }
+    // The socket holds no code.
+    let path = daemon.handle.socket_path().to_owned();
+    let channel = tonic::transport::Endpoint::from_static("http://[::]:0")
+        .connect_with_connector(tower::service_fn(move |_: http::Uri| {
+            let path = path.clone();
+            async move {
+                let stream = tokio::net::UnixStream::connect(path).await?;
+                Ok::<_, std::io::Error>(TokioIo::new(stream))
+            }
+        }))
+        .await
+        .unwrap();
+    let status = v1::remote_service_client::RemoteServiceClient::new(channel)
+        .redeem_pairing(v1::RedeemPairingRequest {})
+        .await
+        .unwrap_err();
+    assert_eq!(
+        reef_api::error::detail(&status).unwrap().reason,
+        PAIRING_CODE_INVALID
+    );
+}
+
+// R3.40 1, continued: what a pairing is refused for, before a code is drawn.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pairing_names_a_person_a_free_name_and_a_life() {
+    let (daemon, addr, _) = daemon_with(paired_at).await;
+    token(&daemon, "writer", RemoteScope::Write).await;
+    device(&daemon, addr, "phone").await;
+    let error = daemon
+        .client
+        .create_remote_token("made", RemoteScope::Device, None)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("reef remote pair"), "{error:?}");
+    for (name, expected) in [
+        ("Phone", reef_api::error::INVALID_REMOTE_TOKEN_NAME),
+        ("writer", reef_api::error::REMOTE_TOKEN_EXISTS),
+    ] {
+        let error = daemon
+            .client
+            .start_pairing(name, "", None)
+            .await
+            .unwrap_err();
+        assert_eq!(reason(&error), expected);
+        // Never a rotation, which would end the token and free no name.
+        let next = error.advice().unwrap().next;
+        assert!(!next.contains(&"rotate".to_owned()), "{next:?}");
+    }
+    let error = daemon
+        .client
+        .create_remote_token("phone", RemoteScope::Read, None)
+        .await
+        .unwrap_err();
+    assert_eq!(reason(&error), reef_api::error::REMOTE_TOKEN_EXISTS);
+    assert_eq!(
+        error.advice().unwrap().next,
+        ["reef", "remote", "token", "list"]
+    );
+    for life in [Duration::from_secs(1), Duration::from_hours(367 * 24)] {
+        let error = daemon
+            .client
+            .start_pairing("other", "", Some(life))
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("1 minute to 366 days"),
+            "{error}"
+        );
+    }
+    let error = daemon
+        .client
+        .start_pairing("other", "nobody", None)
+        .await
+        .unwrap_err();
+    assert_eq!(reason(&error), reef_api::error::IDENTITY_NOT_FOUND);
+    daemon
+        .client
+        .create_identity(v1::CreateIdentityRequest {
+            name: "ci".to_owned(),
+            kind: v1::IdentityKind::Ci.into(),
+            ..v1::CreateIdentityRequest::default()
+        })
+        .await
+        .unwrap();
+    let error = daemon
+        .client
+        .start_pairing("other", "ci", None)
+        .await
+        .unwrap_err();
+    assert_eq!(reason(&error), reef_api::error::SESSION_KEY_REFUSED);
+}
+
+// R3.40 2 and 3: a code pairs once, and what a replay, a wrong code and an
+// expired one get is one answer; the first device keeps working.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_code_pairs_once() {
+    let (daemon, addr, _) = daemon_with(|config| {
+        paired_at(config);
+        config.remote_limits.pairing_life = Duration::from_secs(2);
+    })
+    .await;
+    let before = std::time::SystemTime::now();
+    let started = daemon
+        .client
+        .start_pairing("phone", "", None)
+        .await
+        .unwrap();
+    assert_eq!(started.origin, ORIGIN);
+    // Typed as it is printed: in two halves, and in any case.
+    let typed = format!(
+        "{}-{}",
+        started.code[..4].to_lowercase(),
+        &started.code[4..]
+    );
+    let (paired, secret) = redeem(addr, &typed).await.unwrap();
+    assert_eq!(paired.name, "phone");
+    assert_eq!(paired.scope, i32::from(RemoteScope::Device));
+    assert_eq!(paired.device_origin, ORIGIN);
+    let default = daemon.client.get_identity("").await.unwrap();
+    assert_eq!(paired.identity, default.identity.unwrap().name);
+    let life = paired.expires_at.unwrap().seconds
+        - i64::try_from(
+            before
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        )
+        .unwrap();
+    assert!((life - 90 * 86_400).abs() < 60, "{life}");
+    let listed = daemon.client.list_remote_tokens_all(false).await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, paired.id);
+    assert_eq!(listed[0].device_origin, ORIGIN);
+
+    assert_eq!(
+        redeem(addr, &started.code).await.unwrap_err(),
+        PAIRING_CODE_INVALID
+    );
+    let other = start_pairing(&daemon, "other").await;
+    assert_eq!(
+        redeem(addr, "00000000").await.unwrap_err(),
+        PAIRING_CODE_INVALID
+    );
+    tokio::time::sleep(Duration::from_millis(2_100)).await;
+    assert_eq!(
+        redeem(addr, &other).await.unwrap_err(),
+        PAIRING_CODE_INVALID
+    );
+    assert_eq!(reason_at_origin(addr, STATUS, &secret).await, "");
+    assert_eq!(
+        daemon
+            .client
+            .list_remote_tokens_all(true)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+// R3.40 4: wrong codes put their address in backoff, and enough of them, in
+// all, end every code waiting.
+#[tokio::test(flavor = "multi_thread")]
+async fn wrong_codes_are_counted() {
+    let (daemon, addr, _) = daemon_with(|config| {
+        paired_at(config);
+        config.remote_limits.failures_before_backoff = 3;
+        config.remote_limits.backoff = Duration::from_mins(5);
+    })
+    .await;
+    let code = start_pairing(&daemon, "phone").await;
+    for _ in 0..3 {
+        assert_eq!(
+            redeem(addr, "00000000").await.unwrap_err(),
+            PAIRING_CODE_INVALID
+        );
+    }
+    // Closed before TLS: the right code is not even read.
+    assert!(tls(addr, b"http/1.1").await.is_err());
+    drop(code);
+
+    let (daemon, addr, _) = daemon_with(|config| {
+        paired_at(config);
+        config.remote_limits.failures_before_backoff = 1_000;
+        config.remote_limits.pairing_wrong_codes = 5;
+    })
+    .await;
+    let codes = [
+        start_pairing(&daemon, "phone").await,
+        start_pairing(&daemon, "tablet").await,
+    ];
+    for _ in 0..5 {
+        redeem(addr, "00000000").await.unwrap_err();
+    }
+    for code in &codes {
+        assert_eq!(redeem(addr, code).await.unwrap_err(), PAIRING_CODE_INVALID);
+    }
+    let tokens = daemon.client.list_remote_tokens_all(true).await.unwrap();
+    assert_eq!(tokens.len(), 0);
+    // Wrong codes at another address are not guesses at one.
+    let code = start_pairing(&daemon, "phone").await;
+    for _ in 0..10 {
+        let host = format!("localhost:{}", addr.port());
+        assert_eq!(
+            redeem_at(addr, &host, &code).await.unwrap_err(),
+            PAIRING_CODE_INVALID
+        );
+    }
+    redeem(addr, &code).await.unwrap();
+}
+
+// Review F1, F16: an address in backoff keeps its live tokens on the
+// connections it opened; what is not one is refused there. A code sent to
+// another method or address counts against the address too.
+#[tokio::test(flavor = "multi_thread")]
+async fn backoff_spares_live_tokens() {
+    let (daemon, addr, _) = daemon_with(|config| {
+        paired_at(config);
+        config.remote_limits.failures_before_backoff = 2;
+        config.remote_limits.backoff = Duration::from_mins(5);
+    })
+    .await;
+    let phone = device(&daemon, addr, "phone").await;
+    let code = start_pairing(&daemon, "tablet").await;
+    let io = TokioIo::new(tls(addr, b"h2").await.unwrap());
+    let (mut sender, conn) = hyper::client::conn::http2::handshake(TokioExecutor::new(), io)
+        .await
+        .unwrap();
+    tokio::spawn(conn);
+    let mut on_connection = async |path: &str, host: &str, bearer: &str| {
+        let response = sender
+            .send_request(request(
+                Method::POST,
+                host,
+                path,
+                &[
+                    ("content-type", "application/grpc"),
+                    ("te", "trailers"),
+                    ("authorization", &format!("Bearer {bearer}")),
+                ],
+                vec![0, 0, 0, 0, 0],
+            ))
+            .await
+            .unwrap();
+        reason_in(response.headers())
+    };
+    let pairing = format!("reef_pair_{code}");
+    assert_eq!(on_connection(STATUS, AT_ORIGIN, &phone).await, "");
+    assert_eq!(
+        on_connection(STATUS, AT_ORIGIN, &pairing).await,
+        reef_api::error::REMOTE_TOKEN_INVALID
+    );
+    assert_eq!(
+        on_connection(REDEEM, "localhost:7470", &pairing).await,
+        PAIRING_CODE_INVALID
+    );
+    // In backoff now: a new connection is closed, and the right code refused.
+    assert!(tls(addr, b"http/1.1").await.is_err());
+    for bearer in [pairing.as_str(), "reef_0000000000000000_x"] {
+        assert_eq!(
+            on_connection(REDEEM, AT_ORIGIN, bearer).await,
+            reef_api::error::REMOTE_TOKEN_INVALID
+        );
+    }
+    assert_eq!(on_connection(STATUS, AT_ORIGIN, &phone).await, "");
+}
+
+// Review F16: a code is for a person who may be revoked before it is typed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_revoked_person_is_not_paired() {
+    let (daemon, addr, _) = daemon_with(paired_at).await;
+    let alice = v1::CreateIdentityRequest {
+        name: "alice".to_owned(),
+        kind: v1::IdentityKind::Person.into(),
+        ..v1::CreateIdentityRequest::default()
+    };
+    daemon.client.create_identity(alice).await.unwrap();
+    let week = Duration::from_hours(7 * 24);
+    let start = async || {
+        let started = daemon.client.start_pairing("phone", "alice", Some(week));
+        started.await.unwrap().code
+    };
+    let (paired, _) = redeem(addr, &start().await).await.unwrap();
+    assert_eq!(paired.identity, "alice");
+    let life = paired.expires_at.unwrap().seconds - paired.created_at.unwrap().seconds;
+    assert_eq!(life, 7 * 86_400);
+    let code = start().await;
+    let revoke = v1::RevokeIdentityRequest {
+        name: "alice".to_owned(),
+        ..v1::RevokeIdentityRequest::default()
+    };
+    daemon.client.revoke_identity(revoke).await.unwrap();
+    assert_eq!(
+        redeem(addr, &code).await.unwrap_err(),
+        reef_api::error::IDENTITY_REVOKED
+    );
+    let tokens = daemon.client.list_remote_tokens_all(false).await.unwrap();
+    assert_eq!(tokens.len(), 1);
+}
+
+// R3.40 5: a pairing code calls one method, and no token calls that one.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_code_calls_one_method() {
+    let (daemon, addr, _) = daemon_with(|config| {
+        paired_at(config);
+        config.remote_limits.failures_before_backoff = 100_000;
+    })
+    .await;
+    let code = start_pairing(&daemon, "phone").await;
+    let bearer = format!("reef_pair_{code}");
+    let mut methods: Vec<&str> = reef_api::methods().filter(|path| *path != REDEEM).collect();
+    methods.push("/reef.daemon.v0.Daemon/Status");
+    methods.push("/reef.api.v1.RemoteService/Nope");
+    for path in methods {
+        assert_eq!(
+            reason_at_origin(addr, path, &bearer).await,
+            reef_api::error::REMOTE_TOKEN_INVALID,
+            "{path}"
+        );
+    }
+    // None of them used the code up, or was a guess at it.
+    redeem(addr, &code).await.unwrap();
+    for scope in [RemoteScope::Read, RemoteScope::Write] {
+        let token = token(&daemon, &format!("t{}", scope as i32), scope).await;
+        assert_eq!(
+            reason_at_origin(addr, REDEEM, &token).await,
+            reef_api::error::REMOTE_ACCESS_DENIED
+        );
+    }
+    let phone = device(&daemon, addr, "phone").await;
+    assert_eq!(
+        reason_at_origin(addr, REDEEM, &phone).await,
+        reef_api::error::REMOTE_ACCESS_DENIED
+    );
+}
+
+// R3.40 6: of two redeems of one code at once, one makes a token.
+#[tokio::test(flavor = "multi_thread")]
+async fn racing_redeems_make_one_device() {
+    let (daemon, addr, _) = daemon_with(paired_at).await;
+    for round in 0..4 {
+        let code = start_pairing(&daemon, &format!("phone{round}")).await;
+        let (a, b, c) = tokio::join!(
+            redeem(addr, &code),
+            redeem(addr, &code),
+            redeem(addr, &code)
+        );
+        assert_eq!([&a, &b, &c].iter().filter(|r| r.is_ok()).count(), 1);
+        assert_eq!(
+            daemon
+                .client
+                .list_remote_tokens_all(true)
+                .await
+                .unwrap()
+                .len(),
+            round + 1
+        );
+    }
+}
+
+// R3.40 8: a device calls every READ method, marks its inbox seen, and
+// nothing else.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_device_reads() {
+    use reef_api::v1::Access;
+    let (daemon, addr, _) = daemon_with(|config| {
+        paired_at(config);
+        config.remote_limits.max_requests_per_token = 1_000;
+        config.remote_limits.max_streams_per_token = 1_000;
+    })
+    .await;
+    let phone = device(&daemon, addr, "phone").await;
+    let mut methods: Vec<&str> = reef_api::methods().collect();
+    methods.push("/reef.daemon.v0.Daemon/Status");
+    for path in methods {
+        let headers = call_at(addr, AT_ORIGIN, path, &phone).await;
+        let denied = reason_in(&headers) == reef_api::error::REMOTE_ACCESS_DENIED;
+        let allowed = reef_api::access(path) == Some(Access::Read)
+            || path == "/reef.api.v1.InboxService/MarkInboxSeen";
+        assert_eq!(denied, !allowed, "{path}: {headers:?}");
+        if denied {
+            let status = tonic::Status::from_header_map(&headers).unwrap();
+            let detail = reef_api::error::detail(&status).unwrap();
+            assert_eq!(detail.metadata["scope"], "device", "{path}");
+        }
+    }
+    assert_eq!(
+        reason_at_origin(addr, "/reef.api.v1.InboxService/MarkInboxSeen", &phone).await,
+        ""
+    );
+}
+
+// R3.40 9: a device works at the one address it was paired at.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_device_works_at_its_origin() {
+    let (daemon, addr, _) = daemon_with(|config| {
+        paired_at(config);
+        config.file.remote.names.push("other.test".to_owned());
+    })
+    .await;
+    let phone = device(&daemon, addr, "phone").await;
+    assert_eq!(reason_at_origin(addr, STATUS, &phone).await, "");
+    for host in [
+        "other.test:7470",
+        "phone.test",
+        "phone.test:443",
+        "phone.test:7471",
+        "PHONE.test:7470",
+        "phone.test.:7470",
+        "127.0.0.1:7470",
+        "[::1]:7470",
+    ] {
+        for path in [STATUS, "/reef.api.v1.InboxService/MarkInboxSeen"] {
+            let headers = call_at(addr, host, path, &phone).await;
+            assert_eq!(
+                reason_in(&headers),
+                reef_api::error::REMOTE_ORIGIN_CHANGED,
+                "{host} {path}"
+            );
+        }
+    }
+    // A code is refused elsewhere too, and not used up there.
+    let code = start_pairing(&daemon, "tablet").await;
+    for host in ["other.test:7470", "127.0.0.1:7470"] {
+        assert_eq!(
+            redeem_at(addr, host, &code).await.unwrap_err(),
+            PAIRING_CODE_INVALID
+        );
+    }
+    redeem(addr, &code).await.unwrap();
+    // Not a device's token.
+    let read = token(&daemon, "reader", RemoteScope::Read).await;
+    assert_eq!(
+        reason_in(&call_at(addr, "other.test:7470", STATUS, &read).await),
+        ""
+    );
+
+    let mut stopped = daemon.stop_keeping().await;
+    "https://other.test:7470".clone_into(&mut stopped.config.file.remote.origin);
+    let moved = stopped.start().await;
+    let addr = listening(&moved).await;
+    let headers = call_at(addr, AT_ORIGIN, STATUS, &phone).await;
+    assert_eq!(reason_in(&headers), reef_api::error::REMOTE_ORIGIN_CHANGED);
+    let status = tonic::Status::from_header_map(&headers).unwrap();
+    let detail = reef_api::error::detail(&status).unwrap();
+    assert_eq!(detail.metadata["device_origin"], ORIGIN);
+    assert_eq!(detail.metadata["origin"], "https://other.test:7470");
+    assert_eq!(
+        reason_in(&call_at(addr, "other.test:7470", STATUS, &phone).await),
+        reef_api::error::REMOTE_ORIGIN_CHANGED
+    );
+}
+
+// R3.40 10: pairing again under one name ends the old token at the redeem,
+// and a device's token is not rotated.
+#[tokio::test(flavor = "multi_thread")]
+async fn pairing_again_replaces_the_device() {
+    let (daemon, addr, _) = daemon_with(|config| {
+        paired_at(config);
+        config.remote_limits.max_tokens = 1;
+    })
+    .await;
+    let first = device(&daemon, addr, "phone").await;
+    let code = start_pairing(&daemon, "phone").await;
+    assert_eq!(reason_at_origin(addr, STATUS, &first).await, "");
+    // At the limit of live tokens, the one it replaces makes room for it.
+    let (_, second) = redeem(addr, &code).await.unwrap();
+    assert_eq!(reason_at_origin(addr, STATUS, &second).await, "");
+    let headers = call_at(addr, AT_ORIGIN, STATUS, &first).await;
+    let status = tonic::Status::from_header_map(&headers).unwrap();
+    let detail = reef_api::error::detail(&status).unwrap();
+    assert_eq!(detail.reason, reef_api::error::REMOTE_TOKEN_INVALID);
+    assert_eq!(detail.metadata["state"], "revoked");
+    let error = daemon
+        .client
+        .rotate_remote_token("phone", Duration::ZERO)
+        .await
+        .unwrap_err();
+    assert_eq!(reason(&error), reef_api::error::DEVICE_TOKEN_ROTATE);
+    assert_eq!(reason_at_origin(addr, STATUS, &second).await, "");
+
+    // And after a restart, the one it replaced is still ended.
+    let daemon = daemon.restart().await;
+    let addr = listening(&daemon).await;
+    assert_eq!(reason_at_origin(addr, STATUS, &second).await, "");
+    assert_eq!(
+        reason_at_origin(addr, STATUS, &first).await,
+        reef_api::error::REMOTE_TOKEN_INVALID
+    );
+
+    // A full daemon draws no code that could make no token.
+    let error = daemon
+        .client
+        .start_pairing("tablet", "", None)
+        .await
+        .unwrap_err();
+    assert_eq!(reason(&error), reef_api::error::TOO_MANY_REMOTE_TOKENS);
+
+    // A token that took the name since the start is never replaced.
+    let code = start_pairing(&daemon, "phone").await;
+    daemon.client.revoke_remote_token("phone").await.unwrap();
+    let laptop = token(&daemon, "phone", RemoteScope::Write).await;
+    assert_eq!(
+        redeem(addr, &code).await.unwrap_err(),
+        reef_api::error::REMOTE_TOKEN_EXISTS
+    );
+    assert_eq!(reason_at_origin(addr, STATUS, &laptop).await, "");
+}
+
+// R3.40 11: a revoke ends a device's streams within a second.
+#[tokio::test(flavor = "multi_thread")]
+async fn revoking_a_device_ends_its_streams() {
+    let (daemon, addr, _) = daemon_with(paired_at).await;
+    let phone = device(&daemon, addr, "phone").await;
+    let bearer = format!("Bearer {phone}");
+    let response = open(
+        addr,
+        true,
+        request(
+            Method::POST,
+            AT_ORIGIN,
+            "/reef.api.v1.InboxService/WatchInbox",
+            &[
+                ("content-type", "application/grpc"),
+                ("te", "trailers"),
+                ("authorization", &bearer),
+            ],
+            vec![0, 0, 0, 0, 0],
+        ),
+    )
+    .await;
+    let mut body = response.into_body();
+    body.frame().await.unwrap().unwrap();
+    let revoked = Instant::now();
+    daemon.client.revoke_remote_token("phone").await.unwrap();
+    let trailers = tokio::time::timeout(3 * SECOND, async {
+        loop {
+            let frame = body.frame().await.unwrap().unwrap();
+            if let Ok(trailers) = frame.into_trailers() {
+                return trailers;
+            }
+        }
+    })
+    .await
+    .expect("the revoked stream never ended");
+    assert!(revoked.elapsed() < SECOND, "{:?}", revoked.elapsed());
+    assert_eq!(reason_in(&trailers), reef_api::error::REMOTE_TOKEN_INVALID);
+}
+
+// R3.40 13: what an app is installed from is served here, and no response
+// lets a page register a service worker.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_app_installs_from_the_remote_listener() {
+    let (_daemon, addr, _) = daemon_with(paired_at).await;
+    let get = async |path: &str| {
+        send(
+            addr,
+            false,
+            request(Method::GET, AT_ORIGIN, path, &[], Vec::new()),
+        )
+        .await
+    };
+    let (index, _, _) = get("/").await;
+    let csp = index.headers["content-security-policy"].to_str().unwrap();
+    assert!(csp.contains("worker-src 'none'"), "{csp}");
+    assert!(csp.contains("manifest-src 'self'"), "{csp}");
+    for (path, content_type) in [
+        ("app.webmanifest", "application/manifest+json"),
+        ("apple-touch-icon.png", "image/png"),
+        ("icon-192.png", "image/png"),
+        ("icon-512.png", "image/png"),
+    ] {
+        let (parts, body, _) = get(&format!("/{path}")).await;
+        if reef_web::BUILT {
+            assert_eq!(parts.status, StatusCode::OK, "{path}");
+            assert_eq!(parts.headers["content-type"], content_type);
+            assert_eq!(body.as_ref(), reef_web::get(path).unwrap().bytes);
+        } else {
+            assert_eq!(parts.status, StatusCode::NOT_FOUND, "{path}");
+        }
+    }
+    // There is no service worker, and no path serves the app in its place.
+    let (parts, _, _) = get("/sw.js").await;
+    assert_eq!(parts.status, StatusCode::NOT_FOUND);
 }

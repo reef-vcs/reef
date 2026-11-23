@@ -6,9 +6,17 @@
 // row, dimmed, until the person shows the new ones. A help request is
 // answered here; everything else opens the page that acts on it. All text an
 // agent wrote is rendered as text (S-262).
-import { useEffect, useLayoutEffect, useState, useSyncExternalStore } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type ReactNode,
+} from "react";
 import type { Connection } from "../api/connection";
 import { reefError } from "../api/errors";
+import { device, DEVICE_READS } from "../device";
 import type { InboxItem, LandedDigest } from "../gen/reef/api/v1/inbox_pb";
 import { InboxReason } from "../gen/reef/api/v1/inbox_pb";
 import { departedCount, type HeldBucket, type HeldRow } from "../inbox/held";
@@ -17,6 +25,7 @@ import { after } from "../live/backoff";
 import type { FrameScheduler } from "../live/frame";
 import type { Live } from "../live/share";
 import { ErrorView } from "../ui/ErrorView";
+import { useNarrow } from "../ui/narrow";
 import { Link } from "../ui/router";
 import { useElementAnchor } from "../ui/scroll-anchor";
 import { Time } from "../ui/TimeLabel";
@@ -51,7 +60,6 @@ const DEPARTED_WORDS = {
   done: "No longer waiting",
 } as const;
 
-/** Where a row's item is acted on or read. */
 /**
  * A row's words: its link (a proposal's subject, else the daemon's
  * sentence), the sentence under it for a proposal, and the agent's own
@@ -78,18 +86,26 @@ function wordsOf(item: InboxItem): { title: string; status: string; text: string
 function Row({
   row,
   repoName,
+  opened,
   connection,
   model,
   register,
 }: {
   row: HeldRow;
   repoName: string | undefined;
+  /** The item the page was opened at: its answer is open, and it is in view. */
+  opened: boolean;
   connection: Connection;
   model: InboxModel;
   register: (key: string, element: HTMLElement | null) => void;
 }) {
   const { item, departed } = row;
-  const [answering, setAnswering] = useState(false);
+  const paired = device() !== null;
+  const [answering, setAnswering] = useState(opened);
+  const element = useRef<HTMLLIElement | null>(null);
+  useEffect(() => {
+    if (opened) element.current?.scrollIntoView({ block: "start" });
+  }, [opened]);
   const [busy, setBusy] = useState(false);
   const [said, setSaid] = useState("");
   const { title, status, text, tried } = wordsOf(item);
@@ -97,10 +113,11 @@ function Row({
     item.reason === InboxReason.HELP && item.record.case === "comment" ? item.record.value : null;
   return (
     <li
-      ref={(element) => {
-        register(row.key, element);
+      ref={(now) => {
+        element.current = now;
+        register(row.key, now);
       }}
-      className={departed ? "inbox-row departed" : "inbox-row"}
+      className={`inbox-row${departed ? " departed" : ""}${opened ? " opened" : ""}`}
       data-key={row.key}
     >
       <span className="inbox-reason">{REASON_WORDS[item.reason]}</span>
@@ -122,7 +139,8 @@ function Row({
             Run <code>{item.next.join(" ")}</code>
           </span>
         )}
-        {help && !departed && !answering && (
+        {help && !departed && paired && <span className="secondary">{DEVICE_READS}</span>}
+        {help && !departed && !paired && !answering && (
           <span>
             <button
               type="button"
@@ -134,7 +152,7 @@ function Row({
             </button>
           </span>
         )}
-        {help && answering && !departed && (
+        {help && answering && !paired && !departed && (
           <Answer
             repo={item.repoId}
             change={item.changeId}
@@ -168,12 +186,51 @@ function Row({
   );
 }
 
+/** A bucket with its heading; `folded`, the heading opens it. */
+function Fold({
+  title,
+  count,
+  folded,
+  open = false,
+  children,
+}: {
+  title: string;
+  count: number | undefined;
+  folded: boolean;
+  /** It holds the item the page was opened at. */
+  open?: boolean;
+  children: ReactNode;
+}) {
+  const heading = (
+    <h2>
+      {title} {count !== undefined && <span className="secondary">({count})</span>}
+    </h2>
+  );
+  return (
+    <section className="inbox-bucket" aria-label={title}>
+      {folded ? (
+        <details open={open}>
+          <summary>{heading}</summary>
+          {children}
+        </details>
+      ) : (
+        <>
+          {heading}
+          {children}
+        </>
+      )}
+    </section>
+  );
+}
+
 function Bucket({
   name,
   title,
   held,
   empty,
   repoNames,
+  item,
+  folded,
   connection,
   model,
   version,
@@ -184,6 +241,10 @@ function Bucket({
   held: HeldBucket | null;
   reading: boolean;
   empty: string;
+  /** The key of the item the page was opened at; empty for none. */
+  item: string;
+  /** Whether the bucket is folded until opened, as on a phone. */
+  folded: boolean;
   repoNames: ReadonlyMap<string, string> | undefined;
   connection: Connection;
   model: InboxModel;
@@ -195,10 +256,12 @@ function Bucket({
   const departed = held ? departedCount(held) : 0;
   const shownTotal = held?.rows.length ?? 0;
   return (
-    <section className="inbox-bucket" aria-label={title}>
-      <h2>
-        {title} {held && <span className="secondary">({held.total})</span>}
-      </h2>
+    <Fold
+      title={title}
+      count={held?.total}
+      folded={folded}
+      open={held?.rows.some((row) => row.key === item) ?? false}
+    >
       {(fresh > 0 || departed > 0) && (
         <p className="notice" role="status">
           {fresh > 0 && `${plural(fresh, "new item")}. `}
@@ -224,6 +287,7 @@ function Bucket({
               key={row.key}
               row={row}
               repoName={repoNames?.get(row.item.repoId)}
+              opened={row.key === item}
               connection={connection}
               model={model}
               register={register}
@@ -237,7 +301,7 @@ function Bucket({
           the rest.
         </p>
       )}
-    </section>
+    </Fold>
   );
 }
 
@@ -344,6 +408,7 @@ function Digest({
 export function Inbox({
   repo,
   at,
+  item = "",
   repoNames,
   connection,
   live,
@@ -353,6 +418,8 @@ export function Inbox({
   /** The repository the tab names; undefined on the home page. */
   repo?: string | undefined;
   at?: string;
+  /** The key of the item the page was opened at. */
+  item?: string;
   /** Repository names by id, for rows across repositories. */
   repoNames?: ReadonlyMap<string, string>;
   connection: Connection;
@@ -366,6 +433,7 @@ export function Inbox({
   useEffect(() => model.start(), [model]);
   const snapshot = useSyncExternalStore(model.subscribe, model.getSnapshot);
   const names = repo ? undefined : repoNames;
+  const narrow = useNarrow();
   // Before paint, so the count in the tab's title never lags the page.
   useLayoutEffect(() => {
     document.title = inboxTitle(snapshot.needsTotal);
@@ -387,6 +455,8 @@ export function Inbox({
         reading={snapshot.reading}
         empty="Nothing needs you now."
         repoNames={names}
+        item={item}
+        folded={false}
         connection={connection}
         model={model}
         version={snapshot.version}
@@ -398,12 +468,13 @@ export function Inbox({
         reading={snapshot.reading}
         empty="No proposals or instructions in flight."
         repoNames={names}
+        item={item}
+        folded={narrow}
         connection={connection}
         model={model}
         version={snapshot.version}
       />
-      <section className="inbox-bucket" aria-label="Landed since you last looked">
-        <h2>Landed since you last looked</h2>
+      <Fold title="Landed since you last looked" count={undefined} folded={narrow}>
         {snapshot.needs !== null && snapshot.digests.length === 0 && (
           <p className="secondary">Nothing new has landed.</p>
         )}
@@ -419,7 +490,7 @@ export function Inbox({
             ))}
           </ul>
         )}
-      </section>
+      </Fold>
     </div>
   );
 }

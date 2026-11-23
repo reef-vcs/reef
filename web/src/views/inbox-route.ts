@@ -4,9 +4,11 @@ import { fleetHref } from "./fleet-route";
 import { proposalHref } from "./proposal-route";
 import { smartlogHref } from "./smartlog-route";
 
-/** The inbox: every repository's, or one's. */
-export function inboxHref(params: { repo?: string } = {}): string {
-  return params.repo ? href(`/repos/${encodeURIComponent(params.repo)}/inbox`) : "/";
+/** The inbox: every repository's, or one's, scrolled to the item with key `item`. */
+export function inboxHref(params: { repo?: string; item?: string } = {}): string {
+  return params.repo
+    ? href(`/repos/${encodeURIComponent(params.repo)}/inbox`, { item: params.item })
+    : "/";
 }
 
 export function targetOf(item: InboxItem): string {
@@ -19,7 +21,9 @@ export function targetOf(item: InboxItem): string {
 }
 
 export function openedAt(item: InboxItem): string {
-  return item.record.case === "comment" ? inboxHref({ repo: item.repoId }) : targetOf(item);
+  return item.record.case === "comment"
+    ? inboxHref({ repo: item.repoId, item: item.key })
+    : targetOf(item);
 }
 
 export function itemHref(params: { repo: string; key: string }): string {

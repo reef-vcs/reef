@@ -43,7 +43,9 @@ describe("an inbox item's link", () => {
       section(REPO, { needsYouNow: [helpItem("h1", 2_000)], needsYouNowTotal: 1 }),
     ];
     at(daemon, `help:${REPO}:h1`);
-    expect(window.location.pathname).toBe(inboxHref({ repo: REPO }));
+    expect(window.location.pathname + window.location.search).toBe(
+      inboxHref({ repo: REPO, item: `help:${REPO}:h1` }),
+    );
   });
 
   it("says when the item no longer needs you", () => {

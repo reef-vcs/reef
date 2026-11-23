@@ -2,12 +2,13 @@
 //!
 //! On the daemon's machine, `remote token create|list|rotate|revoke` issue
 //! and end the tokens its remote listener accepts, and `remote show` says
-//! what the listener presents. On the other machine, `remote add|list|
+//! what the listener presents; `remote pair` gives a phone a code to type
+//! (R3.40, ADR 0095). On the other machine, `remote add|list|
 //! remove` keep profiles in `<state>/remotes.toml` (`0600`), the token in
 //! the file and never on a command line, and `--remote <name>` (or
 //! `REEF_REMOTE`) points any command at one.
 
-use std::io::{self, BufRead as _, Write};
+use std::io::{self, BufRead as _, IsTerminal as _, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -20,6 +21,9 @@ use serde::Serialize;
 
 use super::out::{TextRender, TextRow, block};
 use super::{CliError, Ctx, Global, Out};
+
+/// A certificate with fewer days left is warned about.
+pub(super) const CERTIFICATE_WARN_DAYS: i64 = 14;
 
 /// `reef remote`.
 #[derive(Debug, clap::Args)]
@@ -58,6 +62,18 @@ enum RemoteCommand {
     },
     /// Show the remote listener: its state, address, and the fingerprint clients pin.
     Show,
+    /// Pair a phone: prints the address to open on it and a code to type there once.
+    #[command(after_help = "Example: reef remote pair iphone")]
+    Pair {
+        /// The device's name, such as iphone; a paired device of that name ends once the new one is paired.
+        name: String,
+        /// The person it is for [default: the daemon's default person].
+        #[arg(long, value_name = "NAME")]
+        identity: Option<String>,
+        /// How long it stays paired (90d, 2w) [default: 90d].
+        #[arg(long, value_name = "DURATION", value_parser = humantime::parse_duration)]
+        expires: Option<Duration>,
+    },
     /// Issue, list, rotate and revoke the tokens this daemon's remote listener accepts.
     #[command(subcommand)]
     Token(TokenCommand),
@@ -112,6 +128,7 @@ impl Args {
     pub(crate) fn local_only(&self) -> Option<&'static str> {
         match self.command {
             RemoteCommand::Token(_) => Some("remote token"),
+            RemoteCommand::Pair { .. } => Some("remote pair"),
             _ => None,
         }
     }
@@ -142,6 +159,14 @@ pub(crate) async fn run(global: &Global, out: &Out, args: Args) -> Result<(), Cl
         RemoteCommand::Show => {
             let ctx = super::connect(global, out).await?;
             show(&ctx).await
+        }
+        RemoteCommand::Pair {
+            name,
+            identity,
+            expires,
+        } => {
+            let ctx = super::connect(global, out).await?;
+            pair(&ctx, &name, identity.as_deref(), expires).await
         }
         RemoteCommand::Token(command) => {
             let ctx = super::connect(global, out).await?;
@@ -471,10 +496,20 @@ impl TextRender for RemoteListener {
             ("address", self.address.clone()),
             ("names", self.names.join(", ")),
         ];
+        if let Some(origin) = &self.origin {
+            pairs.push(("origin", origin.clone()));
+        }
         if let Some(cert) = &self.certificate {
             pairs.push(("fingerprint", cert.fingerprint.clone()));
             pairs.push(("certificate", cert.source.clone()));
-            pairs.push(("expires", cert.not_after.clone().unwrap_or_default()));
+            let expires = cert.not_after.clone().unwrap_or_default();
+            pairs.push((
+                "expires",
+                match cert.days_left {
+                    Some(days) => format!("{expires} ({days} days left)"),
+                    None => expires,
+                },
+            ));
         }
         pairs.push(("live_tokens", self.live_tokens.to_string()));
         if let Some(error) = &self.error {
@@ -482,6 +517,106 @@ impl TextRender for RemoteListener {
         }
         block(w, &pairs)
     }
+}
+
+/// A pairing code, as `remote pair` prints it.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+#[schemars(rename = "cli.PairingCode")]
+pub(crate) struct PairingCode {
+    /// The device's name.
+    name: String,
+    /// The address to open on the phone.
+    url: String,
+    /// What to type there: a credential until it is used or expires.
+    code: String,
+    /// When it stops working.
+    expires_at: Option<String>,
+    /// What keeps the phone from pairing or from opening the app, if anything.
+    warnings: Vec<String>,
+}
+
+impl TextRender for PairingCode {
+    fn render(&self, w: &mut dyn Write) -> io::Result<()> {
+        writeln!(w, "Open   {}", self.url)?;
+        writeln!(w, "Code   {:<18} good for 10 minutes, once", self.code)?;
+        writeln!(w)?;
+        writeln!(
+            w,
+            "On the phone: open the address in Safari, Share, Add to Home Screen, open Reef\nfrom the Home Screen, and type the code."
+        )
+    }
+}
+
+/// What in the listener's state keeps a phone out.
+fn pair_warnings(remote: Option<&RemoteListener>) -> Vec<String> {
+    let Some(remote) = remote else {
+        return Vec::new();
+    };
+    let mut warnings = Vec::new();
+    match remote.state.as_str() {
+        "off" => warnings.push(
+            "the remote listener is off: set `[remote] enabled = true` and restart the daemon"
+                .to_owned(),
+        ),
+        "failed" => warnings.push(format!(
+            "the remote listener is not listening: {}",
+            remote.error.as_deref().unwrap_or("it did not start")
+        )),
+        _ => {}
+    }
+    if let Some(cert) = &remote.certificate {
+        if cert.source == "generated" {
+            warnings.push(
+                "the certificate is generated, and no phone trusts it: an exception made in Safari does not reach the Home Screen app. docs/phone.md names three certificates a phone trusts"
+                    .to_owned(),
+            );
+        }
+        if let Some(days) = cert.days_left.filter(|days| *days < CERTIFICATE_WARN_DAYS) {
+            warnings.push(format!("the certificate has {days} days left"));
+        }
+    }
+    warnings
+}
+
+async fn pair(
+    ctx: &Ctx,
+    name: &str,
+    identity: Option<&str>,
+    expires: Option<Duration>,
+) -> Result<(), CliError> {
+    // Before the code is drawn, so that a failure here loses none.
+    let status = ctx.call(ctx.client.daemon_status(true)).await?;
+    let started = ctx
+        .call(
+            ctx.client
+                .start_pairing(name, identity.unwrap_or_default(), expires),
+        )
+        .await?;
+    let remote = status.remote.as_ref().map(RemoteListener::from);
+    let code = match started.code.split_at_checked(4) {
+        Some((first, second)) => format!("{first}-{second}"),
+        None => started.code,
+    };
+    let code = PairingCode {
+        name: name.to_owned(),
+        url: format!("{}/", started.origin),
+        code,
+        expires_at: started.expires_at.as_ref().map(reef_client::json::rfc3339),
+        warnings: pair_warnings(remote.as_ref()),
+    };
+    for warning in &code.warnings {
+        ctx.out.note(&format!("reef: {warning}"));
+    }
+    ctx.out.object(&code)?;
+    // The address alone: a code in it would pair Safari, whose storage the
+    // Home Screen app does not share.
+    if !ctx.out.is_json()
+        && io::stdout().is_terminal()
+        && let Some(qr) = super::qr::terminal(&code.url)
+    {
+        ctx.out.raw(format!("\n{qr}").as_bytes())?;
+    }
+    Ok(())
 }
 
 async fn show(ctx: &Ctx) -> Result<(), CliError> {

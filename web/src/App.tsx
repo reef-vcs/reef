@@ -7,10 +7,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { client, type Connection } from "./api/connection";
 import { isSessionInvalid, reefError, type ReefError } from "./api/errors";
+import { device, endDevice } from "./device";
 import { DaemonService, type GetDaemonStatusResponse } from "./gen/reef/api/v1/daemon_pb";
 import { animationFrame, type FrameScheduler } from "./live/frame";
 import { Live, type LiveEnvironment } from "./live/share";
-import { endSession } from "./session";
+import { endSession, SESSION_KEY, storedSession } from "./session";
 import { AppBar } from "./ui/AppBar";
 import { ErrorView } from "./ui/ErrorView";
 import { HeaderSlots } from "./ui/header-slots";
@@ -116,6 +117,7 @@ function Shell({
         <AppBar
           live={live}
           status={status}
+          onUnpair={onSessionInvalid}
           onCrumb={setCrumb}
           onTabs={setTabs}
           onStrip={setStrip}
@@ -166,10 +168,13 @@ function Shell({
 export function App({
   session,
   environment,
+  onPaired,
 }: {
   /** Null when the tab has no session. */
   session: { connection: Connection; token: string } | null;
   environment?: LiveEnvironment;
+  /** This device was paired (R3.40): shows the app with its token. */
+  onPaired?: (token: string) => void;
 }) {
   const connection = session?.connection ?? null;
   const [ended, setEnded] = useState(session === null);
@@ -178,9 +183,26 @@ export function App({
     // Stop the streams too: an ended tab must not keep the lock and feed
     // other tabs on a refused token.
     live?.close();
-    if (session) endSession(session.token);
+    if (session) {
+      endDevice(session.token);
+      endSession(session.token);
+    }
     setEnded(true);
   });
+
+  // A phone unpaired in one tab is unpaired in all of them.
+  useEffect(() => {
+    if (!device()) return;
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === null || event.key === SESSION_KEY) {
+        if (storedSession() === null) end();
+      }
+    };
+    window.addEventListener("storage", onStorage);
+    return () => {
+      window.removeEventListener("storage", onStorage);
+    };
+  }, [end]);
 
   useEffect(() => {
     if (!live) return;
@@ -192,7 +214,7 @@ export function App({
     };
   }, [live, end]);
 
-  if (ended || !connection || !live) return <NoSession />;
+  if (ended || !connection || !live) return <NoSession onPaired={onPaired} />;
   return (
     <Shell
       connection={connection}

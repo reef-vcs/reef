@@ -56,6 +56,16 @@ export function localStorageOrNull(): Storage | null {
   }
 }
 
+/** The stored token, whoever stored it. */
+export function storedSession(storage: Storage | null = localStorageOrNull()): string | null {
+  return read(storage);
+}
+
+/** Makes `token` the tab's session, and every later tab's of this origin. */
+export function storeSession(token: string, storage: Storage | null = localStorageOrNull()) {
+  write(storage, token);
+}
+
 /**
  * The tab's token: from `#session=` (stored, then removed from the URL), else
  * from storage. Null means the tab has no session.

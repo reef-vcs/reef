@@ -2,6 +2,7 @@
 // order, a hunk's line numbers, the sentences, and the action machine.
 import { create } from "@bufbuild/protobuf";
 import { describe, expect, it } from "vitest";
+import { DEVICE_READS } from "../device";
 import { AutomaticStatusSchema, AutomaticState } from "../gen/reef/api/v1/changes_pb";
 import {
   FileDiffSchema,
@@ -215,6 +216,7 @@ describe("the actions", () => {
       tree: "4b825dc6",
       signer: { name: "arsood", passkeys: 1 },
       supported: true,
+      device: false,
     };
     expect(acceptBlocked(facts)).toBeNull();
     expect(acceptBlocked({ ...facts, state: LifecycleState.LANDED })).toBe(
@@ -228,10 +230,13 @@ describe("the actions", () => {
     expect(acceptBlocked({ ...facts, signer: { name: "arsood", passkeys: 0 } })).toBe(
       "arsood has no passkey.",
     );
-    expect(declineBlocked(LifecycleState.QUEUED, false)).toBeNull();
-    expect(declineBlocked(LifecycleState.DECLINED, false)).toBe(
+    expect(declineBlocked(LifecycleState.QUEUED, false, false)).toBeNull();
+    expect(declineBlocked(LifecycleState.DECLINED, false, false)).toBe(
       "Only a change in review can be declined.",
     );
+    // A paired phone (R3.40) decides nothing.
+    expect(acceptBlocked({ ...facts, device: true })).toBe(DEVICE_READS);
+    expect(declineBlocked(LifecycleState.PROPOSED, false, true)).toBe(DEVICE_READS);
   });
 });
 

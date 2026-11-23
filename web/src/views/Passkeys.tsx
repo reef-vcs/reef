@@ -24,6 +24,7 @@ import {
   NO_SUPPORT,
   type Failure,
 } from "../sign/passkey";
+import { device } from "../device";
 import { embedded } from "../session";
 import { Copy } from "../ui/Copy";
 import { ErrorView } from "../ui/ErrorView";
@@ -118,6 +119,7 @@ function PersonCard({
   onRemove: (passkey: Passkey) => void;
 }) {
   const { identity, passkeys } = person;
+  const paired = device() !== null;
   const [label, setLabel] = useState("");
   // Anyone who can open this page can add a passkey, an agent included, so
   // the snippet names only passkeys this browser's authenticator proved it
@@ -213,7 +215,7 @@ function PersonCard({
                     <td>
                       <button
                         type="button"
-                        disabled={busy}
+                        disabled={busy || paired}
                         aria-label={`Remove ${passkey.label}`}
                         onClick={() => {
                           onRemove(passkey);
@@ -235,7 +237,7 @@ function PersonCard({
           <p>
             <button
               type="button"
-              disabled={busy || confirming === "busy"}
+              disabled={busy || paired || confirming === "busy"}
               onClick={() => void confirm()}
             >
               Confirm a passkey to pin
@@ -282,7 +284,7 @@ function PersonCard({
             }}
           />
         </label>
-        <button type="submit" className="primary" disabled={busy || !label.trim()}>
+        <button type="submit" className="primary" disabled={busy || paired || !label.trim()}>
           Add a passkey
         </button>
       </form>
@@ -371,7 +373,7 @@ export function Passkeys({
         takes one touch that approves exactly that sign-off.
       </p>
       {!hasPasskeySupport() &&
-        (embedded() ? (
+        (embedded() || device() ? (
           <NoPasskeysHere />
         ) : (
           <FailureView failure={{ kind: "browser", words: NO_SUPPORT }} />

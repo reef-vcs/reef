@@ -6,17 +6,21 @@ import { timestampFromMs } from "@bufbuild/protobuf/wkt";
 import { Code } from "@connectrpc/connect";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { create } from "@bufbuild/protobuf";
+import { DEVICE_READS } from "../device";
 import { InboxReason, InboxSectionSchema } from "../gen/reef/api/v1/inbox_pb";
 import { InboxStore } from "../live/inbox";
 import type { Live } from "../live/share";
 import { daemonError, immediateFrames, settle } from "../test/fakes";
 import { helpItem, InboxDaemon, OTHER, proposalItem, REPO, section } from "../test/inbox-daemon";
+import { narrow } from "../test/narrow";
+import { paired } from "../test/paired";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "../test/testing-library";
 import { Inbox, SEEN_AFTER_MS } from "./Inbox";
 import { InboxModel } from "./inbox-model";
 
 afterEach(() => {
   cleanup();
+  Element.prototype.scrollIntoView = () => undefined;
 });
 
 /** The browser's inbox stream, fed by `daemon`: `send` is its next frame. */
@@ -32,11 +36,12 @@ function live(daemon: InboxDaemon) {
   };
 }
 
-async function open(daemon: InboxDaemon, repo?: string) {
+async function open(daemon: InboxDaemon, repo?: string, item?: string) {
   const stream = live(daemon);
   render(
     <Inbox
       repo={repo}
+      {...(item ? { item } : {})}
       repoNames={new Map([[REPO, "reef"]])}
       connection={daemon.connection()}
       live={stream.live}
@@ -91,6 +96,66 @@ describe("the inbox", () => {
     ]);
     expect(screen.getByRole("link", { name: "Change dddd" })).toBeTruthy();
     expect(screen.getByText("Needs a sign-off from release")).toBeTruthy();
+  });
+
+  it("opened at a help request, scrolls to it with its answer open", async () => {
+    const scrolled = vi.fn();
+    Element.prototype.scrollIntoView = scrolled;
+    const daemon = new InboxDaemon();
+    daemon.sections = [
+      section(REPO, {
+        needsYouNow: [helpItem("h1", 2_000), helpItem("h2", 1_000)],
+        needsYouNowTotal: 2,
+      }),
+    ];
+    await open(daemon, REPO, `help:${REPO}:h2`);
+    expect(scrolled).toHaveBeenCalledOnce();
+    const opened = screen.getByLabelText("Your answer").closest("li");
+    expect(opened?.getAttribute("data-key")).toBe(`help:${REPO}:h2`);
+    expect(screen.getAllByLabelText("Your answer")).toHaveLength(1);
+  });
+
+  it("on a phone, folds all but what needs you now", async () => {
+    narrow();
+    const daemon = new InboxDaemon();
+    daemon.sections = [
+      section(REPO, { needsYouNow: [helpItem("h1", 2_000)], needsYouNowTotal: 1 }),
+    ];
+    await open(daemon);
+    expect(needs().querySelector("details")).toBeNull();
+    for (const name of ["Watching", "Landed since you last looked"]) {
+      const bucket = screen.getByRole("region", { name });
+      expect(bucket.querySelector("details")?.open).toBe(false);
+    }
+  });
+
+  it("on a phone, opens the bucket of the item it was opened at", async () => {
+    narrow();
+    const daemon = new InboxDaemon();
+    const change = "d".repeat(32);
+    daemon.sections = [
+      section(REPO, {
+        watching: [proposalItem(change, InboxReason.IN_REVIEW, 1_000, "Waits")],
+        watchingTotal: 1,
+      }),
+    ];
+    await open(daemon, REPO, `proposal:${REPO}:${change}`);
+    const watching = screen.getByRole("region", { name: "Watching" });
+    expect(watching.querySelector("details")?.open).toBe(true);
+    const landed = screen.getByRole("region", { name: "Landed since you last looked" });
+    expect(landed.querySelector("details")?.open).toBe(false);
+  });
+
+  it("on a paired phone, says that it only reads in place of the answer", async () => {
+    paired();
+    const daemon = new InboxDaemon();
+    daemon.sections = [
+      section(REPO, { needsYouNow: [helpItem("h1", 2_000)], needsYouNowTotal: 1 }),
+    ];
+    await open(daemon, REPO, `help:${REPO}:h1`);
+    expect(screen.getByText(DEVICE_READS)).toBeTruthy();
+    expect(screen.queryByLabelText("Your answer")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Answer" })).toBeNull();
   });
 
   it("on the home page, shows a repository the stream adds after it opened", async () => {

@@ -70,6 +70,73 @@ pub(crate) enum Rule {
     /// caller's token is linked to; refused for a token with no link
     /// (`REMOTE_IDENTITY_REQUIRED`, `crate::service::inbox`).
     InboxMark,
+    /// Refused to every token (R3.40): the gate passes it to a pairing code
+    /// alone (`super::pairing`).
+    PairingCode,
+}
+
+/// What a paired device may do with a write of the web UI's (R3.40): its
+/// call is a page's, so it passes no write the web UI's page could not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DeviceRule {
+    /// The token is enough.
+    Token,
+    /// Refused: nothing yet tells the daemon that a person, and not a stolen
+    /// token, is behind the call.
+    Refused,
+}
+
+/// Each write of the web UI's allowlist (`crate::web::rules::TABLE`) and what
+/// a device may do with it. Every other write is refused to a device.
+pub(crate) const DEVICE: &[(&str, DeviceRule)] = &[
+    ("/reef.api.v1.InboxService/MarkInboxSeen", DeviceRule::Token),
+    (
+        "/reef.api.v1.IdentityService/StartPasskeyRegistration",
+        DeviceRule::Refused,
+    ),
+    (
+        "/reef.api.v1.IdentityService/RegisterPasskey",
+        DeviceRule::Refused,
+    ),
+    (
+        "/reef.api.v1.IdentityService/RemovePasskey",
+        DeviceRule::Refused,
+    ),
+    (
+        "/reef.api.v1.IdentityService/RequestApproval",
+        DeviceRule::Refused,
+    ),
+    (
+        "/reef.api.v1.IdentityService/ResolveApproval",
+        DeviceRule::Refused,
+    ),
+    (
+        "/reef.api.v1.EvidenceService/AddEvidence",
+        DeviceRule::Refused,
+    ),
+    (
+        "/reef.api.v1.ChangeService/TransitionChange",
+        DeviceRule::Refused,
+    ),
+    (
+        "/reef.api.v1.CommentService/CreateComment",
+        DeviceRule::Refused,
+    ),
+    (
+        "/reef.api.v1.CommentService/UpdateInstruction",
+        DeviceRule::Refused,
+    ),
+    (
+        "/reef.api.v1.LandingService/LandChange",
+        DeviceRule::Refused,
+    ),
+];
+
+/// Whether a device may call the write at `path`.
+pub(crate) fn device_may(path: &str) -> bool {
+    DEVICE
+        .iter()
+        .any(|(method, rule)| *method == path && *rule == DeviceRule::Token)
 }
 
 /// Every `ACCESS_WRITE` method and its rule.
@@ -177,6 +244,7 @@ pub(crate) const TABLE: &[(&str, Rule)] = &[
         "/reef.api.v1.IdentityService/ResolveApproval",
         Rule::WebOnly,
     ),
+    (super::pairing::REDEEM, Rule::PairingCode),
 ];
 
 /// `CreateWorkspace`'s rule: a remote caller cannot name the directory.
@@ -220,5 +288,26 @@ mod tests {
         let table: BTreeSet<&str> = TABLE.iter().map(|(path, _)| *path).collect();
         assert_eq!(table, writes, "classify every ACCESS_WRITE method in TABLE");
         assert_eq!(table.len(), TABLE.len());
+    }
+
+    #[test]
+    fn device_table_is_the_web_allowlist() {
+        let web: BTreeSet<&str> = crate::web::rules::TABLE
+            .iter()
+            .map(|(path, _)| *path)
+            .collect();
+        let device: BTreeSet<&str> = DEVICE.iter().map(|(path, _)| *path).collect();
+        assert_eq!(
+            device, web,
+            "say in DEVICE what a paired device may do with each write of the web allowlist"
+        );
+        assert_eq!(device.len(), DEVICE.len());
+        let allowed: Vec<&str> = DEVICE
+            .iter()
+            .filter(|(path, _)| device_may(path))
+            .map(|(path, _)| *path)
+            .collect();
+        assert_eq!(allowed, ["/reef.api.v1.InboxService/MarkInboxSeen"]);
+        assert!(!device_may("/reef.api.v1.FileService/EditFiles"));
     }
 }

@@ -5,6 +5,7 @@
 // then a `LandChange` for the same commit.
 import { client, type Connection } from "../api/connection";
 import { isSessionInvalid, reefError } from "../api/errors";
+import { DEVICE_READS } from "../device";
 import { LifecycleState, TransitionActor } from "../gen/reef/api/v1/lifecycle_pb";
 import {
   LandingOutcome,
@@ -76,6 +77,8 @@ export interface AcceptFacts {
   /** The signer's name and live passkeys; undefined while unread. */
   signer: { name: string; passkeys: number } | undefined;
   supported: boolean;
+  /** The page is a paired phone's (R3.40). */
+  device: boolean;
 }
 
 export const UNPROPOSED =
@@ -87,6 +90,7 @@ export function acceptBlocked(facts: AcceptFacts): string | null {
     const label = lifecycleState(facts.state)?.label ?? "not proposed";
     return `Only a proposed change can be accepted; this one is ${label}.`;
   }
+  if (facts.device) return DEVICE_READS;
   if (facts.unproposed) return UNPROPOSED;
   if (!facts.tree) return "The change has no visible commit to sign off.";
   if (facts.amended) {
@@ -99,10 +103,15 @@ export function acceptBlocked(facts: AcceptFacts): string | null {
 }
 
 /** Why Decline is off, or null. A decline never needs a passkey: it is not evidence. */
-export function declineBlocked(state: LifecycleState, amended: boolean): string | null {
+export function declineBlocked(
+  state: LifecycleState,
+  amended: boolean,
+  paired: boolean,
+): string | null {
   if (state !== LifecycleState.PROPOSED && state !== LifecycleState.QUEUED) {
     return "Only a change in review can be declined.";
   }
+  if (paired) return DEVICE_READS;
   if (amended) {
     return "The agent changed this proposal since you opened it. Review the new version to decline it.";
   }

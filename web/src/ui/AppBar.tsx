@@ -13,6 +13,7 @@ import { Settings } from "./Settings";
 export function AppBar({
   live,
   status,
+  onUnpair,
   onCrumb,
   onTabs,
   onStrip,
@@ -20,6 +21,8 @@ export function AppBar({
   /** Null on the no-session page, which shows the brand alone. */
   live: Live | null;
   status: GetDaemonStatusResponse | null;
+  /** Forgets this device's token (R3.40). */
+  onUnpair?: () => void;
   /** The slots' elements, for the repository frame's portals; stable setters. */
   onCrumb?: (element: HTMLElement | null) => void;
   onTabs?: (element: HTMLElement | null) => void;
@@ -44,7 +47,7 @@ export function AppBar({
               </span>
             )}
             <ConnectionIndicator live={live} />
-            <Settings status={status} />
+            <Settings status={status} onUnpair={onUnpair} />
           </div>
         )}
       </div>

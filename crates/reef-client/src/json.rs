@@ -1241,6 +1241,9 @@ pub struct RemoteListener {
     pub error: Option<String>,
     /// Tokens neither revoked nor expired.
     pub live_tokens: u32,
+    /// `[remote] origin` (R3.40): the address a phone opens; `null` when not
+    /// set.
+    pub origin: Option<String>,
 }
 
 /// The remote listener's certificate (R2.08).
@@ -1252,6 +1255,8 @@ pub struct RemoteCertificate {
     pub fingerprint: String,
     /// When it expires.
     pub not_after: Option<String>,
+    /// Whole days until it expires (R3.40), negative once it has.
+    pub days_left: Option<i64>,
     /// Its subject alternative names.
     pub subject_names: Vec<String>,
 }
@@ -1282,10 +1287,15 @@ impl From<&v1::RemoteListener> for RemoteListener {
                 .to_owned(),
                 fingerprint: cert.fingerprint.clone(),
                 not_after: time(cert.not_after.as_ref()),
+                days_left: cert
+                    .not_after
+                    .as_ref()
+                    .map(|at| (at.seconds - now_seconds()).div_euclid(86_400)),
                 subject_names: cert.subject_names.clone(),
             }),
             error: text(&remote.error),
             live_tokens: remote.live_token_count,
+            origin: text(&remote.origin),
         }
     }
 }
@@ -1298,7 +1308,7 @@ pub struct RemoteToken {
     pub id: String,
     /// Its name.
     pub name: String,
-    /// `read` or `write`.
+    /// `read`, `write` or `device`.
     pub scope: String,
     /// `live`, `expired` or `revoked`.
     pub state: String,
@@ -1319,15 +1329,23 @@ pub struct RemoteToken {
     /// The operator identity it is linked to (R3.03): the only one it gets
     /// session keys for; `null` for none.
     pub identity: Option<String>,
+    /// The address a device was paired at (R3.40), the only one its token
+    /// works at; `null` for the other scopes.
+    pub device_origin: Option<String>,
+}
+
+/// The time now in whole seconds since the Unix epoch.
+fn now_seconds() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| {
+            i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
+        })
 }
 
 impl From<&v1::RemoteToken> for RemoteToken {
     fn from(token: &v1::RemoteToken) -> Self {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |since| {
-                i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
-            });
+        let now = now_seconds();
         let state = if token.revoked_at.is_some() {
             "revoked"
         } else if token
@@ -1344,6 +1362,7 @@ impl From<&v1::RemoteToken> for RemoteToken {
             name: token.name.clone(),
             scope: match v1::RemoteScope::try_from(token.scope) {
                 Ok(v1::RemoteScope::Write) => "write",
+                Ok(v1::RemoteScope::Device) => "device",
                 _ => "read",
             }
             .to_owned(),
@@ -1356,6 +1375,7 @@ impl From<&v1::RemoteToken> for RemoteToken {
             last_used_at: time(token.last_used_at.as_ref()),
             last_used_from: text(&token.last_used_from),
             identity: text(&token.identity),
+            device_origin: text(&token.device_origin),
         }
     }
 }

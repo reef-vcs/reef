@@ -1,6 +1,6 @@
 # The triage inbox
 
-The inbox is where a person running a fleet of agents sees what needs them. It is the web UI's home page, across every registered repository, and each repository's **Inbox** tab. `reef inbox` prints the same buckets in a terminal. Its design is [ADR 0088](adr/0088-triage-inbox.md).
+The inbox is where a person running a fleet of agents sees what needs them. It is the web UI's home page, across every registered repository, and each repository's **Inbox** tab. `reef inbox` prints the same buckets in a terminal, and a paired phone has it on its Home Screen ([phone](phone.md)). Its design is [ADR 0088](adr/0088-triage-inbox.md).
 
 ## The buckets
 
@@ -21,7 +21,7 @@ The inbox is where a person running a fleet of agents sees what needs them. It i
 
 **Landed since you last looked** is a digest per repository: how many changes landed, who proposed them, and the newest ten. It counts from your mark, or with none, from a day ago.
 
-Each item has a stable key (`proposal:<repo>:<change>`, `help:<repo>:<comment>`, and so on), the same whatever bucket it is in.
+Each item has a stable key (`proposal:<repo>:<change>`, `help:<repo>:<comment>`, and so on), the same whatever bucket it is in. `/repos/<repo>/items/<key>` in the web UI opens the item where it is decided: a proposal's page, or a help request's answer, open in the inbox.
 
 ## What is news
 

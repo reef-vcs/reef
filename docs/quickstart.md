@@ -317,11 +317,12 @@ reef --remote vm ws list --repo <id>
 reef --remote vm status --workspace <id>
 ```
 
-Compare the fingerprint with `reef remote show` on the daemon's machine, over a channel you trust: that is what tells your client the daemon is the real one. The listener speaks only TLS; by default the daemon generates its own certificate and clients pin its key. `[remote] tls_cert` and `tls_key` use a certificate from a CA instead (a domain with an ACME client, or your VPN's certificate service), which needs no pin and is what a phone's browser needs. `[remote] listen` is `0.0.0.0:7470` by default and `[remote] names` the host name.
+Compare the fingerprint with `reef remote show` on the daemon's machine, over a channel you trust: that is what tells your client the daemon is the real one. The listener speaks only TLS; by default the daemon generates its own certificate and clients pin its key. `[remote] tls_cert` and `tls_key` use a certificate from a CA instead (a domain with an ACME client, or your VPN's certificate service), which needs no pin and is what a phone needs ([docs/phone.md](phone.md)). `[remote] listen` is `0.0.0.0:7470` by default and `[remote] names` the host name.
 
 - A token is `read` by default and expires in 30 days: `--scope write` lets it describe, abandon, undo, edit and create workspaces; `--expires never` keeps it until `reef remote token revoke`. `remote token list` shows when each was last used and from where; `rotate --overlap 1d` gives a new secret while the old one still works.
-- In remote mode a command needs `--workspace` or `--repo`: this machine's directory is not on the daemon's. `here`, `ws run`, `ui`, `init`, `mcp`, `daemon` (except `status`), `config`, `backup`, `ws gc`, `store build`, `repo register` and `remote token` run only on the daemon's machine.
+- In remote mode a command needs `--workspace` or `--repo`: this machine's directory is not on the daemon's. `here`, `ws run`, `ui`, `init`, `mcp`, `daemon` (except `status`), `config`, `backup`, `ws gc`, `store build`, `repo register`, `remote token` and `remote pair` run only on the daemon's machine.
 - The web UI is at the URL `token create` prints (the link holds the token). With the generated certificate, the browser warns once; compare the fingerprint in its details before accepting.
+- `reef remote pair iphone` puts the inbox, every proposal and its diff on your phone's Home Screen, with a token that only reads: [docs/phone.md](phone.md).
 - Until Reef has had an external security review, serve the listener on a private network (a VPN or a cloud VPC), not the open internet. A `read` token sees presence and workspace purposes, which carry agents' command lines.
 
 ## Configuration
@@ -363,7 +364,7 @@ Below `[disk] floor`, creates and store builds are refused with `DISK_SPACE_LOW`
 - Reef registers only repositories you own (their `.jj` or `.git`), as git's `safe.directory` does; `[repo] allow_foreign_owner = true` lifts that, for a daemon serving another user's checkout on purpose.
 - Reef is built on jj-lib 0.47. A `jj` CLI from 0.46 or 0.47 works in a repository Reef uses; a newer `jj` may upgrade the repository's on-disk formats when you run it there ([ADR 0008](adr/0008-jj-lib-embedding-findings.md)).
 - Tools that do not read `.git/info/exclude` see the `.jj/` directory.
-- The remote listener's generated certificate is self-signed: browsers warn once per origin, and a phone's browser needs a supplied certificate. A restored state directory has a new key, so clients re-add the remote with its new fingerprint, and a backup older than a revocation brings the revoked token back: revoke it again after a restore.
+- The remote listener's generated certificate is self-signed: browsers warn once per origin, and a phone's Home Screen app needs a certificate the phone trusts ([docs/phone.md](phone.md)). A restored state directory has a new key, so clients re-add the remote with its new fingerprint, and a backup older than a revocation brings the revoked token back: revoke it again after a restore.
 - The binaries are not signed or notarized. Windows is not supported.
 
 ## Where next

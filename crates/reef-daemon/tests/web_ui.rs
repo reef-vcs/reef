@@ -362,6 +362,22 @@ async fn assets_are_public_and_strict() {
     }
     let csp = index.headers()["content-security-policy"].to_str().unwrap();
     assert!(csp.contains("script-src 'self'") && !csp.contains("unsafe"));
+    assert!(csp.contains("worker-src 'none'"), "{csp}");
+    // R3.40 13: an app installed from here would be dead at the next start.
+    for path in [
+        "/app.webmanifest",
+        "//app.webmanifest",
+        "/apple-touch-icon.png",
+        "/icon-192.png",
+        "/icon-512.png",
+        "/sw.js",
+    ] {
+        assert_eq!(
+            get(&at, path).await.status(),
+            StatusCode::NOT_FOUND,
+            "{path}"
+        );
+    }
     let hashed = reef_web::all().iter().find(|a| a.immutable).unwrap();
     let asset = get(&at, &format!("/{}", hashed.path)).await;
     assert_eq!(asset.status(), StatusCode::OK);

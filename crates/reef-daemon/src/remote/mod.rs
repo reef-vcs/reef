@@ -20,6 +20,7 @@ mod failures;
 pub(crate) mod gate;
 pub mod incoming;
 pub mod listener;
+pub(crate) mod pairing;
 pub(crate) mod rules;
 pub(crate) mod streams;
 pub mod tls;
@@ -96,6 +97,12 @@ pub struct Limits {
     pub refusal_log_every: Duration,
     /// How often expired tokens' streams are ended.
     pub expiry_sweep: Duration,
+    /// Pairing codes waiting at once at most (R3.40).
+    pub max_pairings: usize,
+    /// How long a pairing code works.
+    pub pairing_life: Duration,
+    /// Wrong codes, from any addresses, that end every code waiting.
+    pub pairing_wrong_codes: u32,
 }
 
 impl Default for Limits {
@@ -124,6 +131,9 @@ impl Default for Limits {
             bind_retry_max: Duration::from_mins(1),
             refusal_log_every: Duration::from_secs(10),
             expiry_sweep: Duration::from_secs(1),
+            max_pairings: 4,
+            pairing_life: Duration::from_mins(10),
+            pairing_wrong_codes: 100,
         }
     }
 }
@@ -220,12 +230,47 @@ pub enum RemoteError {
     TokenExists {
         /// The name.
         name: String,
+        /// Whether rotating that token is what the caller may have wanted:
+        /// not for a device, and not for a pairing.
+        rotates: bool,
     },
     /// The daemon holds its limit of live tokens.
     #[error("the daemon holds its limit of {limit} live remote tokens")]
     TooManyTokens {
         /// [`Limits::max_tokens`].
         limit: usize,
+    },
+    /// A pairing code that is wrong, used or expired, or a redeem anywhere
+    /// but at `[remote] origin` (R3.40): one answer, so a guess learns
+    /// nothing.
+    #[error("the pairing code is not valid")]
+    PairingCodeInvalid,
+    /// A pairing with no `[remote] origin` to pair at.
+    #[error("pairing a device needs [remote] origin, the address the phone opens")]
+    OriginRequired {
+        /// The line to write, as far as the daemon can tell.
+        line: String,
+    },
+    /// A device's token at another address than the one it was paired at,
+    /// or with `[remote] origin` since moved.
+    #[error("this device was paired at {device_origin}")]
+    OriginChanged {
+        /// Where it was paired.
+        device_origin: String,
+        /// `[remote] origin` now; empty when not set.
+        origin: String,
+    },
+    /// The daemon holds its limit of codes waiting.
+    #[error("the daemon holds its limit of {limit} pairing codes")]
+    TooManyPairings {
+        /// [`Limits::max_pairings`].
+        limit: usize,
+    },
+    /// A rotation of a device's token.
+    #[error("{name} is a paired device; its token cannot be rotated")]
+    DeviceRotate {
+        /// The name.
+        name: String,
     },
     /// A name that is not `[a-z0-9][a-z0-9._-]{0,62}`.
     #[error("{name:?} is not a valid remote token name")]
@@ -252,11 +297,16 @@ impl Classify for RemoteError {
             Self::TokenInvalid { .. }
             | Self::AccessDenied { .. }
             | Self::FieldDenied { .. }
-            | Self::WorkspaceNotOwned { .. } => ErrorKind::PermissionDenied,
+            | Self::WorkspaceNotOwned { .. }
+            | Self::PairingCodeInvalid
+            | Self::OriginChanged { .. } => ErrorKind::PermissionDenied,
             Self::Busy { .. } => ErrorKind::Unavailable,
             Self::TokenNotFound { .. } => ErrorKind::NotFound,
             Self::TokenExists { .. } => ErrorKind::AlreadyExists,
-            Self::TooManyTokens { .. } => ErrorKind::Conflict,
+            Self::TooManyTokens { .. }
+            | Self::OriginRequired { .. }
+            | Self::TooManyPairings { .. }
+            | Self::DeviceRotate { .. } => ErrorKind::Conflict,
             Self::InvalidTokenName { .. } | Self::InvalidDuration { .. } => {
                 ErrorKind::InvalidArgument
             }
@@ -289,7 +339,19 @@ impl Advise for RemoteError {
                 format!("No live token is named `{name}`."),
                 ["reef", "remote", "token", "list"],
             )),
-            Self::TokenExists { name } => Some(Advice::run(
+            Self::TokenExists {
+                name,
+                rotates: false,
+            } => Some(Advice::run(
+                format!(
+                    "A live token is named `{name}`: choose another name, or revoke that one first."
+                ),
+                ["reef", "remote", "token", "list"],
+            )),
+            Self::TokenExists {
+                name,
+                rotates: true,
+            } => Some(Advice::run(
                 format!("A live token is named `{name}`: rotate it, or revoke it first."),
                 ["reef", "remote", "token", "rotate", name.as_str()],
             )),
@@ -299,6 +361,25 @@ impl Advise for RemoteError {
             )),
             Self::InvalidTokenName { .. } => Some(Advice::hint(
                 "Use lowercase letters, digits, `.`, `_` and `-`, at most 63, starting with a letter or digit.",
+            )),
+            Self::PairingCodeInvalid => Some(Advice::hint(
+                "The code is wrong, used or expired, or this is not the address it was printed with. Run `reef remote pair` on the daemon's machine again, and type the new code at the address it prints.",
+            )),
+            Self::OriginRequired { line } => Some(Advice::hint(format!(
+                "Add the address the phone opens to `[remote]` in config.toml, with its host in `names`, and restart the daemon: {line}"
+            ))),
+            Self::OriginChanged { origin, .. } if origin.is_empty() => Some(Advice::hint(
+                "The daemon has no `[remote] origin` any more, so no device works.",
+            )),
+            Self::OriginChanged { origin, .. } => Some(Advice::hint(format!(
+                "Open {origin} on the device and pair it again (`reef remote pair` on the daemon's machine)."
+            ))),
+            Self::TooManyPairings { .. } => Some(Advice::hint(
+                "Type a code that is waiting, or wait until it expires (10 minutes).",
+            )),
+            Self::DeviceRotate { name } => Some(Advice::run(
+                "Nobody could put a new secret on the device: pair it again.",
+                ["reef", "remote", "pair", name.as_str()],
             )),
             Self::InvalidDuration { .. } => None,
             Self::Db(error) => error.advice(),

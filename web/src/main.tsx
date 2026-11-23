@@ -1,16 +1,23 @@
-// The bootstrap: take the session from `#session=` (or storage), connect,
+// The bootstrap: take the session from storage or `#session=`, connect,
 // and render. No StrictMode: its double mount would close the live layer.
 import { createRoot } from "react-dom/client";
 import { browserConnection } from "./api/connection";
 import { App } from "./App";
-import { takeSession } from "./session";
+import { openSession } from "./device";
 import "./styles/tokens.css";
 import "./styles/base.css";
 
-const token = takeSession();
-const root = document.getElementById("root");
-if (root) {
-  createRoot(root).render(
-    <App session={token ? { connection: browserConnection(token), token } : null} />,
-  );
+const element = document.getElementById("root");
+if (element) {
+  const root = createRoot(element);
+  const show = (token: string | null) => {
+    root.render(
+      <App
+        key={token ?? ""}
+        session={token ? { connection: browserConnection(token), token } : null}
+        onPaired={show}
+      />,
+    );
+  };
+  show(openSession());
 }

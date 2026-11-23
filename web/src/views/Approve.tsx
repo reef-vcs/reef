@@ -7,6 +7,7 @@ import { durationFromMs, timestampMs } from "@bufbuild/protobuf/wkt";
 import { useEffect, useState } from "react";
 import { client, type Connection } from "../api/connection";
 import { isSessionInvalid, reefError, type ReefError } from "../api/errors";
+import { device } from "../device";
 import { after } from "../live/backoff";
 import { ChangeService, type Change } from "../gen/reef/api/v1/changes_pb";
 import { ApprovalState, IdentityService, type Approval } from "../gen/reef/api/v1/identity_pb";
@@ -361,7 +362,11 @@ export function Approve({
             >
               Approve
             </button>
-            <button type="button" disabled={!open || busy} onClick={() => void run("declining")}>
+            <button
+              type="button"
+              disabled={!open || busy || device() !== null}
+              onClick={() => void run("declining")}
+            >
               Decline
             </button>
           </p>

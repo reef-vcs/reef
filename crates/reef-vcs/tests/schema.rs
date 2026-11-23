@@ -350,6 +350,7 @@ async fn fixture() -> (TestDaemon, SyntheticRepo) {
         config.file.remote.enabled = true;
         "127.0.0.1:0".clone_into(&mut config.file.remote.listen);
         config.file.remote.names = vec!["localhost".to_owned()];
+        "https://localhost:7470".clone_into(&mut config.file.remote.origin);
         no_automatic_snapshots(config);
         // A floor, for the disk's not-ok shapes (#272); free space is the
         // test's, below.
@@ -951,6 +952,7 @@ async fn outputs_match_their_schemas() {
 
     // The remote listener and its tokens.
     script.both(&root, &["remote", "show"]).await;
+    script.both(&root, &["remote", "pair", "phone"]).await;
     script.both(&root, &["remote", "list"]).await;
     script
         .json(&root, &["remote", "token", "create", "one"])

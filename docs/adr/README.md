@@ -16,7 +16,7 @@ This index is maintained by hand. Every PR that adds an ADR or changes a status 
 | [0002](0002-build-on-jj-lib.md) | Build on jj-lib rather than forking jj or starting clean | accepted |
 | [0003](0003-sqlite-for-daemon-metadata.md) | SQLite for daemon metadata, leases, and indexes | accepted |
 | [0004](0004-grpc-over-unix-socket.md) | gRPC with tonic over a Unix socket for the daemon API | accepted |
-| [0005](0005-tauri-desktop-shell.md) | Tauri 2 for the desktop shell | accepted |
+| [0005](0005-tauri-desktop-shell.md) | Tauri 2 for the desktop shell | accepted (amended by [0095](0095-paired-devices.md)) |
 | [0006](0006-cel-for-policy.md) | CEL for repository policy | accepted |
 | [0007](0007-crate-layout.md) | Crate layout | superseded by [0033](0033-thin-client.md) |
 | [0008](0008-jj-lib-embedding-findings.md) | jj-lib embedding findings | accepted |
@@ -58,9 +58,9 @@ This index is maintained by hand. Every PR that adds an ADR or changes a status 
 | [0044](0044-history-index-and-query-layer.md) | History index and query layer | accepted |
 | [0045](0045-brief-json-by-default.md) | Brief JSON by default | accepted |
 | [0046](0046-replay.md) | Replay | accepted |
-| [0047](0047-web-ui-transport-and-local-listener.md) | Web UI transport and local listener | accepted (amended by [0094](0094-the-pinned-web-origin.md)) |
+| [0047](0047-web-ui-transport-and-local-listener.md) | Web UI transport and local listener | accepted (amended by [0094](0094-the-pinned-web-origin.md), [0095](0095-paired-devices.md)) |
 | [0048](0048-status-from-the-watchers-journal.md) | Status from the watcher's journal | accepted |
-| [0049](0049-remote-listener.md) | Remote listener | accepted |
+| [0049](0049-remote-listener.md) | Remote listener | accepted (amended by [0095](0095-paired-devices.md)) |
 | [0050](0050-published-schemas.md) | Published schemas | accepted |
 | [0051](0051-task-first-help.md) | Task-first help | accepted |
 | [0052](0052-harness-packages.md) | Harness packages | accepted |
@@ -106,3 +106,4 @@ This index is maintained by hand. Every PR that adds an ADR or changes a status 
 | [0092](0092-a-stacked-workspace-keeps-the-change-below.md) | A stacked workspace keeps the change below | accepted |
 | [0093](0093-the-desktop-shell-and-raised-items.md) | The desktop shell, and the daemon numbering what needs you | accepted |
 | [0094](0094-the-pinned-web-origin.md) | The pinned web origin: a name of each run under `reef.localhost`, pinned by its port | accepted |
+| [0095](0095-paired-devices.md) | Paired devices: a phone's token that only reads, at one address, from a code typed once | accepted |

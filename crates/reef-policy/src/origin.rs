@@ -75,6 +75,20 @@ impl Origin {
             .is_some_and(is_run_name)
     }
 
+    /// The host and, when it is not the scheme's own, the port: what a
+    /// request's `Host` holds at this origin.
+    pub fn authority(&self) -> &str {
+        self.0.split_once("://").map_or("", |(_, rest)| rest)
+    }
+
+    /// The DNS name.
+    pub fn host(&self) -> &str {
+        let authority = self.authority();
+        authority
+            .split_once(':')
+            .map_or(authority, |(host, _)| host)
+    }
+
     /// The origin's text.
     pub fn as_str(&self) -> &str {
         &self.0
@@ -128,6 +142,12 @@ mod tests {
         ] {
             assert_eq!(Origin::parse(text).map(|o| o.to_string()).unwrap(), text);
         }
+        let origin = Origin::parse("https://reef.example:8443").unwrap();
+        assert_eq!(origin.authority(), "reef.example:8443");
+        assert_eq!(origin.host(), "reef.example");
+        let origin = Origin::parse("https://reef.example").unwrap();
+        assert_eq!(origin.authority(), "reef.example");
+        assert_eq!(origin.host(), "reef.example");
     }
 
     #[test]

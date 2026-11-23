@@ -40,7 +40,9 @@ import {
   presenceFrame,
   settle,
 } from "../test/fakes";
+import { DEVICE_READS } from "../device";
 import { passkey } from "../test/identity-daemon";
+import { paired } from "../test/paired";
 import { CHANGE, COMMIT, proposal, ProposalDaemon, REPO, TREE } from "../test/proposal-daemon";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "../test/testing-library";
 import { installAuthenticator, removeAuthenticator } from "../test/webauthn";
@@ -336,6 +338,34 @@ describe("the proposal page", () => {
     expect(screen.getByText(/arsood has no passkey\./)).toBeTruthy();
     expect(screen.getByRole("link", { name: "Add one" }).getAttribute("href")).toBe("/passkeys");
     expect(button("Decline").disabled).toBe(false);
+  });
+
+  it("on a paired phone, offers no write and says why under the buttons", async () => {
+    paired();
+    installAuthenticator();
+    const daemon = daemonWithDiff();
+    daemon.comments = [
+      create(CommentSchema, {
+        id: "cmt_00000000000000h1",
+        changeId: CHANGE,
+        kind: CommentKind.HELP_REQUEST,
+        help: { state: HelpState.OPEN, question: "Keep the old parser?" },
+      }),
+    ];
+    await open(daemon);
+    expect(screen.getByText("Keep the old parser?")).toBeTruthy();
+    for (const name of ["Accept", "Decline"]) {
+      expect(button(name).disabled).toBe(true);
+      const why = button(name).getAttribute("aria-describedby") ?? "";
+      expect(document.getElementById(why)?.textContent).toBe(DEVICE_READS);
+    }
+    expect(screen.queryByRole("link", { name: "Comment" })).toBeNull();
+    expect(screen.queryByRole("textbox")).toBeNull();
+    await act(() => {
+      screen.getAllByRole("button", { name: /^Show / })[0]?.click();
+    });
+    await flush();
+    expect(screen.queryByRole("button", { name: /^Comment on .* line/ })).toBeNull();
   });
 
   it("declines with a reason, at the commit and state the page showed", async () => {

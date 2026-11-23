@@ -33,7 +33,7 @@ The window cannot be a page the app serves: the web listener accepts only its ow
 
 ## Consequences
 
-- R3.40's push sender keeps one number per endpoint and pushes items raised above it, linking `/repos/<repo>/items/<key>`.
+- R3.40's push sender keeps one number per endpoint and pushes items raised above it, linking `/repos/<repo>/items/<key>`. That is not the one mark per stream rejected above: a stream's frames can lag each other, and the board a sender reads cannot, since each repository's read numbers its raises before the board shows it.
 - A proposal rewritten while it waits for a sign-off (a rebase included) is news again.
 - The first connection to a repository announces nothing already waiting; the menu bar count shows it.
 - macOS pins an ad-hoc signed app's notification permission to its exact code: a rebuild or an update re-signed ad-hoc is refused ("not allowed") without asking. A signature with a team keeps it. Builds signed with a developer's Apple Development identity keep it across rebuilds; release builds need Developer ID (R4.17) before updates can keep it.
