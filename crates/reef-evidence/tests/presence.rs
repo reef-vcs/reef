@@ -712,6 +712,41 @@ fn user_verified_round_trips() {
     }
 }
 
+// #346: a certificate carries the origin its touch ran at, and its reader
+// accepts any port of the RP ID's host: which one counts is a policy's pin,
+// since whoever holds the authority's key can certify a touch at another.
+#[test]
+fn a_certificate_carries_its_origin_and_judges_no_port() {
+    // Chromium's own bytes name the port that recording ran at.
+    let recorded = vector("es256").json["origin"].as_str().unwrap().to_owned();
+    assert_eq!(chromium_evidence().origin(), recorded);
+    for origin in [
+        "http://localhost:49953",
+        "http://localhost",
+        "https://localhost",
+    ] {
+        for &algorithm in Algorithm::ALL {
+            let mut authenticator = Authenticator::new(algorithm);
+            let evidence = PresenceEvidence {
+                passkey: authenticator.passkey().clone(),
+                credential_id: authenticator.credential_id().to_vec(),
+                rp_id: RP.into(),
+                approves: approves(),
+                assertion: authenticator.assert(RP, origin, &challenge_for(&approves())),
+            };
+            assert_eq!(evidence.origin(), origin);
+            let envelope = certify(&authority_key(), &binding(evidence)).unwrap();
+            let read = check_certificate(&envelope.to_bytes(), &known).unwrap();
+            let read = read.binding.presence.evidence().unwrap().origin();
+            assert_eq!(read, origin, "{algorithm}");
+        }
+    }
+    // Client data that names no origin reads as none; no check passes it.
+    let mut unreadable = chromium_evidence();
+    unreadable.assertion.client_data_json = b"{}".to_vec();
+    assert_eq!(unreadable.origin(), "");
+}
+
 /// The user-verified certificate's statement as JSON.
 fn statement() -> Value {
     serde_json::from_slice(&binding(chromium_evidence()).payload().unwrap()).unwrap()

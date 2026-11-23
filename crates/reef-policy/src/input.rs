@@ -277,13 +277,16 @@ pub struct Key {
     pub session: String,
     /// `none` or `user_verified`, as the certificate says. A
     /// `user_verified` key meets a `presence` requirement only when
-    /// `passkey` is pinned for its identity in the policy's `[passkeys]`
-    /// ([`crate::Policy::presence`]).
+    /// `passkey` is pinned at `passkey_origin` for its identity in the
+    /// policy's `[passkeys]` ([`crate::Policy::presence`]).
     pub presence: String,
     /// The fingerprint of the passkey that verified the person (R3.43):
     /// the SHA-256 of its DER public key, as hex, from the certificate's
     /// presence evidence; empty without one.
     pub passkey: String,
+    /// The web origin that touch ran at (#346), from the same evidence:
+    /// `http://localhost:17333`. Empty without one.
+    pub passkey_origin: String,
     /// `client` or `daemon`.
     pub custody: String,
     /// The certifying authority's key id: the daemon's, or for a keyless

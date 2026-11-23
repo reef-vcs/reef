@@ -36,18 +36,20 @@ pub mod eval;
 pub mod format;
 pub mod glob;
 pub mod input;
+pub mod origin;
 pub mod schema;
 
 pub use conflict::ConflictDecision;
 pub use eval::{
     Decision, Evaluation, InputSummary, Need, Rejected, RuleKind, RuleResult, SignoffNeed, Status,
-    VerifiedSigner,
+    Unpinned, VerifiedSigner,
 };
 pub use format::{
     Checks, DEFAULT_ATTEMPTS, DEFAULT_TIER, Diagnostic, HistorySettings, LandingSettings, Message,
-    POLICY_FILES, Policy, Presence, Tier, TrailerSet, VERSION, valid_remote_name,
+    POLICY_FILES, Pin, Policy, Presence, Tier, TrailerSet, VERSION, valid_remote_name,
 };
 pub use input::{Batch, Case, ConflictInput, Input};
+pub use origin::Origin;
 
 /// Where a tree's policy file is: at its root.
 pub const POLICY_PATH: &str = "reef-policy.toml";
@@ -137,9 +139,12 @@ identities = ["{owner}"]
 
 # To make an owner's sign-off need a touch of a passkey, add
 # `presence = "user_verified"` to [owners] and pin the passkey here; the
-# Passkeys page of `reef ui` and `reef identity passkey list` print the line:
+# Passkeys page of `reef ui` and `reef identity passkey list` print the line.
+# Its touch counts only at that origin, the address `reef ui` opens:
 # [passkeys]
-# {owner} = ["<the passkey's fingerprint: 64 hex digits>"]
+# {owner} = [
+#   { fingerprint = "<64 hex digits>", origin = "http://localhost:17333" },
+# ]
 
 # Whose evidence counts: this machine's executor, signing for {owner}, and never
 # the change's own session or agent.

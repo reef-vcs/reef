@@ -1,6 +1,6 @@
 // `/approve/:id` (R3.43 decision 4): one sign-off a person approves with a
 // passkey touch. Everything the touch approves is on the page before the
-// button: the identity, the kind, result and target, the change and its
+// button: the identity, this page's address, the kind, result and target, the change and its
 // tree, who asked, and the time left. Nothing is approved on load; the only
 // way to approve is Approve, which needs the passkey.
 import { durationFromMs, timestampMs } from "@bufbuild/protobuf/wkt";
@@ -180,6 +180,8 @@ function Facts({
     <dl className="facts">
       <dt>Signs as</dt>
       <dd>{approval.identity}</dd>
+      <dt>At</dt>
+      <dd className="mono">{window.location.origin}</dd>
       <dt>Sign-off</dt>
       <dd>
         {approval.kind}, {approval.result}

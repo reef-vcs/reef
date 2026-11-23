@@ -284,9 +284,14 @@ message PolicyVerifiedSigner {
   string identity = 2;
   // The passkey's fingerprint: the SHA-256 of its public key, hex.
   string passkey = 3;
-  // `[passkeys]` pins the passkey for the identity, so the key counts as
-  // `user_verified`; otherwise it counts as `none`.
+  // `[passkeys]` pins the passkey, at `origin`, for the identity, so the
+  // key counts as `user_verified`; otherwise it counts as `none`.
   bool pinned = 4;
+  // The web origin its touch ran at (#346).
+  string origin = 5;
+  // Why it is not pinned: `passkey` (the passkey is not pinned for the
+  // identity) or `origin` (it is, at other origins); empty when it is.
+  string unpinned = 6;
 }
 
 // The change to judge and the policy to judge it by.

@@ -79,6 +79,18 @@ fn authority_of(session: &CreateWebSessionResponse) -> String {
         .to_owned()
 }
 
+/// Asserts that `session_url` opens `page` with a `launch` of its own, which
+/// no cache holds (#346), and the session in the fragment.
+fn assert_launch(session_url: &str, page: &str) {
+    let launch = session_url
+        .strip_prefix(page)
+        .and_then(|rest| rest.strip_prefix("?launch="))
+        .and_then(|rest| rest.split_once("#session="))
+        .map_or_else(|| panic!("no launch at {page}"), |(launch, _)| launch);
+    assert_eq!(launch.len(), 16, "{launch}");
+    assert!(launch.bytes().all(|b| b.is_ascii_hexdigit()), "{launch}");
+}
+
 /// The port of a session's URL.
 fn port_of(session: &CreateWebSessionResponse) -> u16 {
     authority_of(session)
@@ -289,7 +301,7 @@ async fn session_binds_lazily() {
     assert!(first.url.starts_with("http://localhost:"), "{}", first.url);
     assert_ne!(port_of(&first), 0);
     let token = token_of(&first);
-    assert_eq!(first.session_url, format!("{}#session={token}", first.url));
+    assert_launch(&first.session_url, &first.url);
     assert_eq!(token.len(), 43);
     assert!(
         token
@@ -348,15 +360,20 @@ async fn assets_are_public_and_strict() {
             .unwrap()
             .starts_with("text/html")
     );
-    assert_eq!(index.body().as_ref(), reef_web::index().bytes);
+    let html = std::str::from_utf8(index.body()).unwrap().to_owned();
     assert_eq!(index.headers()[header::CACHE_CONTROL], "no-store");
     for name in HEADERS {
         assert!(index.headers().contains_key(*name), "{name}");
     }
     let csp = index.headers()["content-security-policy"].to_str().unwrap();
     assert!(csp.contains("script-src 'self'") && !csp.contains("unsafe"));
+    assert!(csp.contains("worker-src 'none'"));
     let hashed = reef_web::all().iter().find(|a| a.immutable).unwrap();
-    let asset = get(&at, &format!("/{}", hashed.path)).await;
+    // #346: under this run's prefix, which the page names, and nowhere else.
+    let prefix = html.split("=\"/a/").nth(1).unwrap().get(..16).unwrap();
+    let bare = get(&at, &format!("/{}", hashed.path)).await;
+    assert_eq!(bare.status(), StatusCode::NOT_FOUND);
+    let asset = get(&at, &format!("/a/{prefix}/{}", hashed.path)).await;
     assert_eq!(asset.status(), StatusCode::OK);
     assert_eq!(asset.headers()[header::CONTENT_TYPE], hashed.content_type);
     assert!(
@@ -367,7 +384,7 @@ async fn assets_are_public_and_strict() {
     );
     let route = get(&at, "/repos/abc/smartlog").await;
     assert_eq!(route.status(), StatusCode::OK);
-    assert_eq!(route.body().as_ref(), reef_web::index().bytes);
+    assert_eq!(route.body(), index.body());
     assert_eq!(get(&at, "/nope.js").await.status(), StatusCode::NOT_FOUND);
     let head = send(&at, Method::HEAD, "/", &[], Vec::new()).await;
     assert_eq!(head.status(), StatusCode::OK);
@@ -543,8 +560,12 @@ async fn session_urls_open_a_path() {
         .await
         .unwrap();
     let (before, token) = page.session_url.split_once("#session=").unwrap();
-    assert_eq!(before, format!("{}approve/apr_0123456789abcdef", page.url));
+    assert_launch(
+        &page.session_url,
+        &format!("{}approve/apr_0123456789abcdef", page.url),
+    );
     assert_eq!(token.len(), 43);
+    assert!(before.contains("?launch="));
     for bad in ["approve", "//evil.example", "/a/../b", "/a?x"] {
         let error = daemon
             .client
@@ -1020,6 +1041,188 @@ async fn bind_failure_is_reported() {
     let web = session(&daemon.client, false).await;
     let port = address.rsplit(':').next().unwrap();
     assert_eq!(web.url, format!("http://localhost:{port}/"));
+}
+
+// #346: a process that listens on every address at the port is seen before
+// the bind, which on macOS succeeds under it on both loopback families.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fixed_port_answered_on_every_address_is_refused() {
+    let mut wildcards = vec!["0.0.0.0"];
+    if has_ipv6_loopback() {
+        wildcards.push("[::]");
+    }
+    for wildcard in wildcards {
+        let held = std::net::TcpListener::bind(format!("{wildcard}:0")).unwrap();
+        let port = held.local_addr().unwrap().port();
+        let daemon = TestDaemon::start_with(|config| {
+            config.file.ui.listen = format!("127.0.0.1:{port}");
+        })
+        .await;
+        let error = daemon
+            .client
+            .create_web_session(false, "")
+            .await
+            .unwrap_err();
+        assert_eq!(
+            reason(status_of(&error)),
+            "WEB_UI_UNAVAILABLE",
+            "{wildcard}:{port}"
+        );
+        assert!(!daemon.handle.state().web.is_bound());
+        drop(held);
+        assert_eq!(port_of(&session(&daemon.client, false).await), port);
+        daemon.stop().await;
+    }
+}
+
+// #346: with a fixed port, a launch file opens a page on a listener whose
+// port the kernel picked, which asks for the one reset the file names and
+// then goes to the session. Nothing else is served there, and a reset is
+// answered once, and to no one who was not given its id.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_launch_clears_the_address_first() {
+    let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = held.local_addr().unwrap().port();
+    drop(held);
+    let daemon = TestDaemon::start_with(|config| {
+        config.file.ui.listen = format!("127.0.0.1:{port}");
+    })
+    .await;
+    let web = session(&daemon.client, true).await;
+    let at = authority_of(&web);
+    let file = std::fs::read_to_string(&web.launch_path).unwrap();
+    let url = file
+        .split("url=")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .unwrap()
+        .replace("&amp;", "&");
+    let (launches, fragment) = url.split_once("/#reset=").unwrap();
+    let (id, to) = fragment.split_once("&to=").unwrap();
+    assert_eq!(
+        format!("http://{at}{to}"),
+        web.session_url,
+        "it goes on to the session"
+    );
+    let launches = launches.strip_prefix("http://").unwrap();
+    assert_ne!(launches, at);
+
+    let page = get(launches, "/").await;
+    assert_eq!(page.status(), StatusCode::OK);
+    let html = std::str::from_utf8(page.body()).unwrap();
+    assert!(html.contains(&format!("content=\"http://{at}\"")), "{html}");
+    let csp = page.headers()["content-security-policy"].to_str().unwrap();
+    assert!(csp.contains(&format!("connect-src http://{at};")), "{csp}");
+    for name in HEADERS {
+        assert!(page.headers().contains_key(*name), "{name}");
+    }
+    assert_eq!(get(launches, "/launch.js").await.status(), StatusCode::OK);
+    for path in ["/repos/abc", "/assets/x.js", "/reset/x"] {
+        let response = get(launches, path).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+    }
+    let api = "/reef.api.v1.DaemonService/GetDaemonStatus";
+    let bearer = format!("Bearer {}", token_of(&web));
+    let refused = send(
+        launches,
+        Method::POST,
+        api,
+        &[
+            ("content-type", "application/grpc-web+proto"),
+            ("authorization", &bearer),
+        ],
+        vec![0, 0, 0, 0, 0],
+    )
+    .await;
+    assert_eq!(refused.status(), StatusCode::METHOD_NOT_ALLOWED);
+
+    let unknown = get(&at, &format!("/reset/{}", "0".repeat(32))).await;
+    assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+    assert!(!unknown.headers().contains_key("clear-site-data"));
+    let cleared = get(&at, &format!("/reset/{id}")).await;
+    assert_eq!(cleared.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        cleared.headers()["clear-site-data"],
+        "\"cache\", \"storage\""
+    );
+    assert_eq!(
+        cleared.headers()["cross-origin-resource-policy"],
+        "same-site"
+    );
+    assert_eq!(cleared.headers()[header::CACHE_CONTROL], "no-store");
+    let again = get(&at, &format!("/reset/{id}")).await;
+    assert_eq!(again.status(), StatusCode::NOT_FOUND);
+    daemon.stop().await;
+}
+
+// #346: a browser that holds a service worker at this origin asks for its
+// script. Reef registers none, so another process left it: the answer
+// unregisters it and every session ends. Any other host is refused first.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_service_worker_someone_left_is_removed() {
+    let daemon = TestDaemon::start().await;
+    let web = session(&daemon.client, false).await;
+    let at = authority_of(&web);
+    let launched = session(&daemon.client, true).await;
+    let (service, origin) = web_pair(&web, &token_of(&web));
+    let mut stream = PresenceServiceClient::with_origin(service, origin)
+        .subscribe_presence(SubscribePresenceRequest::default())
+        .await
+        .unwrap()
+        .into_inner();
+    stream.message().await.unwrap();
+    for path in ["/sw.js", "/repos/abc", "/assets/x.js"] {
+        let response = send(
+            &at,
+            Method::GET,
+            path,
+            &[("service-worker", "script")],
+            vec![],
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "text/javascript; charset=utf-8"
+        );
+        for name in HEADERS {
+            assert!(response.headers().contains_key(*name), "{name}");
+        }
+        let body = std::str::from_utf8(response.body()).unwrap();
+        assert!(body.contains("registration.unregister()"), "{body}");
+    }
+    for ended in [&web, &launched] {
+        let refused = daemon_service(&web, Some(&token_of(ended)))
+            .get_daemon_status(GetDaemonStatusRequest {
+                skip_backends: true,
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(reason(&refused), "WEB_SESSION_INVALID");
+    }
+    assert!(!Path::new(&launched.launch_path).exists());
+    // A stream open in an ended session ends with it.
+    let ended = async { while let Ok(Some(_)) = stream.message().await {} };
+    tokio::time::timeout(5 * SECOND, ended)
+        .await
+        .expect("the stream outlived its session");
+    let alive = session(&daemon.client, false).await;
+    let elsewhere = send(
+        &at,
+        Method::GET,
+        "/sw.js",
+        &[("service-worker", "script"), ("host", "evil.example")],
+        vec![],
+    )
+    .await;
+    assert_eq!(elsewhere.status(), StatusCode::MISDIRECTED_REQUEST);
+    daemon_service(&alive, Some(&token_of(&alive)))
+        .get_daemon_status(GetDaemonStatusRequest {
+            skip_backends: true,
+        })
+        .await
+        .unwrap();
+    daemon.stop().await;
 }
 
 // R3.43 11: a fixed port someone holds on `::1` fails the start: serving

@@ -143,9 +143,9 @@ The certificate (the workflow and repository, or the email) and the binding stat
 
 ## Passkeys and verified presence
 
-On one machine, an agent running as you can do anything you can on the socket, including getting a key declared `human` for your identity. A passkey is the one thing it cannot use alone: every assertion needs you at the authenticator, with a touch and a fingerprint, a face or a PIN (WebAuthn's user verification). Reef uses your passkey to approve one sign-off at a time, and a repository's policy counts the approval only for passkeys it pins. [ADR 0085](adr/0085-verified-human-presence.md) records why.
+On one machine, an agent running as you can do anything you can on the socket, including getting a key declared `human` for your identity. A passkey is the one thing it cannot use alone: every assertion needs you at the authenticator, with a touch and a fingerprint, a face or a PIN (WebAuthn's user verification). Reef uses your passkey to approve one sign-off at a time, and a repository's policy counts the approval only for passkeys it pins, touched at the address it pins them at. [ADR 0085](adr/0085-verified-human-presence.md) records why.
 
-Passkeys work in the local web UI only. WebAuthn needs a browser, and browsers refuse it at an IP-literal origin, so `reef ui` serves `http://localhost:<port>`, and the passkeys' RP ID is `localhost`. Passkeys through the remote listener are R3.40's.
+Passkeys work in the local web UI only. WebAuthn needs a browser, and browsers refuse it at an IP-literal origin, so `reef ui` serves `http://localhost:<port>`, and the passkeys' RP ID is `localhost`. The port is 17333 in the default state directory, and the kernel's choice in any other; `[ui] listen` sets it. Once a passkey is registered, a daemon with a fixed port takes it at its start and holds it, so no other process serves that address meanwhile; while another process has it, the daemon keeps trying, and `reef daemon status` says so ([ADR 0094](adr/0094-the-pinned-web-origin.md)). Passkeys through the remote listener are R3.40's.
 
 ### Adding and removing passkeys
 
@@ -173,10 +173,12 @@ A passkey counts for nothing in a repository until that repository's policy pins
 
 ```toml
 [passkeys]
-alice = ["3c9e0d5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f"]
+alice = [
+  { fingerprint = "3c9e0d5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f", origin = "http://localhost:17333" },
+]
 ```
 
-On the Passkeys page, **Confirm a passkey to pin** asks your authenticator for a touch, checks it against the key Reef holds, and **Copy policy snippet** copies the line for the passkeys it confirmed, with each fingerprint computed from the key the touch verified. This holds only on the daemon's own page: open it yourself, with `reef ui` or `reef identity passkey add` from your own terminal. A page on another `localhost` port can look the same and show an agent's fingerprint, and with the default `[ui] listen` port 0 the port changes at every start, so the address bar gives no cue (S-255). `reef identity passkey list` prints the line with every live passkey. A change to the policy file needs `[owners]`' sign-off; with `presence = "user_verified"` in `[owners]`, that takes an owner's pinned passkey, so an agent cannot change the pins. [docs/policy.md](policy.md#pinned-passkeys) has the rules.
+On the Passkeys page, **Confirm a passkey to pin** asks your authenticator for a touch, checks it against the key Reef holds, and **Copy policy snippet** copies the line for the passkeys it confirmed, with each fingerprint computed from the key the touch verified. This holds only on the daemon's own page: open it yourself, with `reef ui` or `reef identity passkey add` from your own terminal, and check the address bar. A look-alike page on another port can name the right origin and show an agent's fingerprint, so compare the fingerprint with `reef identity passkey list`, which prints the line with every live passkey (S-250). With port 0, neither prints a line: an address that changes at every start cannot be pinned. A change to the policy file needs `[owners]`' sign-off; with `presence = "user_verified"` in `[owners]`, that takes an owner's pinned passkey, so an agent cannot change the pins. [docs/policy.md](policy.md#pinned-passkeys) has the rules.
 
 The web UI lands a change only with a pinned passkey's sign-off: **Accept** on a proposal page lands on a destination whose policy pins the passkey you touch, and is refused there until one is pinned (`VERIFIED_SIGNOFF_REQUIRED`, `missing` `pin`), whatever else the policy asks ([proposals](proposals.md#reviewing-in-the-web-ui)). Pinning is how a destination takes landings from the web UI at all.
 
@@ -194,7 +196,7 @@ reef evidence add --kind signoff --result pass --actor human --verified -r @-
 
 `--verified` needs `--actor human` and takes any kind, result and target. The command builds the statement over the revision's tree and a fresh key, and asks the daemon for an approval. It then opens the approval page, `/approve/<id>`, in your browser through a new web UI session, as `reef ui` opens the app; `--print-url` prints the URL instead, for SSH. It waits up to `--timeout` (default 2 minutes) for you to approve or decline. When you approve, it signs the statement with the key the approval certified and adds the sign-off, whose presence is `user_verified`. A decline, the approval's expiry, an approval the daemon no longer holds (a restart drops pending ones) or the timeout ends the command with exit code 5 and the reason. It asks nothing on the terminal and runs no login: the approval happens in the browser.
 
-The approval page names, before its buttons, the identity you sign as, the kind, result and target, the change with its description and author, the repository, its tree (the sign-off covers the whole tree, changes below that have not landed included), who asked (a command, with the agent name and workspace it declares, or a web UI session), and the time left. **Approve** asks for your passkey; **Decline** ends the approval. The page approves nothing when it loads. Your platform's passkey prompt shows only "localhost", so the page is where you read what you approve.
+The approval page names, before its buttons, the identity you sign as, the kind, result and target, the change with its description and author, the repository, its tree (the sign-off covers the whole tree, changes below that have not landed included), who asked (a command, with the agent name and workspace it declares, or a web UI session), and the time left. **Approve** asks for your passkey; **Decline** ends the approval. The page approves nothing when it loads. The page names its own address too: check that the address bar agrees, since your platform's passkey prompt shows only "localhost" and the page is where you read what you approve.
 
 Over the API, the CLI's steps are:
 
@@ -236,7 +238,7 @@ A `user_verified` certificate's predicate carries the assertion beside `presence
 
 `presenceEvidence` is required exactly when `presence` is `user_verified`, and refused otherwise; `user_verified` is certified for actor `human` only. After the authority's signature, a verifier derives the challenge from the certificate's own fields and checks the assertion:
 
-- `clientDataJSON`'s `type` is `webauthn.get`, its `challenge` is the derived one, and its `origin`'s host is `rpId` (over `http` for `localhost` only), not from a cross-origin frame;
+- `clientDataJSON`'s `type` is `webauthn.get`, its `challenge` is the derived one, and its `origin`'s host is `rpId` (over `http` for `localhost` only), not from a cross-origin frame (which origin it was is the policy's to judge: a pin names the whole of it);
 - `authenticatorData` starts with the SHA-256 of `rpId`, with the user-present and user-verified flags set;
 - `signature` verifies over `authenticatorData` and the SHA-256 of `clientDataJSON`, with `publicKey` by `algorithm`;
 - `passkey` is the SHA-256 of `publicKey`.
@@ -245,7 +247,7 @@ A `user_verified` certificate's predicate carries the assertion beside `presence
 
 ## What a verifier sees
 
-Every evidence read reports `identity` beside `signature`: the certified key (identity, kind, actor, agent, session, presence, issuer, window; for a `user_verified` key also its passkey, what it approved, the approval and the web UI session) and a status, judged at the time the daemon first witnessed the evidence (its `added_at`), never at a time the claim states:
+Every evidence read reports `identity` beside `signature`: the certified key (identity, kind, actor, agent, session, presence, issuer, window; for a `user_verified` key also its passkey, the origin its touch ran at, what it approved, the approval and the web UI session) and a status, judged at the time the daemon first witnessed the evidence (its `added_at`), never at a time the claim states:
 
 | Status | Meaning |
 | --- | --- |
@@ -257,7 +259,7 @@ Every evidence read reports `identity` beside `signature`: the certified key (id
 
 A keyless key reports `issuer_kind: sigstore` and `sigstore` (the OIDC issuer and subject, the match, the log index, Fulcio's CI claims). A revocation made after the evidence was witnessed is still reported, beside `bound`. Evidence whose own signature does not verify reads `invalid` with no key: its key id is not believed. A key whose certificate does not verify reports only its id and the daemon's records of it, and never matches an identity filter. The same envelope added to a second repository after its key expired reads `expired` there: each repository's row has its own `added_at`.
 
-A `user_verified` key's presence is printed with its passkey's label. `reef evidence show` also says whether the policy at `trunk()` pins it: `presence user_verified (passkey "MacBook Touch ID", pinned here)`, or `(passkey "MacBook Touch ID", not pinned by this repository's policy)`. With no policy at `trunk()`, and in `reef identity session show`, the line names the passkey only. `EvaluatePolicy` reports the same per signer, and `reef policy eval` prints it. A read that finds the key on evidence other than the statement and change it approved, which only a database changed behind the daemon can hold, reports that object's presence as `none`.
+A `user_verified` key's presence is printed with its passkey's label and the origin its touch ran at. `reef evidence show` also says whether the policy at `trunk()` pins them: `presence user_verified (passkey "MacBook Touch ID" at http://localhost:17333, pinned here)`, `(… at http://localhost:17333, not pinned by this repository's policy)`, or `(… at http://localhost:49953, an origin this repository's policy does not pin)`. With no policy at `trunk()`, and in `reef identity session show`, the line names the passkey and the origin only. `EvaluatePolicy` reports the same per signer, and `reef policy eval` prints it. A read that finds the key on evidence other than the statement and change it approved, which only a database changed behind the daemon can hold, reports that object's presence as `none`.
 
 ## Revocation
 
@@ -276,7 +278,7 @@ Revoking a session covers every key in it and ends its renewal; revoking an iden
 On one machine, anything running as the daemon's user can do whatever the user can on the socket, including getting a key declared `human` for the user's identity, and can read the authority's key file. What an identity tells apart on its own: other local users, remote callers (whose linked token decides the identity), and CI, whose keys need its token. Presence says more about a person:
 
 - **`presence: none`** means the daemon's user, or something running as that user, asked for the key. Its `human` is a declaration, and `reef evidence show` prints it as "not verified".
-- **`presence: user_verified` with a pinned passkey** means that a passkey the repository's policy pins for the identity verified a person (a touch with a fingerprint, a face or a PIN) for this one statement about this one change, within the 2 minutes the approval waited. The certificate carries the assertion and the passkey's public key, so the pin, not the daemon's database or the authority key, decides whose passkey it was. An agent cannot produce it alone: it would need the person's authenticator.
-- **`presence: user_verified` with a passkey the policy does not pin** counts as `none` for that policy. Only the authority says the passkey is the identity's, and anything that can read the authority's key file, or that registered the identity's first passkey before the person did, could have made that true.
+- **`presence: user_verified` with a pinned passkey** means that a passkey the repository's policy pins for the identity, at the origin the pin names, verified a person (a touch with a fingerprint, a face or a PIN) for this one statement about this one change, within the 2 minutes the approval waited. The certificate carries the assertion and the passkey's public key, so the pin, not the daemon's database or the authority key, decides whose passkey it was. An agent cannot produce it alone: it would need the person's authenticator, and a touch at the pinned address, which code running as the person gets only by taking the port from the daemon or controlling the browser (S-274).
+- **`presence: user_verified` with a passkey the policy does not pin, or touched at an origin it does not pin,** counts as `none` for that policy. Only the authority says the passkey is the identity's, and anything that can read the authority's key file, or that registered the identity's first passkey before the person did, could have made that true.
 
 A pinned `user_verified` sign-off does not prove that the person read what they approved. An agent can start an approval when the person expects one and hope for a touch. The approval page names the identity, the change, its tree, the kind, the result and who asked; read it before you touch, and decline an approval you did not start.

@@ -3,7 +3,7 @@
 - Status: accepted
 - Date: 2026-11-08
 - Ticket: R3.07
-- Amended by: [0066](0066-sigstore-keyless-session-keys.md) (attestor sets gain `issuer_kinds`; the input's key gains `issuer_kind`, `oidc_issuer` and `oidc_subject`), [0085](0085-verified-human-presence.md) (`[passkeys]` pins passkeys by identity; a key meets `presence = "user_verified"` only with a pinned passkey, and every rule, CEL's included, reads that effective presence; the input's key gains `passkey`)
+- Amended by: [0066](0066-sigstore-keyless-session-keys.md) (attestor sets gain `issuer_kinds`; the input's key gains `issuer_kind`, `oidc_issuer` and `oidc_subject`), [0085](0085-verified-human-presence.md) (`[passkeys]` pins passkeys by identity; a key meets `presence = "user_verified"` only with a pinned passkey, and every rule, CEL's included, reads that effective presence; the input's key gains `passkey`), [0094](0094-the-pinned-web-origin.md) (`[passkeys]` pins a passkey at an origin)
 
 ## Context
 

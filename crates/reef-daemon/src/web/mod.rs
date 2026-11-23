@@ -1,11 +1,18 @@
 //! The web UI's loopback listener (R2.18, ADR 0047).
 //!
 //! The first `CreateWebSession` binds `127.0.0.1` and `[::1]` on one port
-//! (`[ui] listen`'s, kernel-chosen by default) and serves the embedded app
-//! and the read side of the API over gRPC-web as `http://localhost:<port>`,
-//! behind `gate::WebGateLayer`. A daemon whose user never runs `reef ui`
-//! opens no TCP port. Once bound, the listener stays until the daemon
-//! stops: a tab's origin is its port.
+//! (`[ui] listen`'s) and serves the embedded app and the read side of the
+//! API over gRPC-web as `http://localhost:<port>`, behind
+//! `gate::WebGateLayer`. A daemon whose user never runs `reef ui` opens no
+//! TCP port. Once bound, the listener stays until the daemon stops: a tab's
+//! origin is its port.
+//!
+//! A policy's `[passkeys]` pins that origin (#346, ADR 0094), so the port
+//! does not change between runs of a daemon in the default state directory,
+//! and once a passkey is registered the daemon holds it from its start
+//! (`WebUi::hold`): no other process serves the pinned origin while the
+//! daemon runs. A port another process holds is an error and never
+//! replaced by another, which would teach the person that it varies.
 //!
 //! Sessions (`session`) are bearer tokens minted by `CreateWebSession`
 //! over the socket, kept as digests, never persisted, so a daemon restart
@@ -18,6 +25,7 @@
 
 pub(crate) mod assets;
 pub(crate) mod body;
+pub(crate) mod clear;
 pub(crate) mod gate;
 mod launch;
 pub(crate) mod rules;
@@ -28,14 +36,16 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::task::{Context, Poll, ready};
 use std::time::{Duration, Instant};
 
 use futures::Stream;
 use futures::stream::SelectAll;
 use nix::errno::Errno;
-use reef_api::v1::CreateWebSessionResponse;
+use rand::RngExt as _;
+use reef_api::v1::{CreateWebSessionResponse, WebUiState, WebUiStatus};
+use reef_lib::error::ErrorChain;
 use reef_lib::error::{Classify, ErrorKind};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
@@ -160,7 +170,8 @@ impl Advise for WebError {
                 "This reef-daemon was built without the web UI. Install a release (https://github.com/reef-vcs/reef/releases, `install.sh`, Homebrew), or run `just web-build` before `cargo build` in a checkout, then restart the daemon.",
             )),
             Self::Unavailable { address, .. } => Some(Advice::hint(format!(
-                "Another process holds `{address}`. Free it, or set `[ui] listen = \"127.0.0.1:0\"` for a free port, restart the daemon, and run `reef ui` again."
+                "Another process holds `{address}`: `lsof -nP -iTCP:{} -sTCP:LISTEN` names it. If it is not a daemon of yours, do not touch a passkey on any page at that address. Stop it, run `reef ui` again and, since it may have left a page of its own in your browser, clear the browser's data for that address. Or move Reef: set another port in `[ui] listen`, restart the daemon, and pin the new address in `[passkeys]`.",
+                address.rsplit(':').next().unwrap_or_default()
             ))),
             Self::SessionInvalid => Some(Advice::run(
                 "This page's session ended (the daemon restarted, or it went unused for a day). Run `reef ui` in a terminal.",
@@ -199,6 +210,8 @@ impl Advise for WebError {
 struct Bound {
     /// `http://<authority>/`.
     url: String,
+    /// The launch listener's URL, with a fixed port (`clear`).
+    launches: Option<String>,
 }
 
 /// Who called through the web listener (R3.43): the gate puts it in every
@@ -217,7 +230,18 @@ pub struct WebUi {
     /// `http://localhost:<port>`, once bound: the one origin a passkey
     /// ceremony is accepted from.
     origin: OnceLock<String>,
+    /// Why the last bind failed, until one succeeds.
+    problem: Mutex<Option<String>>,
+    assets: Arc<assets::Assets>,
+    resets: Arc<clear::Resets>,
 }
+
+/// How long [`WebUi::hold`] waits after its first failed bind, doubled after
+/// each up to [`HOLD_RETRY_MAX`].
+const HOLD_RETRY_FIRST: Duration = Duration::from_millis(250);
+
+/// The longest [`WebUi::hold`] waits between binds.
+const HOLD_RETRY_MAX: Duration = Duration::from_secs(5);
 
 impl WebUi {
     pub(crate) fn new(limits: Limits) -> WebUi {
@@ -225,6 +249,101 @@ impl WebUi {
             bound: tokio::sync::Mutex::new(None),
             sessions: Arc::new(Sessions::new(limits)),
             origin: OnceLock::new(),
+            problem: Mutex::new(None),
+            assets: Arc::new(assets::Assets::new()),
+            resets: Arc::default(),
+        }
+    }
+
+    /// This run's assets.
+    pub(crate) fn assets(&self) -> Arc<assets::Assets> {
+        Arc::clone(&self.assets)
+    }
+
+    /// The bound listener's URL and its launch listener's, binding them if
+    /// needed.
+    async fn ensure_bound(state: &Arc<AppState>) -> Result<(String, Option<String>), WebError> {
+        let web = &state.web;
+        let mut bound = web.bound.lock().await;
+        if let Some(bound) = &*bound {
+            return Ok((bound.url.clone(), bound.launches.clone()));
+        }
+        let attempt = bind(state).await;
+        *web.problem.lock().unwrap_or_else(PoisonError::into_inner) = attempt
+            .as_ref()
+            .err()
+            .map(|error| ErrorChain(error).to_string());
+        let bound = bound.insert(attempt?);
+        Ok((bound.url.clone(), bound.launches.clone()))
+    }
+
+    /// Binds the listener at the daemon's start, when its port is fixed and
+    /// a passkey is registered (#346): a policy may pin the origin, so no
+    /// other process may serve it while the daemon runs. A failure is logged
+    /// once, shows in the daemon's status, and is tried again until the
+    /// port is the daemon's, so a process that lets it go leaves it to no
+    /// one else.
+    pub(crate) async fn hold(state: &Arc<AppState>) {
+        let ui = &state.config.file.ui;
+        if !ui.enabled || !state.config.web.assets_built || !ui.listen_port().is_ok_and(|p| p != 0)
+        {
+            return;
+        }
+        match state.db.passkeys(None, false) {
+            Ok(passkeys) if passkeys.is_empty() => return,
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(%error, "cannot read the passkeys; the web UI's port is not held");
+                return;
+            }
+        }
+        let mut wait = HOLD_RETRY_FIRST;
+        while let Err(error) = WebUi::ensure_bound(state).await {
+            if wait == HOLD_RETRY_FIRST {
+                tracing::warn!(
+                    error = %ErrorChain(&error),
+                    "the web UI's port is not this daemon's: do not touch a passkey on a page at its address; trying until it is"
+                );
+            }
+            tokio::select! {
+                () = tokio::time::sleep(wait) => {}
+                () = state.shutdown.cancelled() => return,
+            }
+            wait = (wait * 2).min(HOLD_RETRY_MAX);
+        }
+    }
+
+    /// The listener's state, as `GetDaemonStatus` reports it.
+    pub(crate) fn status(state: &AppState) -> WebUiStatus {
+        let ui = &state.config.file.ui;
+        let port = ui.listen_port().unwrap_or_default();
+        let web = &state.web;
+        let problem = web
+            .problem
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let listener = if !ui.enabled {
+            WebUiState::Disabled
+        } else if !state.config.web.assets_built {
+            WebUiState::NotBuilt
+        } else if web.origin().is_some() {
+            WebUiState::Bound
+        } else if problem.is_some() {
+            WebUiState::Unavailable
+        } else {
+            WebUiState::Unbound
+        };
+        let origin = match web.origin() {
+            Some(origin) => origin.to_owned(),
+            None if port != 0 => format!("http://localhost:{port}"),
+            None => String::new(),
+        };
+        WebUiStatus {
+            state: listener.into(),
+            origin,
+            fixed: port != 0,
+            problem: problem.unwrap_or_default(),
         }
     }
 
@@ -253,23 +372,32 @@ impl WebUi {
             return Err(WebError::NotBuilt);
         }
         let web = &state.web;
-        let url = {
-            let mut bound = web.bound.lock().await;
-            if bound.is_none() {
-                *bound = Some(bind(state).await?);
-            }
-            bound.as_ref().map(|b| b.url.clone()).unwrap_or_default()
-        };
+        let (url, launches) = WebUi::ensure_bound(state).await?;
         let launch_dir = &state.config.paths.ui;
         let (token, ended) = web.sessions.mint();
         for path in ended {
             launch::remove(&path);
         }
         let page = path.strip_prefix('/').unwrap_or_default();
-        let session_url = format!("{url}{page}#session={token}");
+        // A URL few caches hold: at a port that does not change, another
+        // process that held it may have had the browser cache its own page.
+        // Chromium's cache can be told to ignore the query, which a launch
+        // file's reset clears (`clear`).
+        let launch = rand::rng().random::<u64>();
+        let session_path = format!("{page}?launch={launch:016x}#session={token}");
+        let session_url = format!("{url}{session_path}");
         let launch_path = if launch_file {
             let dir = launch_dir.clone();
-            let page = session_url.clone();
+            let page = match launches {
+                Some(launches) => {
+                    let id = web.resets.mint();
+                    format!(
+                        "{launches}{}",
+                        clear::fragment(&id, &format!("/{session_path}"))
+                    )
+                }
+                None => session_url.clone(),
+            };
             let path = tokio::task::spawn_blocking(move || launch::write(&dir, &page))
                 .await
                 .map_err(io::Error::other)
@@ -332,13 +460,38 @@ async fn bind(state: &Arc<AppState>) -> Result<Bound, WebError> {
         address: ui.listen.clone(),
         source: io::Error::other(reason),
     })?;
+    if port != 0 {
+        refuse_answering(port).await?;
+    }
     let loopback = Loopback::bind(port).await?;
+    // Both before either serves, so a failed launch listener binds nothing.
+    let launches = match port {
+        0 => None,
+        _ => Some(Loopback::bind(0).await?),
+    };
+    let url = format!("http://localhost:{}/", loopback.port);
+    let origin = url.trim_end_matches('/').to_owned();
+    let _ = state.web.origin.set(origin.clone());
+    serve(state, loopback, None, "web listener");
+    let launches = launches.map(|loopback| {
+        let url = format!("http://localhost:{}/", loopback.port);
+        serve(state, loopback, Some(origin), "web launch listener");
+        url
+    });
+    Ok(Bound { url, launches })
+}
+
+/// Serves `loopback` until the daemon stops: the web UI, or launch pages for
+/// the web UI at `launches`.
+fn serve(state: &Arc<AppState>, loopback: Loopback, launches: Option<String>, name: &'static str) {
     let authority = format!("localhost:{}", loopback.port);
-    let _ = state.web.origin.set(format!("http://{authority}"));
     let gate = Arc::new(gate::Gate {
         origin: format!("http://{authority}"),
         authority: authority.clone(),
         sessions: Arc::clone(&state.web.sessions),
+        assets: state.web.assets(),
+        resets: Arc::clone(&state.web.resets),
+        launches,
     });
     let ipv6 = loopback.v6.is_some();
     let accepting: SelectAll<_> = std::iter::once(loopback.v4)
@@ -350,21 +503,43 @@ async fn bind(state: &Arc<AppState>) -> Result<Bound, WebError> {
         crate::server::web_router(state, gate)
             .serve_with_incoming_shutdown(incoming, state.shutdown.clone().cancelled_owned()),
     );
-    state.hooks.add("web listener", move || {
+    state.hooks.add(name, move || {
         Box::pin(async move {
             let mut server = server;
             match tokio::time::timeout(SHUTDOWN_GRACE, &mut server).await {
                 Ok(Ok(Ok(()))) => {}
-                Ok(Ok(Err(error))) => tracing::warn!(%error, "the web listener failed"),
-                Ok(Err(error)) => tracing::warn!(%error, "the web listener panicked"),
+                Ok(Ok(Err(error))) => tracing::warn!(%error, "the {name} failed"),
+                Ok(Err(error)) => tracing::warn!(%error, "the {name} panicked"),
                 Err(_) => server.abort(),
             }
         })
     });
-    tracing::info!(address = %authority, ipv6, "web UI listening");
-    Ok(Bound {
-        url: format!("http://{authority}/"),
-    })
+    tracing::info!(address = %authority, ipv6, listener = name, "web UI listening");
+}
+
+/// How long [`refuse_answering`] waits for an answer on each family.
+const PROBE: Duration = Duration::from_millis(250);
+
+/// Refuses a fixed port another process already answers on. The bind alone
+/// does not see one that listens on every address: on macOS both binds
+/// succeed under it, and it serves the origin once the daemon stops.
+async fn refuse_answering(port: u16) -> Result<(), WebError> {
+    for addr in [
+        SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+        SocketAddr::from((Ipv6Addr::LOCALHOST, port)),
+    ] {
+        if let Ok(Ok(stream)) = tokio::time::timeout(PROBE, TcpStream::connect(addr)).await
+            // A connect from the port to itself, when the kernel picks it as
+            // the source: nobody listens.
+            && stream.local_addr().ok() != stream.peer_addr().ok()
+        {
+            return Err(WebError::Unavailable {
+                address: addr.to_string(),
+                source: io::Error::new(io::ErrorKind::AddrInUse, "another process answers there"),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// How many kernel-chosen ports [`Loopback::bind`] tries, each free on

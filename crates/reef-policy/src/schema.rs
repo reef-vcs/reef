@@ -26,12 +26,11 @@ struct File {
     /// Named sets of identities, by name or by id (`idn_…`).
     #[serde(default)]
     groups: BTreeMap<String, Vec<String>>,
-    /// Pinned passkeys (R3.43): each identity, by name or by id (`idn_…`),
-    /// and the fingerprints (SHA-256 of the public key, 64 lowercase hex)
-    /// of the passkeys whose verification meets `presence =
-    /// "user_verified"` for it.
+    /// Pinned passkeys (R3.43, #346): each identity, by name or by id
+    /// (`idn_…`), and the passkeys whose verification meets `presence =
+    /// "user_verified"` for it, each at the origin it must run at.
     #[serde(default)]
-    passkeys: BTreeMap<String, Vec<String>>,
+    passkeys: BTreeMap<String, Vec<Pin>>,
     /// Named sets of signers whose evidence counts.
     #[serde(default)]
     attestors: BTreeMap<String, Attestor>,
@@ -55,6 +54,19 @@ struct File {
     /// Free rules in CEL.
     #[serde(default)]
     rule: Vec<Rule>,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(rename = "policy.file.Pin")]
+struct Pin {
+    /// The passkey's fingerprint: the SHA-256 of its public key, 64
+    /// lowercase hex.
+    fingerprint: String,
+    /// The web origin its touch must run at: `http://localhost:17333`, or
+    /// `https://<dns name>`.
+    origin: String,
 }
 
 #[allow(dead_code)]

@@ -10,6 +10,7 @@ use std::time::Instant;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use rand::RngExt as _;
+use tokio_util::sync::CancellationToken;
 
 use super::Limits;
 
@@ -25,6 +26,8 @@ struct Session {
     open: usize,
     /// The launch file still on disk, deleted at the first request.
     launch_file: Option<PathBuf>,
+    /// Cancelled when every session ends, which ends its open responses.
+    ended: CancellationToken,
 }
 
 /// The live sessions.
@@ -40,9 +43,15 @@ pub(crate) struct Sessions {
 pub(crate) struct InUse {
     sessions: Arc<Sessions>,
     key: Key,
+    ended: CancellationToken,
 }
 
 impl InUse {
+    /// Cancelled when the session is ended with every other.
+    pub(crate) fn ended(&self) -> CancellationToken {
+        self.ended.clone()
+    }
+
     /// The session's id as callers see it: the first 16 hex digits of its
     /// token's digest, which names it in records and logs without the
     /// token.
@@ -119,9 +128,25 @@ impl Sessions {
                 last_used: Instant::now(),
                 open: 0,
                 launch_file: None,
+                ended: CancellationToken::new(),
             },
         );
         (token, ended)
+    }
+
+    /// Ends every session and the responses open in it. Returns how many,
+    /// and their launch files for the caller to delete.
+    pub(crate) fn end_all(&self) -> (usize, Vec<PathBuf>) {
+        let ended: Vec<Session> = self.lock().drain().map(|(_, session)| session).collect();
+        let count = ended.len();
+        let files = ended
+            .into_iter()
+            .filter_map(|session| {
+                session.ended.cancel();
+                session.launch_file
+            })
+            .collect();
+        (count, files)
     }
 
     /// The session `token` names, if it is live: marks it in use until the
@@ -146,6 +171,7 @@ impl Sessions {
             InUse {
                 sessions: Arc::clone(self),
                 key,
+                ended: session.ended.clone(),
             },
             launch,
         ))

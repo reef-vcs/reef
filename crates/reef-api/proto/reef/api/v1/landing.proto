@@ -86,11 +86,12 @@ service LandingService {
   // commit, R3.11), PROPOSAL_AMENDED (metadata `change_id`, `commit_id`,
   // `visible_commit_id`; a dependent whose own diff is unchanged is carried
   // first, R3.11), VERIFIED_SIGNOFF_REQUIRED (metadata `missing`:
-  // `pin`, `touch` or `pinned_touch`, `change_id`, `commit_id`, `tree_id`,
-  // `destination`, and with `pin`, `policy`: `no_policy`, `invalid_policy`
-  // or `no_pins`; through the web UI only, R3.31: no `signoff`/`pass` is
-  // on the tree of the commit asked for by a person's key that a live
-  // passkey the destination's `[passkeys]` pins approved),
+  // `pin`, `touch`, `pinned_touch` or `pinned_origin`, `change_id`,
+  // `commit_id`, `tree_id`, `destination`, with `pin`, `policy`:
+  // `no_policy`, `invalid_policy` or `no_pins`, and with `pinned_origin`,
+  // `origin`; through the web UI only, R3.31: no `signoff`/`pass` is on the
+  // tree of the commit asked for by a person's key that a live passkey the
+  // destination's `[passkeys]` pins approved at an origin it pins),
   // STACK_DESTINATION_MISMATCH (metadata
   // `change_id`, `destination`), STACK_TOO_LARGE (metadata `size`, `max`),
   // DESTINATION_NOT_LOCAL, DESTINATION_NOT_FOUND or DESTINATION_CONFLICTED

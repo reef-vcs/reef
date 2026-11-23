@@ -1,8 +1,8 @@
 //! A web landing's touch (R3.31, ADR 0086 decision 2): through the web UI,
 //! `LandChange` lands a commit only when its tree carries a `signoff`/`pass`
 //! approved by a passkey that the destination's `reef-policy.toml` pins for
-//! its identity (`[passkeys]`, R3.43) and that is still live, whatever else
-//! the policy asks. Accept makes that sign-off before it asks. A leaked
+//! its identity, at the origin the touch ran at (`[passkeys]`, R3.43, #346),
+//! and that is still live, whatever else the policy asks. Accept makes that sign-off before it asks. A leaked
 //! session or a script in the page can register a passkey (an identity's
 //! first needs no assertion), but it cannot pin one: the pin is a line in
 //! the destination's tree, and changing that tree takes a landing. Nor can
@@ -21,18 +21,18 @@ use reef_lib::jj::files;
 use reef_lib::jj::land::{self, LandError};
 use reef_lib::jj::log::ChangeInfo;
 use reef_policy::input::Evidence;
-use reef_policy::{Policy, Presence};
 
 use super::LandingError;
 use crate::daemon::AppState;
 use crate::error::Advice;
+use crate::identity::audit;
 use crate::model::RepoId;
 use crate::policy::Loaded;
 use crate::service::policy as policy_input;
 
 /// What a web landing's tree lacks: `VERIFIED_SIGNOFF_REQUIRED`'s
 /// `missing`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Missing {
     /// The destination's policy pins no passkey, so no touch can count.
     Pin(Unpinned),
@@ -41,26 +41,40 @@ pub enum Missing {
     /// Its touches are by passkeys the destination's policy does not pin
     /// for their identity, or that were removed since (a reset included).
     PinnedTouch,
+    /// A live passkey the policy pins touched it, at a web origin no pin of
+    /// it names (#346): the person moved the web UI's port, or a look-alike
+    /// page ran the ceremony.
+    PinnedOrigin {
+        /// Where the touch ran.
+        touched: String,
+        /// Where the policy counts that passkey's touches.
+        pinned: Vec<String>,
+    },
 }
 
 impl Missing {
     /// Its metadata value.
-    pub fn as_str(self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             Self::Pin(_) => "pin",
             Self::Touch => "touch",
             Self::PinnedTouch => "pinned_touch",
+            Self::PinnedOrigin { .. } => "pinned_origin",
         }
     }
 
     /// The end of the refusal's message.
-    fn words(self) -> &'static str {
+    fn words(&self) -> String {
         match self {
-            Self::Pin(_) => "that policy pins no passkey",
-            Self::Touch => "its tree has none",
+            Self::Pin(_) => "that policy pins no passkey".to_owned(),
+            Self::Touch => "its tree has none".to_owned(),
             Self::PinnedTouch => {
-                "its tree's were approved with passkeys that policy does not pin, or that were removed"
+                "its tree's were approved with passkeys that policy does not pin, or that were removed".to_owned()
             }
+            Self::PinnedOrigin { touched, pinned } => format!(
+                "its tree's was approved at {touched}, where that policy does not count the passkey: it pins it at {}",
+                pinned.join(" and ")
+            ),
         }
     }
 }
@@ -182,6 +196,13 @@ impl Untouched {
                 ),
                 sign_off,
             ),
+            Missing::PinnedOrigin { touched, pinned } => Advice::run(
+                format!(
+                    "A pinned passkey touched this at {touched}, and {destination}'s reef-policy.toml pins it at {}. If you moved the web UI's port (`[ui] listen`), pin the new origin with the line `reef identity passkey list` prints. If you did not, a page that is not Reef's asked for that touch: open Reef with `reef ui`, check the address, and sign this off again.",
+                    pinned.join(" and ")
+                ),
+                sign_off,
+            ),
         }
     }
 
@@ -197,8 +218,9 @@ impl Untouched {
                 ("destination", self.destination.clone()),
             ]
             .into_iter()
-            .chain(match self.missing {
+            .chain(match &self.missing {
                 Missing::Pin(unpinned) => Some(("policy", unpinned.as_str().to_owned())),
+                Missing::PinnedOrigin { touched, .. } => Some(("origin", touched.clone())),
                 Missing::Touch | Missing::PinnedTouch => None,
             })
             .collect(),
@@ -247,12 +269,29 @@ pub(crate) async fn require(
     if touches.peek().is_none() {
         return refuse(Missing::Touch);
     }
+    let mut elsewhere = None;
     for evidence in touches {
-        if pinned(policy, evidence) && live(state, evidence)? {
-            return Ok(());
+        let key = &evidence.key;
+        match policy.unpinned(key) {
+            Some(reef_policy::Unpinned::Passkey) => {}
+            _ if !live(state, evidence)? => {}
+            None => return Ok(()),
+            Some(reef_policy::Unpinned::Origin) => {
+                elsewhere = Some(evidence);
+            }
         }
     }
-    refuse(Missing::PinnedTouch)
+    let Some(evidence) = elsewhere else {
+        return refuse(Missing::PinnedTouch);
+    };
+    audit::elsewhere(&evidence.key, &evidence.id);
+    refuse(Missing::PinnedOrigin {
+        touched: evidence.key.passkey_origin.clone(),
+        pinned: policy
+            .pins_of(&evidence.key)
+            .map(|pin| pin.origin.to_string())
+            .collect(),
+    })
 }
 
 /// The bytes of the policy at `destination`'s head: `None` when it has
@@ -290,12 +329,6 @@ async fn destination_policy(
         })
         .await??;
     Ok(file.map(|file| file.bytes))
-}
-
-/// Whether `policy` pins the passkey that approved `evidence`'s key, for
-/// the key's identity: its presence counts as `user_verified` there.
-fn pinned(policy: &Policy, evidence: &Evidence) -> bool {
-    policy.presence(&evidence.key) == Some(Presence::UserVerified)
 }
 
 /// Whether the passkey that approved `evidence`'s key, as the daemon

@@ -4,8 +4,11 @@
 // `reef evidence add --verified`; a second, unpinned passkey's sign-off
 // does not count, nor does an owner's sign-off without a touch on a change
 // to the pins; an authenticator that cannot verify the user is refused;
-// and a passkey is removed with a touch. Chromium only: the passkeys come
+// a passkey is removed with a touch; and a look-alike page on another
+// localhost port gets the passkey's assertion, which Reef refuses (#346).
+// Chromium only: the passkeys come
 // from CDP virtual authenticators, which only Chromium has.
+import { createServer } from "node:http";
 import type { CDPSession, Page } from "@playwright/test";
 import { expect, test, type Reef, type Workspace } from "./reef";
 
@@ -140,7 +143,12 @@ test("a person signs off with a pinned passkey, and only pinned passkeys count",
     expect(await first.credentials()).toBe(1);
     await card.getByRole("button", { name: "Confirm a passkey to pin" }).click();
     const text = (await card.locator("pre").textContent()) ?? "";
-    expect(text).toMatch(new RegExp(`^\\[passkeys\\]\\n${identity} = \\["[0-9a-f]{64}"\\]\\n$`));
+    const origin = new URL(url).origin;
+    expect(text).toMatch(
+      new RegExp(
+        `^\\[passkeys\\]\\n${identity} = \\[\\n  \\{ fingerprint = "[0-9a-f]{64}", origin = "${origin}" \\},\\n\\]\\n$`,
+      ),
+    );
     return text;
   });
 
@@ -180,7 +188,7 @@ test("a person signs off with a pinned passkey, and only pinned passkeys count",
     const commit = await reef.edit(ws, { "signed.txt": "signed off by a person\n" });
     const panel = await signOff(page, reef, url, ws);
     await expect(panel.getByRole("status")).toHaveText(
-      "Signed off: user verified, passkey “Virtual Touch ID”.",
+      `Signed off: user verified, passkey “Virtual Touch ID” at ${new URL(url).origin}.`,
     );
     await expect(panel.getByRole("listitem")).toContainText([
       /user verified.*pinned by this repository's policy/,
@@ -222,6 +230,91 @@ test("a person signs off with a pinned passkey, and only pinned passkeys count",
     expect(await land(reef, commit)).toContain("landed");
   });
 
+  await test.step("a look-alike page's touch approves nothing", async () => {
+    const ws = await reef.workspace("e2e look-alike");
+    const commit = await reef.edit(ws, { "elsewhere.txt": "approved elsewhere\n" });
+    const command = reef.started([
+      ...["evidence", "add", "--repo", reef.repo, "-r", commit, "--kind", "signoff"],
+      ...["--result", "pass", "--actor", "human", "--verified", "--print-url", "-o", "json"],
+    ]);
+    const approveUrl = (await command.line(/#session=/)).trim();
+    const approvePage = new URL(approveUrl).origin + new URL(approveUrl).pathname;
+    // What the look-alike needs: the pending approval's challenge.
+    const challenge = new Promise<number[]>((resolve) => {
+      void page.exposeFunction("reefE2eChallenge", resolve);
+    });
+    await page.goto(approveUrl);
+    await expect(page.getByRole("button", { name: "Approve" })).toBeVisible();
+    await page.evaluate(() => {
+      const told = window as unknown as { reefE2eChallenge: (c: number[]) => void };
+      navigator.credentials.get = (options) => {
+        told.reefE2eChallenge([...new Uint8Array(options?.publicKey?.challenge as ArrayBuffer)]);
+        return Promise.reject(new DOMException("", "NotAllowedError"));
+      };
+    });
+    await page.getByRole("button", { name: "Approve" }).click();
+    const asked = await challenge;
+
+    const lookAlike = createServer((_, response) => {
+      response.setHeader("content-type", "text/html");
+      response.end("<!doctype html><title>Reef</title><h1>Approve</h1>");
+    });
+    await new Promise<void>((resolve) => lookAlike.listen(0, "localhost", resolve));
+    const address = lookAlike.address();
+    const port = typeof address === "object" && address ? address.port : 0;
+    const elsewhere = `http://localhost:${String(port)}`;
+    await page.goto(elsewhere);
+    const asserted = await page.evaluate(async (challenge) => {
+      const credential = (await navigator.credentials.get({
+        publicKey: {
+          challenge: new Uint8Array(challenge),
+          rpId: "localhost",
+          userVerification: "required",
+        },
+      })) as PublicKeyCredential;
+      const response = credential.response as AuthenticatorAssertionResponse;
+      const bytes = (buffer: ArrayBuffer) => [...new Uint8Array(buffer)];
+      return {
+        rawId: bytes(credential.rawId),
+        authenticatorData: bytes(response.authenticatorData),
+        clientDataJSON: bytes(response.clientDataJSON),
+        signature: bytes(response.signature),
+      };
+    }, asked);
+    const clientData = JSON.parse(Buffer.from(asserted.clientDataJSON).toString()) as {
+      origin: string;
+    };
+    expect(clientData.origin, "the browser signs the page's own origin").toBe(elsewhere);
+
+    await page.goto(approvePage);
+    await expect(page.getByRole("button", { name: "Approve" })).toBeVisible();
+    await page.evaluate((asserted) => {
+      const buffer = (bytes: number[]) => new Uint8Array(bytes).buffer;
+      const credential = Object.create(PublicKeyCredential.prototype, {
+        rawId: { value: buffer(asserted.rawId) },
+        response: {
+          value: {
+            authenticatorData: buffer(asserted.authenticatorData),
+            clientDataJSON: buffer(asserted.clientDataJSON),
+            signature: buffer(asserted.signature),
+          },
+        },
+      }) as PublicKeyCredential;
+      navigator.credentials.get = () => Promise.resolve(credential);
+    }, asserted);
+    await page.getByRole("button", { name: "Approve" }).click();
+    await expect(page.getByRole("alert")).toContainText(elsewhere);
+    expect(await evidenceOn(reef, commit)).not.toContain("user_verified");
+
+    // Still pending: a touch on Reef's own page approves it.
+    await page.goto(approvePage);
+    await page.getByRole("button", { name: "Approve" }).click();
+    const { code, json } = await command.exit;
+    expect(code, JSON.stringify(json)).toBe(0);
+    lookAlike.closeAllConnections();
+    await new Promise((resolve) => lookAlike.close(resolve));
+  });
+
   const second = await test.step("a second passkey, added with the first's touch", async () => {
     let added: Authenticator | undefined;
     hook.run = async () => {
@@ -240,7 +333,7 @@ test("a person signs off with a pinned passkey, and only pinned passkeys count",
     const commit = await reef.edit(ws, { "unpinned.txt": "signed with an unpinned passkey\n" });
     const panel = await signOff(page, reef, url, ws);
     await expect(panel.getByRole("status")).toHaveText(
-      "Signed off: user verified, passkey “Second key”.",
+      `Signed off: user verified, passkey “Second key” at ${new URL(url).origin}.`,
     );
     await expect(panel.getByRole("listitem")).toContainText([
       /not pinned by this repository's policy/,

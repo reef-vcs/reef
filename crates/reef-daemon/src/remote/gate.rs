@@ -45,7 +45,7 @@ use super::tokens::{Refused, Tokens, Use};
 use super::{Caller, RemoteError, access_name, audit};
 use crate::db::TokenScope;
 use crate::error::status;
-use crate::web::assets;
+use crate::web::assets::Assets;
 use crate::web::gate::{GRPC_WEB, authority, bearer, is_api_path, plain, secure};
 
 /// The native gRPC content types.
@@ -82,6 +82,7 @@ pub(crate) struct Gate {
     pub(crate) names: Vec<String>,
     pub(crate) tokens: Arc<Tokens>,
     pub(crate) failures: Arc<Failures>,
+    pub(crate) assets: Arc<Assets>,
 }
 
 /// The gate as a tower layer; see the module documentation.
@@ -166,7 +167,7 @@ impl Gate {
         if !is_api_path(path) {
             return Err(Box::new(
                 if method == Method::GET || method == Method::HEAD {
-                    assets::serve(path, method == Method::HEAD)
+                    self.assets.serve(path, method == Method::HEAD)
                 } else if method == Method::POST {
                     plain(StatusCode::NOT_FOUND)
                 } else {

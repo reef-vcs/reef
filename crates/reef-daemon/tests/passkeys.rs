@@ -1309,9 +1309,9 @@ async fn presence_keys_sign_one_sign_off() {
 }
 
 /// `main`'s policy: every change needs a sign-off by alice with a verified
-/// presence, on a passkey pinned as `pinned`, and so does a change to the
-/// pins.
-fn verified_policy(pinned: &str) -> String {
+/// presence, on a passkey pinned as `pinned` at `origin`, and so does a
+/// change to the pins.
+fn verified_policy(pinned: &str, origin: &str) -> String {
     format!(
         r#"
 version = 1
@@ -1321,7 +1321,7 @@ identities = ["alice"]
 presence = "user_verified"
 
 [passkeys]
-alice = ["{pinned}"]
+alice = [{{ fingerprint = "{pinned}", origin = "{origin}" }}]
 
 [[signoff]]
 name = "verified"
@@ -1435,7 +1435,7 @@ async fn landing_counts_only_pinned_passkeys() {
         "root()",
         &[(
             "reef-policy.toml",
-            &verified_policy(&pinned_key.fingerprint),
+            &verified_policy(&pinned_key.fingerprint, &page.origin),
         )],
     )
     .await;
@@ -2123,14 +2123,14 @@ fn web_land(repo: &str, change: &v1::Change) -> LandChangeRequest {
 }
 
 /// Asserts that `status` is the web landing's refusal for `change`, for
-/// want of `want`: `touch` or `pinned_touch`, with a command that signs it
-/// off, or for want of a pin, the destination's policy state (`no_pins`,
+/// want of `want`: `touch`, `pinned_touch` or `pinned_origin`, with a
+/// command that signs it off, or for want of a pin, the destination's policy state (`no_pins`,
 /// `no_policy` or `invalid_policy`), with the command to start pinning and
 /// `reef land` suggested only where a policy loads.
 fn assert_untouched(status: &Status, change: &v1::Change, want: &str) {
     let (code, reason, metadata) = refusal(status);
     let (missing, policy) = match want {
-        "touch" | "pinned_touch" => (want, None),
+        "touch" | "pinned_touch" | "pinned_origin" => (want, None),
         policy => ("pin", Some(policy)),
     };
     assert_eq!(
@@ -2222,8 +2222,10 @@ checks = "proposal"
 
 /// [`NO_SIGNOFF`] pinning alice's passkey `fingerprint`: a web landing can
 /// count its touch.
-fn pinning(fingerprint: &str) -> String {
-    format!("{NO_SIGNOFF}\n[passkeys]\nalice = [\"{fingerprint}\"]\n")
+fn pinning(fingerprint: &str, origin: &str) -> String {
+    format!(
+        "{NO_SIGNOFF}\n[passkeys]\nalice = [{{ fingerprint = \"{fingerprint}\", origin = \"{origin}\" }}]\n"
+    )
 }
 
 /// Asks to land `change` through `ui`, as Accept does.
@@ -2255,7 +2257,10 @@ async fn a_web_landing_needs_a_touch() {
         client,
         &repo.id,
         "root()",
-        &[("reef-policy.toml", &pinning(&registered.fingerprint))],
+        &[(
+            "reef-policy.toml",
+            &pinning(&registered.fingerprint, &page.origin),
+        )],
     )
     .await;
     set_main(&repo, &main.commit_id).await;
@@ -2420,7 +2425,7 @@ async fn a_passkey_a_web_session_registers_lands_nothing() {
         client,
         &repo.id,
         "root()",
-        &[("reef-policy.toml", &pinning(&"ab".repeat(32)))],
+        &[("reef-policy.toml", &pinning(&"ab".repeat(32), &page.origin))],
     )
     .await;
     set_main(&repo, &pinned.commit_id).await;
@@ -2458,6 +2463,274 @@ async fn a_passkey_a_web_session_registers_lands_nothing() {
     daemon.stop().await;
 }
 
+/// A port nothing holds now, on either loopback family, below the ephemeral
+/// ranges, where no other test's `:0` bind lands in between.
+fn free_port() -> u16 {
+    loop {
+        let port = 20_000 + u16::from_le_bytes(rand::random()) % 12_000;
+        let free = std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
+            && std::net::TcpStream::connect(("::1", port)).is_err();
+        if free {
+            return port;
+        }
+    }
+}
+
+async fn web_ui_status(client: &Client) -> v1::WebUiStatus {
+    client.daemon_status(true).await.unwrap().web_ui.unwrap()
+}
+
+// #346: with a fixed port, a daemon holds the web UI's origin from its start
+// once a passkey is registered, so no other process serves the pinned origin
+// while it runs; before that, and with port 0, it opens no TCP port. A port
+// someone else holds is reported, is never replaced, and is bound by the next
+// `reef ui` once it is free.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_passkey_makes_the_daemon_hold_its_fixed_port() {
+    use v1::WebUiState::{Bound, Unavailable, Unbound};
+    let port = free_port();
+    let (daemon, _repo) =
+        fixture_with(|config| config.file.ui.listen = format!("127.0.0.1:{port}")).await;
+    let origin = format!("http://localhost:{port}");
+    let status = web_ui_status(&daemon.client).await;
+    assert_eq!(
+        (status.state(), status.origin.as_str(), status.fixed),
+        (Unbound, origin.as_str(), true)
+    );
+    let daemon = daemon.restart().await;
+    create_identity(&daemon.client, "alice").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!daemon.handle.state().web.is_bound(), "no passkey, no port");
+    let page = ui(&daemon.client).await;
+    assert_eq!(page.origin, origin);
+    let mut passkey = Authenticator::new(Algorithm::EdDsa);
+    register(&page, &mut passkey, "alice", None).await.unwrap();
+
+    let held = async |daemon: &TestDaemon, want: v1::WebUiState| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let status = web_ui_status(&daemon.client).await;
+            if status.state() == want {
+                return status;
+            }
+            assert!(Instant::now() < deadline, "{status:?}");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    let daemon = daemon.restart().await;
+    let status = held(&daemon, Bound).await;
+    assert_eq!(
+        (status.origin, status.problem),
+        (origin.clone(), String::new())
+    );
+    assert_eq!(ui(&daemon.client).await.origin, origin);
+
+    // Another process takes the port while the daemon is down.
+    let stopped = daemon.stop_keeping().await;
+    let squatter = tokio::net::TcpListener::bind(("127.0.0.1", port))
+        .await
+        .unwrap();
+    let daemon = stopped.start().await;
+    let status = held(&daemon, Unavailable).await;
+    assert_eq!(status.origin, origin);
+    assert!(status.problem.contains(&port.to_string()), "{status:?}");
+    let refused = daemon
+        .client
+        .create_web_session(false, "")
+        .await
+        .unwrap_err();
+    let ClientError::Rpc { status, .. } = refused else {
+        panic!("{refused:?}")
+    };
+    assert_eq!(reason(&status), "WEB_UI_UNAVAILABLE", "no other port");
+    // Once it lets go, the daemon takes it with no `reef ui`.
+    drop(squatter);
+    let status = held(&daemon, Bound).await;
+    assert_eq!(
+        (status.origin, status.problem),
+        (origin.clone(), String::new())
+    );
+    assert_eq!(ui(&daemon.client).await.origin, origin);
+
+    // A removed passkey is no reason to hold it.
+    daemon
+        .client
+        .reset_passkeys(ResetPasskeysRequest {
+            identity: "alice".to_owned(),
+            reason: "lost".to_owned(),
+        })
+        .await
+        .unwrap();
+    let daemon = daemon.restart().await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!daemon.handle.state().web.is_bound());
+    daemon.stop().await;
+}
+
+// #346: the attack. A look-alike page on another localhost port runs the
+// ceremony with the pinned passkey, and code that can read the authority's
+// key certifies the result: the daemon's own check of the origin is skipped,
+// as `resolve_approval` does here when it is told the look-alike's origin.
+// The certificate verifies and the sign-off is stored, and it counts for
+// nothing: not in the policy, not for a landing, not through the web UI.
+// Pinning that origin too, as the person does after moving the web UI's
+// port, makes the same touch count.
+#[tokio::test(flavor = "multi_thread")]
+#[expect(clippy::too_many_lines, reason = "one scenario, in order")]
+async fn a_ceremony_on_another_port_counts_for_nothing() {
+    use reef_daemon::identity::approvals::Resolution;
+    use reef_daemon::identity::issue::Channel;
+    const ELSEWHERE: &str = "http://localhost:49953";
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    create_identity(client, "alice").await;
+    let page = ui(client).await;
+    let mut passkey = Authenticator::new(Algorithm::Es256);
+    let registered = register(&page, &mut passkey, "alice", None).await.unwrap();
+    let main = commit_on(
+        client,
+        &repo.id,
+        "root()",
+        &[(
+            "reef-policy.toml",
+            &verified_policy(&registered.fingerprint, &page.origin),
+        )],
+    )
+    .await;
+    set_main(&repo, &main.commit_id).await;
+    let change = commit_on(client, &repo.id, &main.commit_id, &[("a.txt", "a\n")]).await;
+    propose(client, &repo.id, &change).await;
+
+    // The look-alike's touch, over the approval's own challenge.
+    let key = fresh_key();
+    let statement = payload(&signoff(None), &change.tree_id);
+    let approval = request_approval(
+        client,
+        "alice",
+        &repo.id,
+        &change.commit_id,
+        statement.clone(),
+        &key,
+    )
+    .await
+    .unwrap();
+    let asserted = assertion(&mut passkey, ELSEWHERE, &approval.challenge);
+    // Through Reef's own page it is refused.
+    let refused = page
+        .identities()
+        .resolve_approval(ResolveApprovalRequest {
+            id: approval.id.clone(),
+            resolution: Some(resolve_approval_request::Resolution::Approve(
+                asserted.clone(),
+            )),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(check(&refused), "origin");
+    daemon
+        .handle
+        .state()
+        .identity
+        .resolve_approval(
+            &Channel::Web {
+                session: "0123456789abcdef".to_owned(),
+            },
+            Some(ELSEWHERE),
+            &approval.id,
+            Resolution::Approve(asserted),
+        )
+        .await
+        .unwrap();
+    let added = client
+        .add_evidence(add_request(
+            &repo.id,
+            &change.commit_id,
+            sign(&statement, &key),
+            &key,
+        ))
+        .await
+        .unwrap()
+        .evidence
+        .unwrap();
+    let signer = added.identity.unwrap();
+    assert_eq!(signer.status(), v1::IdentityStatus::Bound);
+    let signer = signer.key.unwrap();
+    assert!(signer.certificate_valid);
+    assert_eq!(signer.presence(), SessionPresence::UserVerified);
+    assert_eq!(signer.passkey_origin, ELSEWHERE);
+
+    let reported = |evaluation: v1::PolicyEvaluation| -> Vec<(String, bool, String)> {
+        evaluation
+            .verified
+            .into_iter()
+            .map(|signer| (signer.origin, signer.pinned, signer.unpinned))
+            .collect()
+    };
+    let evaluate = async || {
+        client
+            .evaluate_policy(EvaluatePolicyRequest {
+                repo: repo.id.clone(),
+                revision: change.commit_id.clone(),
+                skip_snapshot: true,
+                ..EvaluatePolicyRequest::default()
+            })
+            .await
+            .unwrap()
+            .evaluation
+            .unwrap()
+    };
+    assert_eq!(
+        reported(evaluate().await),
+        [(ELSEWHERE.to_owned(), false, "origin".to_owned())]
+    );
+    let refused = land_from_page(&page, &repo.id, &change).await.unwrap_err();
+    assert_untouched(&refused, &change, "pinned_origin");
+    assert_eq!(refusal(&refused).2["origin"], ELSEWHERE);
+    for origin in [ELSEWHERE, page.origin.as_str()] {
+        assert!(refused.message().contains(origin), "{}", refused.message());
+    }
+    let land = async || {
+        client
+            .land_change(LandChangeRequest {
+                repo: repo.id.clone(),
+                revision: change.commit_id.clone(),
+                wait_ms: 60_000,
+                ..LandChangeRequest::default()
+            })
+            .await
+            .unwrap()
+            .landing
+            .unwrap()
+    };
+    let blocked = land().await;
+    assert_eq!(blocked.outcome(), LandingOutcome::Blocked, "{blocked:#?}");
+    assert_eq!(blocked.reason(), LandingReason::Policy, "{blocked:#?}");
+
+    // The person pins that origin too.
+    let policy = verified_policy(&registered.fingerprint, &page.origin).replace(
+        "alice = [",
+        &format!(
+            "alice = [{{ fingerprint = \"{}\", origin = \"{ELSEWHERE}\" }}, ",
+            registered.fingerprint
+        ),
+    );
+    let main = commit_on(
+        client,
+        &repo.id,
+        &main.commit_id,
+        &[("reef-policy.toml", &policy)],
+    )
+    .await;
+    set_main(&repo, &main.commit_id).await;
+    assert_eq!(
+        reported(evaluate().await),
+        [(ELSEWHERE.to_owned(), true, String::new())]
+    );
+    let landed = land().await;
+    assert_eq!(landed.outcome(), LandingOutcome::Landed, "{landed:#?}");
+    daemon.stop().await;
+}
+
 // Review of b6c2a860, N2: a touch counts only while its passkey is live. A
 // pinned passkey's touch lands; another made before the passkey's removal,
 // or before a reset, no longer does, though `main` still pins it and the
@@ -2475,7 +2748,10 @@ async fn a_touch_counts_only_while_its_passkey_is_live() {
             client,
             &repo.id,
             "root()",
-            &[("reef-policy.toml", &pinning(&registered.fingerprint))],
+            &[(
+                "reef-policy.toml",
+                &pinning(&registered.fingerprint, &page.origin),
+            )],
         )
         .await;
         set_main(&repo, &main.commit_id).await;
@@ -2536,7 +2812,10 @@ async fn a_touch_by_a_revoked_key_does_not_count() {
         client,
         &repo.id,
         "root()",
-        &[("reef-policy.toml", &pinning(&registered.fingerprint))],
+        &[(
+            "reef-policy.toml",
+            &pinning(&registered.fingerprint, &page.origin),
+        )],
     )
     .await;
     set_main(&repo, &main.commit_id).await;
@@ -2623,7 +2902,10 @@ async fn a_reset_passkeys_public_key_never_comes_back() {
         client,
         &repo.id,
         "root()",
-        &[("reef-policy.toml", &pinning(&registered.fingerprint))],
+        &[(
+            "reef-policy.toml",
+            &pinning(&registered.fingerprint, &page.origin),
+        )],
     )
     .await;
     set_main(&repo, &main.commit_id).await;
@@ -2666,7 +2948,10 @@ async fn a_stolen_pinned_key_lands_nothing_after_a_reset() {
         client,
         &repo.id,
         "root()",
-        &[("reef-policy.toml", &pinning(&registered.fingerprint))],
+        &[(
+            "reef-policy.toml",
+            &pinning(&registered.fingerprint, &page.origin),
+        )],
     )
     .await;
     set_main(&repo, &main.commit_id).await;
@@ -2751,7 +3036,10 @@ async fn a_change_that_pins_its_own_passkey_lands_nothing_from_the_web() {
         &repo.id,
         "main",
         &[
-            ("reef-policy.toml", &pinning(&registered.fingerprint)),
+            (
+                "reef-policy.toml",
+                &pinning(&registered.fingerprint, &page.origin),
+            ),
             ("evil.txt", "x\n"),
         ],
     )
@@ -2774,7 +3062,10 @@ async fn a_policy_that_does_not_load_pins_nothing() {
     let page = ui(client).await;
     let mut passkey = Authenticator::new(Algorithm::EdDsa);
     let registered = register(&page, &mut passkey, "alice", None).await.unwrap();
-    let broken = format!("{}\n[[[ not toml", pinning(&registered.fingerprint));
+    let broken = format!(
+        "{}\n[[[ not toml",
+        pinning(&registered.fingerprint, &page.origin)
+    );
     let main = commit_on(client, &repo.id, "root()", &[("reef-policy.toml", &broken)]).await;
     set_main(&repo, &main.commit_id).await;
     let change = commit_on(client, &repo.id, "main", &[("a.txt", "a\n")]).await;

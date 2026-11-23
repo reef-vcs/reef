@@ -58,7 +58,7 @@ This index is maintained by hand. Every PR that adds an ADR or changes a status 
 | [0044](0044-history-index-and-query-layer.md) | History index and query layer | accepted |
 | [0045](0045-brief-json-by-default.md) | Brief JSON by default | accepted |
 | [0046](0046-replay.md) | Replay | accepted |
-| [0047](0047-web-ui-transport-and-local-listener.md) | Web UI transport and local listener | accepted |
+| [0047](0047-web-ui-transport-and-local-listener.md) | Web UI transport and local listener | accepted (amended by [0094](0094-the-pinned-web-origin.md)) |
 | [0048](0048-status-from-the-watchers-journal.md) | Status from the watcher's journal | accepted |
 | [0049](0049-remote-listener.md) | Remote listener | accepted |
 | [0050](0050-published-schemas.md) | Published schemas | accepted |
@@ -72,7 +72,7 @@ This index is maintained by hand. Every PR that adds an ADR or changes a status 
 | [0058](0058-provenance-records.md) | Provenance records | accepted |
 | [0059](0059-executor-protocol.md) | Executor protocol | accepted |
 | [0060](0060-reference-executor.md) | Reference executor | accepted |
-| [0061](0061-repository-policy-file.md) | Repository policy file | accepted |
+| [0061](0061-repository-policy-file.md) | Repository policy file | accepted (amended by [0094](0094-the-pinned-web-origin.md)) |
 | [0062](0062-policy-simulation.md) | Policy simulation | accepted |
 | [0063](0063-change-lifecycle.md) | Change lifecycle | accepted |
 | [0064](0064-landing-service-local.md) | Landing service, local | accepted |
@@ -96,12 +96,13 @@ This index is maintained by hand. Every PR that adds an ADR or changes a status 
 | [0082](0082-resolution-tiers-and-attempts.md) | Resolution tiers and attempt caps | accepted |
 | [0083](0083-help-requests.md) | Help requests from agents | accepted |
 | [0084](0084-dependent-change-lifecycle.md) | Dependent change lifecycle | accepted |
-| [0085](0085-verified-human-presence.md) | Verified human presence: passkeys, pinned by policy, one touch per sign-off | accepted |
+| [0085](0085-verified-human-presence.md) | Verified human presence: passkeys, pinned by policy, one touch per sign-off | accepted (amended by [0094](0094-the-pinned-web-origin.md)) |
 | [0086](0086-reviewing-from-the-web-ui.md) | Reviewing from the web UI: the proposal view's writes and their record | accepted |
 | [0087](0087-adopting-only-what-came-from-the-last-snapshot.md) | Adopting only what came from the last snapshot | accepted (amended by [0089](0089-another-clients-undo-keeps-a-workspaces-files.md), [0092](0092-a-stacked-workspace-keeps-the-change-below.md)) |
-| [0088](0088-triage-inbox.md) | The triage inbox: one definition in the daemon, a person's mark, and presence for state that moves silently | accepted (amended by [0091](0091-watching-the-inbox.md)) |
+| [0088](0088-triage-inbox.md) | The triage inbox: one definition in the daemon, a person's mark, and presence for state that moves silently | accepted (amended by [0091](0091-watching-the-inbox.md), [0094](0094-the-pinned-web-origin.md)) |
 | [0089](0089-another-clients-undo-keeps-a-workspaces-files.md) | Another client's undo keeps a workspace's files | accepted (amended by [0090](0090-reefs-import-keeps-the-commits-workspaces-use.md), [0092](0092-a-stacked-workspace-keeps-the-change-below.md)) |
 | [0090](0090-reefs-import-keeps-the-commits-workspaces-use.md) | Reef's import of git refs keeps the commits workspaces use | accepted (amended by [0092](0092-a-stacked-workspace-keeps-the-change-below.md)) |
 | [0091](0091-watching-the-inbox.md) | Watching the inbox: one board the daemon reads again on a trigger, and a stream of its differences | accepted (amended by [0093](0093-the-desktop-shell-and-raised-items.md)) |
 | [0092](0092-a-stacked-workspace-keeps-the-change-below.md) | A stacked workspace keeps the change below | accepted |
 | [0093](0093-the-desktop-shell-and-raised-items.md) | The desktop shell, and the daemon numbering what needs you | accepted |
+| [0094](0094-the-pinned-web-origin.md) | The pinned web origin: a port that does not change, named beside each pinned passkey | accepted |

@@ -411,14 +411,19 @@ pub(crate) fn render_rules(w: &mut dyn Write, evaluation: &Evaluation) -> io::Re
     for signer in &evaluation.verified {
         writeln!(
             w,
-            "passkey {} of {} on evidence {}: {}",
+            "passkey {} of {} at {} on evidence {}: {}",
             signer.passkey.get(..12).unwrap_or(&signer.passkey),
             signer.identity,
-            signer.evidence_id.get(..12).unwrap_or(&signer.evidence_id),
-            if signer.pinned {
-                "pinned, counts as user_verified"
+            if signer.origin.is_empty() {
+                "-"
             } else {
-                "not pinned in [passkeys], counts as none"
+                &signer.origin
+            },
+            signer.evidence_id.get(..12).unwrap_or(&signer.evidence_id),
+            match signer.unpinned.as_str() {
+                _ if signer.pinned => "pinned, counts as user_verified",
+                "origin" => "pinned in [passkeys] at another origin, counts as none",
+                _ => "not pinned in [passkeys], counts as none",
             }
         )?;
     }
@@ -772,7 +777,9 @@ pub(crate) fn evaluation_of(message: &v1::PolicyEvaluation) -> Evaluation {
                 evidence_id: signer.evidence_id.clone(),
                 identity: signer.identity.clone(),
                 passkey: signer.passkey.clone(),
+                origin: signer.origin.clone(),
                 pinned: signer.pinned,
+                unpinned: signer.unpinned.clone(),
             })
             .collect(),
     }

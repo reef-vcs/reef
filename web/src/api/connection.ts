@@ -36,12 +36,30 @@ export function bearer(token: string): Interceptor {
   };
 }
 
+/** Calls `onAccepted` at the first call the daemon answers with success. */
+export function accepted(onAccepted: () => void): Interceptor {
+  let told = false;
+  return (next) => async (request) => {
+    const response = await next(request);
+    // A refused unary call throws; a stream's refusal may come with its end.
+    if (!told && !response.stream) {
+      told = true;
+      onAccepted();
+    }
+    return response;
+  };
+}
+
 /** gRPC-web, binary only, to `baseUrl` (this page's origin by default). */
-export function browserConnection(token: string, baseUrl: string = location.origin): Connection {
+export function browserConnection(
+  token: string,
+  onAccepted: () => void = () => undefined,
+  baseUrl: string = location.origin,
+): Connection {
   const transport = createGrpcWebTransport({
     baseUrl,
     useBinaryFormat: true,
-    interceptors: [bearer(token)],
+    interceptors: [bearer(token), accepted(onAccepted)],
   });
   return { transport, label: baseUrl };
 }

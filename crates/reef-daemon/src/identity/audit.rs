@@ -40,6 +40,22 @@ pub(crate) fn issued(key: &SessionKeyRow, identity: &str, token_name: Option<&st
     );
 }
 
+/// A web landing found a pinned, live passkey's touch at an origin the
+/// destination's policy does not pin it at (#346): the person moved the web
+/// UI's port, or a look-alike page ran the ceremony.
+pub(crate) fn elsewhere(key: &reef_policy::input::Key, evidence_id: &str) {
+    tracing::warn!(
+        target: "reef_daemon::identity::audit",
+        key_id = %key.id,
+        identity_id = %key.identity_id,
+        identity = %key.identity,
+        passkey = %key.passkey,
+        origin = %key.passkey_origin,
+        evidence_id,
+        "a pinned passkey touched at an origin the destination's policy does not pin"
+    );
+}
+
 /// A revocation: of an identity, a session, a key, or an authority.
 pub(crate) fn revoked(
     what: &'static str,

@@ -106,6 +106,38 @@ message GetDaemonStatusResponse {
   // needs a person: DIVERGED, REFUSED, or RETRYING for over an hour
   // (R3.17; `reef landing pushes`). Field 14 is #272's.
   uint32 pushes_attention = 15;
+  // The web UI's listener (#346).
+  WebUiStatus web_ui = 16;
+}
+
+// The web UI's loopback listener (R2.18, #346).
+message WebUiStatus {
+  // Whether it is bound.
+  WebUiState state = 1;
+  // `http://localhost:<port>`: the bound origin, or a fixed port's before
+  // it is bound; empty for a kernel-chosen port before it is bound.
+  string origin = 2;
+  // `[ui] listen` names a port, so the origin outlives the daemon's run and
+  // a policy's `[passkeys]` can pin it.
+  bool fixed = 3;
+  // Why it is UNAVAILABLE; empty otherwise.
+  string problem = 4;
+}
+
+// Whether the web UI's listener is bound.
+enum WebUiState {
+  // Not reported.
+  WEB_UI_STATE_UNSPECIFIED = 0;
+  // `[ui] enabled = false`.
+  WEB_UI_STATE_DISABLED = 1;
+  // The daemon was built without the web UI.
+  WEB_UI_STATE_NOT_BUILT = 2;
+  // Nothing has asked for it yet; `CreateWebSession` binds it.
+  WEB_UI_STATE_UNBOUND = 3;
+  // Bound and serving.
+  WEB_UI_STATE_BOUND = 4;
+  // The last bind failed; the next `CreateWebSession` tries again.
+  WEB_UI_STATE_UNAVAILABLE = 5;
 }
 
 // The machine-wide build limit (#271, ADR 0074).

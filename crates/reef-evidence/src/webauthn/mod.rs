@@ -18,7 +18,10 @@
 //! from the certificate's own fields, so any verifier checks it with nothing
 //! but the certificate. What a stateless reader cannot know (that the
 //! passkey is registered and not removed, the listener's port, the sign
-//! count) is the daemon's to check at approval.
+//! count) is the daemon's to check at approval. The port stays in the
+//! certificate ([`PresenceEvidence::origin`]), and whoever holds the
+//! authority's key can certify a touch at another one, so a policy pins the
+//! whole origin (#346, ADR 0094).
 //!
 //! Public keys travel as DER `SubjectPublicKeyInfo`, as a browser's
 //! `getPublicKey()` returns them, so nothing here reads CBOR. A passkey's
@@ -562,6 +565,20 @@ impl PresenceEvidence {
             approves: &self.approves,
         });
         check_assertion(&self.passkey, &self.rp_id, &challenge, &self.assertion)
+    }
+
+    /// The web origin the assertion ran at, as the browser wrote it in
+    /// `clientDataJSON`; empty when it names none. It means something only
+    /// once [`PresenceEvidence::check`] passes, as it has for a certificate's
+    /// binding.
+    pub fn origin(&self) -> String {
+        match serde_json::from_slice(&self.assertion.client_data_json) {
+            Ok(Value::Object(mut data)) => match data.remove("origin") {
+                Some(Value::String(origin)) => origin,
+                _ => String::new(),
+            },
+            _ => String::new(),
+        }
     }
 }
 

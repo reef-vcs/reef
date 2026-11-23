@@ -696,6 +696,10 @@ mod tests {
             page("http://localhost:1/repos/r/smartlog?change=c#x"),
             Some("/repos/r/smartlog".to_owned())
         );
+        assert_eq!(
+            page("http://localhost:1/repos/r?launch=0123456789abcdef#session=secret"),
+            Some("/repos/r".to_owned())
+        );
         assert_eq!(page("http://localhost:1"), Some(String::new()));
         assert_eq!(page("http://localhost:12/repos/r"), None, "another port");
         assert_eq!(page("http://evil.example/repos/r"), None);

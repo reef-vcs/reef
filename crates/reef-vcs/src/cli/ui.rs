@@ -160,7 +160,7 @@ pub(crate) async fn run(ctx: &Ctx, args: Args) -> Result<(), CliError> {
         let port = port_of(&response.url);
         ctx.out.note(&match blocked {
             Some("ssh") => format!(
-                "This URL is a credential: anyone with it can read your repositories until the daemon stops. Over SSH, forward the port first: ssh -L {port}:127.0.0.1:{port} <host>"
+                "This URL is a credential: anyone with it can read your repositories until the daemon stops. Over SSH, forward the port first: ssh -L {port}:127.0.0.1:{port} <host>. If your own machine's Reef holds that port, set another in `[ui] listen` in this machine's config.toml"
             ),
             _ => "No browser could be opened. This URL is a credential: anyone with it can read your repositories until the daemon stops.".to_owned(),
         });

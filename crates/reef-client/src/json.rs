@@ -1112,6 +1112,8 @@ pub struct Status {
     /// when none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pushes_attention: Option<u32>,
+    /// The web UI's listener (#346); `null` from an older daemon.
+    pub web_ui: Option<WebUiStatus>,
 }
 
 /// The machine-wide build limit, as `daemon status` prints it (#271).
@@ -1377,6 +1379,41 @@ pub struct CreatedRemoteToken {
     pub add: Option<Vec<String>>,
 }
 
+/// The web UI's listener (#346).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct WebUiStatus {
+    /// `disabled`, `not_built`, `unbound` (nothing has asked for it yet),
+    /// `bound` or `unavailable` (the last bind failed).
+    pub state: String,
+    /// `http://localhost:<port>`: the bound origin, or a fixed port's before
+    /// it is bound; `null` for a kernel-chosen port before it is bound.
+    pub origin: Option<String>,
+    /// Whether `[ui] listen` names a port, so the origin outlives the
+    /// daemon's run and a policy's `[passkeys]` can pin it.
+    pub fixed: bool,
+    /// Why it is `unavailable`.
+    pub problem: Option<String>,
+}
+
+impl From<&v1::WebUiStatus> for WebUiStatus {
+    fn from(web_ui: &v1::WebUiStatus) -> Self {
+        Self {
+            state: match web_ui.state() {
+                v1::WebUiState::Unspecified => "unspecified",
+                v1::WebUiState::Disabled => "disabled",
+                v1::WebUiState::NotBuilt => "not_built",
+                v1::WebUiState::Unbound => "unbound",
+                v1::WebUiState::Bound => "bound",
+                v1::WebUiState::Unavailable => "unavailable",
+            }
+            .to_owned(),
+            origin: text(&web_ui.origin),
+            fixed: web_ui.fixed,
+            problem: text(&web_ui.problem),
+        }
+    }
+}
+
 impl From<&v1::GetDaemonStatusResponse> for Status {
     fn from(status: &v1::GetDaemonStatusResponse) -> Self {
         Self {
@@ -1395,6 +1432,7 @@ impl From<&v1::GetDaemonStatusResponse> for Status {
             build: status.build.as_ref().map(BuildStatus::from),
             disk: status.disk.as_deref().map(DiskStatus::from),
             pushes_attention: (status.pushes_attention > 0).then_some(status.pushes_attention),
+            web_ui: status.web_ui.as_ref().map(WebUiStatus::from),
         }
     }
 }
@@ -1426,6 +1464,7 @@ impl From<&reef_api::v0::StatusResponse> for Status {
             build: None,
             disk: None,
             pushes_attention: None,
+            web_ui: None,
         }
     }
 }
@@ -5506,6 +5545,9 @@ pub struct SessionKey {
     /// For `user_verified`, the passkey whose assertion its certificate
     /// carries; `null` otherwise.
     pub passkey: Option<PasskeyRef>,
+    /// For `user_verified`, the web origin its touch ran at (#346), from its
+    /// certificate; `null` otherwise.
+    pub passkey_origin: Option<String>,
     /// For `user_verified`, the one sign-off it may sign; `null` otherwise.
     pub approves: Option<Approves>,
     /// For `user_verified`, the approval it was issued through.
@@ -5550,6 +5592,7 @@ impl From<&v1::SessionKey> for SessionKey {
             session_id: key.session_id.clone(),
             presence: name(session_presence_name(key.presence)),
             passkey: key.passkey.as_ref().map(PasskeyRef::from),
+            passkey_origin: text(&key.passkey_origin),
             approves: key.approves.as_ref().map(|approves| Approves {
                 statement_sha256: approves.statement_sha256.clone(),
                 change_id: approves.change_id.clone(),

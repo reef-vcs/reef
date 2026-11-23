@@ -59,6 +59,7 @@ Phase 2 is complete and released as 0.2.0 to 0.4.0 (0.4.2 on jj-lib 0.47.0, 2026
 | R3.41 | not yet briefed (Desktop shell on Linux and Windows) | L | R3.39 | none listed |
 | R3.42 | [R3.42-sigstore-keyless-identity.md](R3.42-sigstore-keyless-identity.md) | M | R3.03 | none listed |
 | R3.43 | [R3.43-verified-human-presence.md](R3.43-verified-human-presence.md) | L | R3.03, R3.07, R2.18 | R3.31 (its Accept and its web writes), R3.33, R3.40; closes #252 |
+| #346 | [issue-346-pin-the-web-origin.md](issue-346-pin-the-web-origin.md) | M | R3.43, R2.18 | R3.40 (a pin may name `https://<dns name>`, whose host is the RP ID) |
 | R3.44 | [R3.44-provenance-from-harnesses-and-sdks.md](R3.44-provenance-from-harnesses-and-sdks.md) | S | R3.04, R2.25, R2.26 | none listed |
 | R3.45 | [R3.45-automatic-landing.md](R3.45-automatic-landing.md) | L | R3.13, R3.05, R3.12 | R3.18, R3.20, R3.21 (the requests they cap, order and shrink); R3.31, R3.33 (the status) |
 | R3.46 | not yet briefed (Instruction webhooks) | M | R3.12 | none listed |

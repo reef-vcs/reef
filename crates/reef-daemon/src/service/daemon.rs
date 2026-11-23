@@ -16,6 +16,7 @@ use crate::daemon::AppState;
 use crate::db::{META_DAEMON_INSTANCE_ID, SCHEMA_VERSION};
 use crate::error::status;
 use crate::model::WorkspaceState;
+use crate::web::WebUi;
 
 /// Serves `DaemonService`.
 #[derive(Debug)]
@@ -91,6 +92,7 @@ pub(crate) async fn daemon_status(
         backends,
         remote: Some(state.remote.status(&state.config)),
         build: Some(state.build.status()),
+        web_ui: Some(WebUi::status(state)),
         disk: Some(Box::new(reef_api::v1::DiskStatus::from(
             &state
                 .manager
@@ -129,7 +131,7 @@ impl DaemonService for DaemonStatusService {
         request: Request<CreateWebSessionRequest>,
     ) -> Result<Response<CreateWebSessionResponse>, Status> {
         let request = request.into_inner();
-        crate::web::WebUi::create_session(&self.state, request.launch_file, &request.path)
+        WebUi::create_session(&self.state, request.launch_file, &request.path)
             .await
             .map(Response::new)
             .map_err(status)

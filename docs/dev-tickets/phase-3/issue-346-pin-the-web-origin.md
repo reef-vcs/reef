@@ -182,6 +182,10 @@ The pin already holds `https://<dns name>[:port]`. In a certificate the origin's
 
 R3.40 also changes what the pin is worth. At `https://<dns name>` the browser checks a TLS certificate. When the daemon and its TLS key are on another machine or under another uid, a process on the person's laptop cannot serve the pinned origin at all.
 
+### Departures
+
+The review of the implementation broke "What a squatter leaves in the browser" in Chromium, and the implementation departs from it: a launch clears the pinned address from a page on a second, kernel-chosen loopback port (ADR 0094 decision 5), Reef's page removes every worker and cache, a failed hold is tried again, streams end with their sessions, and a token stays in its tab until it is accepted. Test 7 (a daemon moved to another port) is covered by the attack test's end, which pins the other origin and lands; test 17's restart by `a_passkey_makes_the_daemon_hold_its_fixed_port`. S-275's "certifies nothing" was wrong: a script at the pinned origin with a session gets one misled touch certified by the daemon.
+
 ## What the pin stops, and what it does not
 
 The attacker's position decides. "Counts" means presence `user_verified` under a policy that pins.

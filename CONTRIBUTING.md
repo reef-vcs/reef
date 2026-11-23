@@ -117,7 +117,7 @@ CI's `web` job runs `just web-check` on every pull request. It is where a schema
 
 To work on the app against a real daemon, run `reef ui --print` with a daemon built after `just web-build` (or any daemon whose `CreateWebSession` works), then start the dev server with `REEF_UI_URL` set to the printed `url`: Vite proxies `/reef.api.v1.` paths to the daemon's listener and rewrites `Host` and `Origin` to its own, so the daemon has no dev mode. Open `http://127.0.0.1:5173/#session=<token>` with the token from the printed session URL. That URL is a credential until the daemon stops; keep it out of issues and logs.
 
-Passkey ceremonies (the Passkeys page, the approval page, **Sign off**) do not work through the dev server: the browser signs the page's origin into every assertion, and the daemon accepts only its own, `http://localhost:<its port>`. Preview them on a scratch daemon built after `just web-build`, opened at the `localhost` URL `reef ui` prints; every other page previews through Vite as before. The end-to-end test `e2e/passkeys.spec.ts` gives Chromium a virtual authenticator; the other browsers skip the steps that need one.
+Passkey ceremonies (the Passkeys page, the approval page, **Sign off**) do not work through the dev server: the browser signs the page's origin into every assertion, and the daemon accepts only its own, `http://localhost:<its port>`, which a policy also pins (#346). Preview them on a scratch daemon built after `just web-build`, opened at the `localhost` URL `reef ui` prints; every other page previews through Vite as before. The end-to-end test `e2e/passkeys.spec.ts` gives Chromium a virtual authenticator; the other browsers skip the steps that need one.
 
 ### The Python SDK
 

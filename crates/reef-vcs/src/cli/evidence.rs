@@ -36,6 +36,7 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 
 use super::advice::AdviceCtx;
+use super::identity::Pinned;
 use super::out::{Out, TextRender, block};
 use super::render::{now_ms, size, span};
 use super::scope::{self, ScopeArgs};
@@ -1171,10 +1172,16 @@ async fn show(ctx: &Ctx, args: ShowArgs) -> Result<(), CliError> {
     ctx.out.object(&Shown(evidence, pinned))
 }
 
-/// Whether the trunk's `reef-policy.toml` pins `key`'s passkey for its
-/// identity (R3.43); `None` when there is no policy there, or it does not
-/// load.
-async fn pinned_at_trunk(ctx: &Ctx, scope: &scope::Scope, key: &json::SessionKey) -> Option<bool> {
+/// Whether the trunk's `reef-policy.toml` pins `key`'s passkey, at the
+/// origin its touch ran at, for its identity (R3.43, #346), or why not;
+/// `None` when there is no policy there, it does not load, or the daemon is
+/// too old to say where the touch ran.
+async fn pinned_at_trunk(
+    ctx: &Ctx,
+    scope: &scope::Scope,
+    key: &json::SessionKey,
+) -> Option<Pinned> {
+    let passkey_origin = key.passkey_origin.clone()?;
     let read = ctx
         .call(ctx.client.read_file_to_end(ReadFileRequest {
             repo: scope.repo_id.clone(),
@@ -1185,18 +1192,18 @@ async fn pinned_at_trunk(ctx: &Ctx, scope: &scope::Scope, key: &json::SessionKey
         .await
         .ok()?;
     let policy = reef_policy::Policy::load(&read.content).ok()?;
-    let effective = policy.presence(&reef_policy::input::Key {
+    let unpinned = policy.unpinned(&reef_policy::input::Key {
         identity: key.identity.clone(),
         identity_id: key.identity_id.clone(),
-        presence: "user_verified".to_owned(),
         passkey: key
             .passkey
             .as_ref()
             .map(|passkey| passkey.fingerprint.clone())
             .unwrap_or_default(),
+        passkey_origin,
         ..reef_policy::input::Key::default()
     });
-    Some(effective == Some(reef_policy::Presence::UserVerified))
+    Some(unpinned.map_or(Ok(()), Err))
 }
 
 fn short(id: &str) -> &str {
@@ -1262,7 +1269,7 @@ fn signer_word(evidence: &Evidence) -> String {
 
 /// The `identity:` line of `show`: whom the key is bound to and its status
 /// when the daemon first saw the object.
-fn identity_line(evidence: &Evidence, pinned: Option<bool>) -> String {
+fn identity_line(evidence: &Evidence, pinned: Option<Pinned>) -> String {
     use std::fmt::Write as _;
     let Some(identity) = &evidence.identity else {
         return "-".to_owned();
@@ -1355,7 +1362,7 @@ impl TextRender for Lines {
 /// the passkey of a `user_verified` key (`None` when not known).
 #[derive(Serialize)]
 #[serde(transparent)]
-struct Shown(Evidence, #[serde(skip)] Option<bool>);
+struct Shown(Evidence, #[serde(skip)] Option<Pinned>);
 
 impl TextRender for Shown {
     fn render(&self, w: &mut dyn Write) -> io::Result<()> {

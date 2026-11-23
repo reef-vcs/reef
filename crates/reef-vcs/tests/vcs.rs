@@ -2754,7 +2754,7 @@ async fn ui_command() {
     let value = ok(&daemon, &dir, &["ui", "--print"]).await;
     let session_url = value["session_url"].as_str().unwrap();
     assert!(
-        session_url.starts_with(&format!("{url}#session=")),
+        session_url.starts_with(&format!("{url}?launch=")) && session_url.contains("#session="),
         "{value}"
     );
     assert_eq!(value["opened"], false, "{value}");

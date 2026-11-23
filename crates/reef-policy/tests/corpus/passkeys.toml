@@ -1,5 +1,6 @@
 # A release area that needs a person's touch of a pinned passkey (R3.43):
-# alice's passkey is pinned by name, bob's by id; carol's is not pinned.
+# alice's passkey is pinned by name, bob's by id, each at the address `reef
+# ui` opens (#346); carol's is not pinned.
 version = 1
 
 [owners]
@@ -10,8 +11,8 @@ presence = "user_verified"
 release = ["alice", "idn_0000000000000b0b", "carol"]
 
 [passkeys]
-alice = ["3c9e0d5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f"]
-idn_0000000000000b0b = ["b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0"]
+alice = [{ fingerprint = "3c9e0d5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f", origin = "http://localhost:17333" }]
+idn_0000000000000b0b = [{ fingerprint = "b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0", origin = "http://localhost:17333" }]
 
 [[signoff]]
 name = "release"
