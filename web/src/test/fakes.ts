@@ -30,7 +30,8 @@ import {
   type SubscribePresenceResponse,
 } from "../gen/reef/api/v1/presence_pb";
 import type { FrameScheduler } from "../live/frame";
-import type { Channel, LiveEnvironment } from "../live/share";
+import { direct, type Channel, type LiveEnvironment } from "../live/share";
+import { line, type SilenceEnvironment } from "../live/silence";
 
 export function manualFrames(): {
   frame: FrameScheduler;
@@ -285,7 +286,6 @@ export class FakeStreams {
 /** `navigator.locks` for one exclusive lock name, in one process. */
 export class FakeLocks {
   private held = false;
-  private steal: (() => void) | undefined;
   private readonly waiting: (() => void)[] = [];
 
   request(
@@ -295,25 +295,14 @@ export class FakeLocks {
   ): Promise<unknown> {
     return new Promise((resolve, reject) => {
       const grant = () => {
-        let stolen = false;
         this.held = true;
-        this.steal = () => {
-          stolen = true;
-          reject(new DOMException("stolen", "AbortError"));
-        };
         void Promise.resolve(callback(null))
           .then(resolve, reject)
           .finally(() => {
-            if (stolen) return;
             this.held = false;
             this.waiting.shift()?.();
           });
       };
-      if (options.steal) {
-        this.steal?.();
-        grant();
-        return;
-      }
       options.signal?.addEventListener("abort", () => {
         const index = this.waiting.indexOf(grant);
         if (index >= 0) {
@@ -330,25 +319,6 @@ export class FakeLocks {
 /** BroadcastChannel between tabs in one process: delivers to every other member, later. */
 export class FakeBus {
   private readonly members = new Set<{ deliver: (data: unknown) => void }>();
-  private readonly frozen = new Set<object>();
-
-  /**
-   * Suspends the `nth` tab to join: it says nothing, and hears nothing until
-   * the function returned runs, which delivers it all.
-   */
-  freeze(nth: number): () => void {
-    const member = [...this.members][nth];
-    if (!member) throw new Error("no such tab has joined");
-    const { deliver } = member;
-    const missed: unknown[] = [];
-    this.frozen.add(member);
-    member.deliver = (data) => missed.push(data);
-    return () => {
-      this.frozen.delete(member);
-      member.deliver = deliver;
-      for (const data of missed) deliver(data);
-    };
-  }
 
   channel = (): Channel => {
     const listeners: ((event: MessageEvent) => void)[] = [];
@@ -360,7 +330,6 @@ export class FakeBus {
     this.members.add(member);
     return {
       postMessage: (message: unknown) => {
-        if (this.frozen.has(member)) return;
         const copy = structuredClone(message);
         for (const other of this.members) {
           if (other !== member)
@@ -379,13 +348,13 @@ export class FakeBus {
   };
 }
 
-/** Two clocks and the timers on them, moved by hand. */
+/** Two clocks, the timers on them and the page's waking, moved by hand. */
 export class FakeTime {
   private at = { mono: 1_000, wall: 1_795_000_000_000 };
   private timers: { due: number; run: () => void }[] = [];
   private readonly wakers = new Set<() => void>();
 
-  readonly parts: Pick<LiveEnvironment, "after" | "clock" | "onWake"> = {
+  readonly silence: SilenceEnvironment = {
     clock: { mono: () => this.at.mono, wall: () => this.at.wall },
     after: (ms, run) => {
       const timer = { due: this.at.mono + ms, run };
@@ -425,6 +394,11 @@ export class FakeTime {
     this.at.wall = wall;
   }
 
+  /** Timers and listeners not yet cancelled. */
+  get held(): number {
+    return this.timers.length + this.wakers.size;
+  }
+
   async wake() {
     for (const run of this.wakers) run();
     await settle(30);
@@ -439,6 +413,7 @@ export class FakeTime {
 export function environment(
   frame: FrameScheduler,
   shared?: { locks: FakeLocks; bus: FakeBus },
+  /** The streams are the remote page's, cut when silent, on this time. */
   time?: FakeTime,
 ): LiveEnvironment {
   return {
@@ -449,10 +424,6 @@ export function environment(
     sleep: async () => {
       await settle(1);
     },
-    // Nothing falls silent in tests unless a test moves time itself.
-    after: () => () => undefined,
-    clock: { mono: () => 0, wall: () => 0 },
-    onWake: () => () => undefined,
-    ...time?.parts,
+    line: () => (time ? line(time.silence) : direct),
   };
 }

@@ -1,8 +1,19 @@
-// Streams that fall silent (review R1): cut and opened again, together, once;
-// never on a connection the daemon's keepalives reach; whatever the clocks do;
-// and a follower that takes over from a leader its browser suspended.
+// Streams that fall silent (R3.40 reviews): on the remote page each is cut
+// and opened again alone, at a limit of its own, whatever the clocks do, and
+// never on a connection the daemon's keepalives reach; a page that has not
+// its new inbox whole is not live. The local page shares its streams, as
+// before, and cuts none.
+import { create } from "@bufbuild/protobuf";
 import { Code, ConnectError } from "@connectrpc/connect";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  InboxItemSchema,
+  InboxListing,
+  InboxSectionChangeSchema,
+  InboxService,
+  WatchInboxResponseSchema,
+  type WatchInboxResponse,
+} from "../gen/reef/api/v1/inbox_pb";
 import {
   environment,
   FakeBus,
@@ -12,123 +23,266 @@ import {
   manualFrames,
   operationsFrame,
   presenceFrame,
+  Pushable,
+  sessionInvalid,
   settle,
 } from "../test/fakes";
-import { create } from "@bufbuild/protobuf";
-import { WatchInboxResponseSchema } from "../gen/reef/api/v1/inbox_pb";
 import { after } from "./backoff";
-import { browserClock, SILENT_MS, SILENT_ON_WAKE_MS, Silence } from "./silence";
-import { ANSWER_MS, Live } from "./share";
+import { browserEnvironment, Live } from "./share";
+import {
+  browserSilence,
+  line,
+  MAX_DOUBLINGS,
+  onWake,
+  SILENT_MS,
+  SILENT_ON_WAKE_MS,
+} from "./silence";
 
 const KEEPALIVE_MS = 15_000;
-const MINUTE = 60_000;
+const SECOND = 1_000;
+const MINUTE = 60 * SECOND;
 
+/** A daemon whose streams say nothing until the test does. */
 function daemon() {
   const streams = new FakeStreams();
-  /** Every open stream's frame, as on a working connection. */
-  const frames = async () => {
-    streams.lastOperations().push(operationsFrame({ cursor: "c1", live: true }));
-    streams.lastPresence().push(presenceFrame([], true));
-    streams.lastInbox().push(create(WatchInboxResponseSchema, { synced: true }));
+  const inboxes: Pushable<WatchInboxResponse>[] = [];
+  const connection = streams.connection({
+    services: {
+      [InboxService.typeName]: {
+        watchInbox: (_: never, options: { signal: AbortSignal | undefined }) => {
+          const stream = new Pushable<WatchInboxResponse>(options.signal);
+          inboxes.push(stream);
+          return stream;
+        },
+      },
+    },
+  });
+  const say = {
+    operations: () => {
+      streams.lastOperations().push(operationsFrame({ cursor: "c1", live: true }));
+    },
+    presence: () => {
+      streams.lastPresence().push(presenceFrame([], true));
+    },
+    inbox: (frame = create(WatchInboxResponseSchema, { synced: true })) => {
+      inboxes.at(-1)?.push(frame);
+    },
+  };
+  const all = async () => {
+    say.operations();
+    say.presence();
+    say.inbox();
     await settle(30);
   };
   const opened = () => ({
     operations: streams.operationCalls.length,
     presence: streams.presenceCalls.length,
-    inbox: streams.inboxCalls.length,
+    inbox: inboxes.length,
   });
-  return { streams, frames, opened };
+  return { streams, connection, say, all, opened };
 }
 
 const each = (n: number) => ({ operations: n, presence: n, inbox: n });
 
-async function alone() {
+/** The remote page, live. */
+async function page() {
   const time = new FakeTime();
-  const { streams, frames, opened } = daemon();
-  const live = new Live(streams.connection(), environment(manualFrames().frame, undefined, time));
+  const served = daemon();
+  const live = new Live(served.connection, environment(manualFrames().frame, undefined, time));
   live.start();
   await settle(30);
-  await frames();
+  await served.all();
   expect(live.state).toBe("live");
-  expect(opened()).toEqual(each(1));
-  return { time, streams, frames, opened, live };
+  expect(served.opened()).toEqual(each(1));
+  return { time, live, ...served };
 }
 
-describe("a silent connection", () => {
-  it("is cut and opened again, and is not live until frames arrive", async () => {
-    const { time, streams, frames, opened, live } = await alone();
+/** Passes time until the page is not live; how long that took. */
+async function notLiveAfter(time: FakeTime, live: Live): Promise<number> {
+  for (let s = 0; s < 1_200; s++) {
+    if (live.state !== "live") return s * SECOND;
+    await time.pass(SECOND);
+  }
+  throw new Error("it is live after 20 minutes of silence");
+}
+
+describe("a dead connection", () => {
+  it("is found 40 s after its last frame, and the page is live again on the next", async () => {
+    const { time, live, streams, all, opened } = await page();
     await time.pass(SILENT_MS - 1);
     expect(live.state).toBe("live");
     await time.pass(1);
     expect(live.state).toBe("reconnecting");
     expect(opened()).toEqual(each(2));
     expect(streams.operationCalls[1]?.request.start).toEqual({ case: "cursor", value: "c1" });
-    await frames();
+    await all();
     expect(live.state).toBe("live");
     live.close();
   });
 
-  it("is cut when one stream of several is silent", async () => {
-    const { time, streams, opened, live } = await alone();
+  it("is found 40 s after it dies, having lived for a while", async () => {
+    const { time, live, all } = await page();
     for (let i = 0; i < 3; i++) {
       await time.pass(KEEPALIVE_MS);
-      streams.lastOperations().push(operationsFrame({ cursor: "c1", live: true }));
-      streams.lastPresence().push(presenceFrame([], true));
-      await settle(30);
+      await all();
     }
-    expect(opened()).toEqual(each(2));
+    expect(await notLiveAfter(time, live)).toBe(SILENT_MS);
     live.close();
   });
 
-  it("is cut at once when the page is shown again, once however many events say so", async () => {
-    const { time, frames, opened, live } = await alone();
-    await time.pass(SILENT_ON_WAKE_MS);
-    await Promise.all([time.wake(), time.wake(), time.wake()]);
+  it("is found 40 s after it dies, looked at before and healthy then", async () => {
+    const { time, live } = await page();
+    await time.pass(KEEPALIVE_MS);
     await time.wake();
-    expect(opened()).toEqual(each(2));
-    expect(live.state).toBe("reconnecting");
-    await frames();
-    expect(live.state).toBe("live");
+    expect(await notLiveAfter(time, live)).toBe(SILENT_MS - KEEPALIVE_MS);
     live.close();
   });
+
+  it.each([45 * SECOND, 340 * SECOND])(
+    "is found 40 s after it dies again, after an outage of %i ms",
+    async (outage) => {
+      const { time, live, all } = await page();
+      await time.pass(outage);
+      expect(live.state).toBe("reconnecting");
+      await all();
+      expect(live.state).toBe("live");
+      expect(await notLiveAfter(time, live)).toBe(SILENT_MS);
+      live.close();
+    },
+  );
 
   it("is seen after a sleep that stopped the timers and the page's clock", async () => {
-    const { time, opened, live } = await alone();
+    const { time, live, opened } = await page();
     time.sleep(30 * MINUTE);
     await time.wake();
     expect(opened()).toEqual(each(2));
+    expect(live.state).toBe("reconnecting");
     live.close();
   });
 
   it("is seen when the wall clock is set back", async () => {
-    const { time, opened, live } = await alone();
+    const { time, live, opened } = await page();
     time.set(0);
     await time.pass(SILENT_MS);
     expect(opened()).toEqual(each(2));
     live.close();
   });
 
-  it("is opened again less and less often while no stream gets a frame", async () => {
-    const { time, frames, opened, live } = await alone();
-    // The fake inbox sends a first frame at each open; here none does.
-    await time.pass(10 * MINUTE);
-    const { operations } = opened();
-    expect(operations).toBeGreaterThan(3);
-    expect(operations).toBeLessThan(12);
-    await frames();
+  it("is seen on a wake after 20 s, once however often the page wakes", async () => {
+    const { time, live, all, opened } = await page();
+    await time.pass(SILENT_ON_WAKE_MS - 1);
+    await time.wake();
+    expect(live.state).toBe("live");
+    await time.pass(1);
+    await Promise.all([time.wake(), time.wake(), time.wake()]);
+    await time.wake();
+    expect(opened()).toEqual(each(2));
+    expect(live.state).toBe("reconnecting");
+    await all();
     expect(live.state).toBe("live");
     live.close();
   });
 });
 
+describe("one silent stream of three", () => {
+  it.each(["operations", "presence", "inbox"] as const)(
+    "is cut alone (%s), and the page is not live until it speaks",
+    async (silent) => {
+      const { time, live, say, opened } = await page();
+      const others = (["operations", "presence", "inbox"] as const).filter((s) => s !== silent);
+      for (let i = 0; i < 3; i++) {
+        await time.pass(KEEPALIVE_MS);
+        for (const other of others) say[other]();
+        await settle(30);
+      }
+      expect(opened()).toEqual({ ...each(1), [silent]: 2 });
+      expect(live.state).toBe("reconnecting");
+      say[silent]();
+      await settle(30);
+      expect(live.state).toBe("live");
+      live.close();
+    },
+  );
+});
+
+describe("a first frame that takes long", () => {
+  /** Lives with a silent inbox for `ms`; when the inbox was opened. */
+  async function silentInbox(ms: number) {
+    const opens: number[] = [];
+    const { time, live, say, opened } = await page();
+    for (let at = 0; at < ms; at += SECOND) {
+      if (at % KEEPALIVE_MS === 0) {
+        say.operations();
+        say.presence();
+        await settle(30);
+      }
+      if (opened().inbox > opens.length + 1) opens.push(at / SECOND);
+      await time.pass(SECOND);
+    }
+    return { time, live, say, opened, opens };
+  }
+
+  it("is given twice as long each time, whatever the other streams do", async () => {
+    const { live, opens, opened } = await silentInbox(20 * MINUTE);
+    // Cut after 40 s with a frame had; then, with none, 40, 80, 160, 320, 320 s.
+    expect(opens).toEqual([40, 80, 160, 320, 640, 960]);
+    expect(opened()).toEqual({ operations: 1, presence: 1, inbox: 7 });
+    live.close();
+  });
+
+  it("loads in up to 320 s, and is not asked again on a wake before", async () => {
+    const { time, live, say, opened } = await silentInbox(320 * SECOND);
+    const before = opened().inbox;
+    for (let at = 0; at < 300; at += 10) {
+      await time.pass(10 * SECOND);
+      say.operations();
+      say.presence();
+      await time.wake();
+    }
+    expect(opened().inbox).toBe(before);
+    expect(live.state).toBe("reconnecting");
+    say.inbox();
+    await settle(30);
+    expect(live.state).toBe("live");
+    expect(SILENT_MS * 2 ** MAX_DOUBLINGS).toBe(320 * SECOND);
+    live.close();
+  });
+
+  it("is cut on a wake past its limit, when no timer ran", async () => {
+    const { time, live, opened } = await page();
+    await time.pass(SILENT_MS);
+    expect(opened()).toEqual(each(2));
+    time.sleep(SILENT_MS - 1);
+    await time.wake();
+    expect(opened()).toEqual(each(2));
+    time.sleep(1);
+    await time.wake();
+    expect(opened()).toEqual(each(3));
+    live.close();
+  });
+
+  it("is given 40 s again once one came", async () => {
+    const { time, live, all, opened } = await page();
+    await time.pass(5 * MINUTE);
+    await all();
+    const before = opened().inbox;
+    await time.pass(SILENT_MS);
+    expect(opened().inbox).toBe(before + 1);
+    await time.pass(2 * SILENT_MS);
+    expect(opened().inbox, "given 40 s, and the next 80 s").toBe(before + 2);
+    live.close();
+  });
+});
+
 describe("a working connection", () => {
-  it("is never cut, shown again or not", async () => {
-    const { time, frames, opened, live } = await alone();
+  it("is never cut, and holds one timer and one listener a stream", async () => {
+    const { time, live, all, opened } = await page();
     for (let i = 0; i < 40; i++) {
       await time.pass(KEEPALIVE_MS);
       await time.wake();
-      await frames();
+      await all();
       await time.wake();
+      expect(time.held).toBe(6);
     }
     expect(opened()).toEqual(each(1));
     expect(live.state).toBe("live");
@@ -136,162 +290,288 @@ describe("a working connection", () => {
   });
 
   it("is cut once at most when the wall clock jumps forward", async () => {
-    const { time, frames, opened, live } = await alone();
+    const { time, live, all, opened } = await page();
     time.set(4_000_000_000_000);
     for (let i = 0; i < 8; i++) {
       await time.wake();
-      await frames();
+      await all();
       await time.pass(KEEPALIVE_MS);
     }
     expect(opened()).toEqual(each(2));
     live.close();
   });
+});
 
-  it("ends its timers with the page", async () => {
-    const { time, opened, live } = await alone();
+describe("a page that ends", () => {
+  it("closed, leaves no timer, listener or stream", async () => {
+    const { time, live, opened } = await page();
     live.close();
-    await time.pass(10 * MINUTE);
+    await settle(30);
+    expect(time.held).toBe(0);
+    await time.pass(20 * MINUTE);
     await time.wake();
     expect(opened()).toEqual(each(1));
   });
-});
 
-describe("Silence", () => {
-  it("cuts a stream that ignores its signal, and ends its request", async () => {
-    let signalled: AbortSignal | undefined;
-    const silence = new Silence(browserClock, after);
-    const stream = silence.watch(new AbortController().signal, (signal) => {
-      signalled = signal;
-      return {
-        [Symbol.asyncIterator]: () => ({ next: () => new Promise<never>(() => undefined) }),
-      };
-    });
-    const next = stream.next();
-    await settle();
-    silence.check(0);
-    await expect(next).rejects.toMatchObject({ code: Code.Unavailable });
-    expect(signalled?.aborted).toBe(true);
+  it("refused by the daemon, leaves none either", async () => {
+    const { time, live, streams } = await page();
+    const ended = vi.fn();
+    live.onEnded(ended);
+    streams.lastPresence().fail(sessionInvalid());
+    await settle(30);
+    expect(ended).toHaveBeenCalledOnce();
+    expect(time.held).toBe(0);
   });
 
-  it("passes on the frames, the end and the error", async () => {
-    const silence = new Silence(browserClock, after);
-    const { signal } = new AbortController();
+  it("closed while it waits to open again, leaves none", async () => {
+    const { time, live } = await page();
+    await time.pass(SILENT_MS);
+    live.close();
+    await settle(30);
+    expect(time.held).toBe(0);
+  });
+});
+
+describe("the header after a cut", () => {
+  it("is live only once the new inbox is whole", async () => {
+    const { time, live, say } = await page();
+    const section = (repoId: string, key: string) =>
+      create(InboxSectionChangeSchema, {
+        repoId,
+        listing: InboxListing.END,
+        items: [create(InboxItemSchema, { key, repoId })],
+      });
+    say.inbox(
+      create(WatchInboxResponseSchema, {
+        sections: [section("a", "old a"), section("b", "old b")],
+        synced: true,
+      }),
+    );
+    await settle(30);
+    await time.pass(SILENT_MS);
+    say.operations();
+    say.presence();
+    for (const frame of [{}, { sections: [section("a", "new a")] }]) {
+      say.inbox(create(WatchInboxResponseSchema, { ...frame, synced: false }));
+      await settle(30);
+      expect(live.state).toBe("reconnecting");
+      expect([...(live.inbox.sections.get("b")?.items.keys() ?? [])]).toEqual(["old b"]);
+    }
+    say.inbox(
+      create(WatchInboxResponseSchema, { sections: [section("b", "new b")], synced: true }),
+    );
+    await settle(30);
+    expect(live.state).toBe("live");
+    expect([...(live.inbox.sections.get("b")?.items.keys() ?? [])]).toEqual(["new b"]);
+    live.close();
+  });
+});
+
+/** A stream that says nothing, whatever it is told. */
+const never = { [Symbol.asyncIterator]: () => ({ next: () => new Promise<never>(() => {}) }) };
+
+describe("a line", () => {
+  it("is cut though its stream ignores that, and its request is aborted", async () => {
+    const time = new FakeTime();
+    let request: AbortSignal | undefined;
+    const stream = line(time.silence)(new AbortController().signal, (signal) => {
+      request = signal;
+      return never;
+    });
+    const next = stream[Symbol.asyncIterator]().next();
+    const refused = expect(next).rejects.toMatchObject({ code: Code.Unavailable });
+    await time.pass(SILENT_MS);
+    await refused;
+    expect(request?.aborted).toBe(true);
+    expect(time.held).toBe(0);
+  });
+
+  it("passes on frames, the end and an error, and then holds nothing", async () => {
+    const time = new FakeTime();
+    const page = new AbortController();
+    const added = vi.spyOn(page.signal, "addEventListener");
+    const removed = vi.spyOn(page.signal, "removeEventListener");
+    const read = line(time.silence);
     async function* two() {
       yield 1;
       yield 2;
     }
     const got: number[] = [];
-    for await (const frame of silence.watch(signal, two)) got.push(frame);
+    const request: { added?: number; removed?: number } = {};
+    const opened = (signal: AbortSignal) => {
+      const add = vi.spyOn(signal, "addEventListener");
+      const remove = vi.spyOn(signal, "removeEventListener");
+      return (async function* () {
+        for await (const frame of two()) {
+          yield frame;
+          request.added = add.mock.calls.length;
+          request.removed = remove.mock.calls.length;
+        }
+      })();
+    };
+    for await (const frame of read(page.signal, opened)) got.push(frame);
     expect(got).toEqual([1, 2]);
+    expect(request, "no listener is left a frame").toEqual({ added: 2, removed: 2 });
     const fails = () => ({
       [Symbol.asyncIterator]: () => ({
         next: () => Promise.reject(new ConnectError("down", Code.Unavailable)),
       }),
     });
-    await expect(silence.watch(signal, fails).next()).rejects.toThrow("down");
+    await expect(read(page.signal, fails)[Symbol.asyncIterator]().next()).rejects.toThrow("down");
+    expect(time.held).toBe(0);
+    expect(removed).toHaveBeenCalledTimes(added.mock.calls.length);
+  });
+
+  it("ends the request of a stream its reader leaves", async () => {
+    let request: AbortSignal | undefined;
+    const read = line(new FakeTime().silence)(new AbortController().signal, async function* (s) {
+      request = s;
+      yield 1;
+      yield 2;
+    });
+    for await (const frame of read) if (frame === 1) break;
+    expect(request?.aborted).toBe(true);
+  });
+
+  it("opens nothing on a page that has ended", async () => {
+    const open = vi.fn();
+    const read = line(new FakeTime().silence)(AbortSignal.abort(), open);
+    for await (const frame of read) expect(frame).toBeUndefined();
+    expect(open).not.toHaveBeenCalled();
   });
 });
 
-describe("a follower", () => {
-  async function two() {
+describe("a line's timer", () => {
+  it("that runs early is set again", async () => {
     const time = new FakeTime();
+    const early = {
+      ...time.silence,
+      after: (ms: number, run: () => void) => time.silence.after(Math.max(ms - 1, 1), run),
+    };
+    const stream = line(early)(new AbortController().signal, () => never);
+    const refused = expect(stream[Symbol.asyncIterator]().next()).rejects.toThrow("silent");
+    await time.pass(SILENT_MS - 1);
+    expect(time.held).toBe(2);
+    await time.pass(1);
+    await refused;
+  });
+
+  it("is doubled once for an opening that is cut on several wakes", async () => {
+    const { time, live, opened } = await page();
+    await time.pass(SILENT_MS);
+    time.sleep(30 * MINUTE);
+    await Promise.all([time.wake(), time.wake(), time.wake()]);
+    expect(opened()).toEqual(each(3));
+    await time.pass(2 * SILENT_MS);
+    expect(opened()).toEqual(each(4));
+    live.close();
+  });
+});
+
+describe("waking", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it.each([
+    ["visibilitychange", document],
+    ["pageshow", window],
+    ["online", window],
+  ])("is each of three events alone: %s", async (event, target) => {
+    const time = new FakeTime();
+    const { connection, all, opened } = daemon();
+    const live = new Live(connection, {
+      ...environment(manualFrames().frame),
+      line: () => line({ ...time.silence, onWake }),
+    });
+    live.start();
+    await settle(30);
+    await all();
+    await time.pass(SILENT_ON_WAKE_MS);
+    target.dispatchEvent(new Event(event));
+    await settle(30);
+    expect(opened()).toEqual(each(2));
+    live.close();
+    await settle(30);
+    target.dispatchEvent(new Event(event));
+    await settle(30);
+    expect(opened()).toEqual(each(2));
+  });
+
+  it("is not a page being hidden, and stops when asked", () => {
+    const woken = vi.fn();
+    const stop = onWake(woken);
+    const hidden = vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+    document.dispatchEvent(new Event("visibilitychange"));
+    expect(woken).not.toHaveBeenCalled();
+    hidden.mockReturnValue("visible");
+    document.dispatchEvent(new Event("visibilitychange"));
+    expect(woken).toHaveBeenCalledOnce();
+    stop();
+    document.dispatchEvent(new Event("visibilitychange"));
+    window.dispatchEvent(new Event("pageshow"));
+    window.dispatchEvent(new Event("online"));
+    expect(woken).toHaveBeenCalledOnce();
+  });
+});
+
+describe("the page's environment", () => {
+  it("over https takes no lock, shares nothing and cuts a silent stream", () => {
+    vi.stubGlobal("navigator", { locks: { request: vi.fn() } });
+    const remote = browserEnvironment(true);
+    vi.unstubAllGlobals();
+    expect(remote.locks).toBeUndefined();
+    expect(remote.channel).toBeUndefined();
+    expect(remote.line).toBe(line);
+    expect(browserSilence).toMatchObject({ after, onWake });
+    expect(browserSilence.clock.wall()).toBeCloseTo(Date.now(), -3);
+    expect(browserSilence.clock.mono()).toBeCloseTo(performance.now(), -3);
+  });
+
+  it("over http shares, and reads each stream as it comes", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("BroadcastChannel", EventTarget);
+    vi.stubGlobal("navigator", { locks: { request: vi.fn() } });
+    const local = browserEnvironment(false);
+    expect(local.locks).toBe(navigator.locks);
+    expect(local.channel?.("x")).toBeInstanceOf(EventTarget);
+    let request: AbortSignal | undefined;
+    const stream = local.line()(new AbortController().signal, (signal) => {
+      request = signal;
+      return never;
+    });
+    void stream[Symbol.asyncIterator]().next();
+    vi.advanceTimersByTime(60 * MINUTE);
+    window.dispatchEvent(new Event("online"));
+    await settle(30);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(request?.aborted).toBe(false);
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it("is what the page is served over", () => {
+    expect(location.protocol).toBe("http:");
+    expect(browserEnvironment().line).not.toBe(line);
+    vi.stubGlobal("location", { protocol: "https:" });
+    expect(browserEnvironment().line).toBe(line);
+    vi.unstubAllGlobals();
+  });
+
+  it("over http keeps one set of streams for every tab, silent or not", async () => {
     const shared = { locks: new FakeLocks(), bus: new FakeBus() };
-    const { streams, frames, opened } = daemon();
-    const tab = (shown = true) => {
-      const env = environment(manualFrames().frame, shared, time);
-      const live = new Live(
-        streams.connection(),
-        shown ? env : { ...env, onWake: () => () => undefined },
-      );
+    const { connection, all, opened } = daemon();
+    const tabs = [1, 2, 3].map(() => {
+      const live = new Live(connection, environment(manualFrames().frame, shared));
       live.start();
       return live;
-    };
-    // The leader's page is hidden: nothing wakes it.
-    const leader = tab(false);
+    });
     await settle(30);
-    await frames();
-    const follower = tab();
+    await all();
+    window.dispatchEvent(new Event("online"));
     await settle(30);
-    expect(follower.state).toBe("live");
-    return { time, leader, follower, streams, frames, opened, bus: shared.bus };
-  }
-
-  it("shown again, has its hidden leader look at its streams", async () => {
-    const { time, leader, follower, frames, opened } = await two();
-    await time.pass(SILENT_ON_WAKE_MS);
-    await time.wake();
-    expect(opened()).toEqual(each(2));
-    expect(follower.state).toBe("reconnecting");
-    await frames();
-    expect(follower.state).toBe("live");
-    expect(leader.leading).toBe(true);
-    leader.close();
-    follower.close();
-  });
-
-  it("takes over from a leader that does not answer, which then follows", async () => {
-    const { time, leader, follower, streams, frames, opened, bus } = await two();
-    const thaw = bus.freeze(0);
-    await time.pass(KEEPALIVE_MS);
-    time.sleep(MINUTE);
-    await time.wake();
-    expect(follower.leading).toBe(false);
-    await time.pass(ANSWER_MS);
-    expect(follower.leading).toBe(true);
-    streams.lastPresence().push(presenceFrame([], true));
-    await settle(30);
-    expect(follower.state, "with no operations frame").toBe("reconnecting");
-    thaw();
-    await settle(50);
-    expect(leader.leading).toBe(false);
-    await frames();
-    expect(follower.state).toBe("live");
-    expect(leader.state).toBe("live");
-    const { operations } = opened();
-    await time.pass(KEEPALIVE_MS);
-    await frames();
-    await time.wake();
-    expect(opened().operations, "two tabs do not take the lock from each other").toBe(operations);
-    follower.close();
-    await settle(50);
-    expect(leader.leading, "the lock passes back").toBe(true);
-    leader.close();
-  });
-
-  it("waits for the lock once, however often it was taken from it", async () => {
-    const { time, leader, follower, frames, opened, bus } = await two();
-    const thaw = bus.freeze(0);
-    time.sleep(MINUTE);
-    await time.wake();
-    await time.pass(ANSWER_MS);
-    expect(follower.leading).toBe(true);
-    thaw();
-    await settle(50);
-    await frames();
-    // Now the tab that took over is the one suspended.
-    const thawed = bus.freeze(1);
-    await time.pass(SILENT_MS + ANSWER_MS);
-    expect(leader.leading).toBe(true);
-    thawed();
-    await settle(50);
-    expect(follower.leading).toBe(false);
-    const { operations } = opened();
-    leader.close();
-    await settle(50);
-    expect(follower.leading).toBe(true);
-    expect(opened().operations).toBe(operations + 1);
-    follower.close();
-  });
-
-  it("leaves a leader alone that answers but has no daemon", async () => {
-    const { time, leader, follower } = await two();
-    for (let i = 0; i < 60; i++) {
-      await time.pass(5_000);
-      expect(follower.leading, `after ${String(i * 5)} s`).toBe(false);
-    }
-    expect(leader.leading).toBe(true);
-    expect(follower.state).toBe("reconnecting");
-    leader.close();
-    follower.close();
+    expect(opened()).toEqual(each(1));
+    expect(tabs.map((tab) => tab.leading)).toEqual([true, false, false]);
+    for (const tab of tabs) tab.close();
   });
 });

@@ -249,6 +249,15 @@ test("a paired phone reads, and ends when told", async ({ browser, reef }) => {
       await rowsAreTappable(page);
     });
 
+    await test.step("what it loads comes over HTTP/2, which its streams share", async () => {
+      const protocols = await page.evaluate(() =>
+        performance
+          .getEntriesByType("resource")
+          .map((entry) => (entry as PerformanceResourceTiming).nextHopProtocol),
+      );
+      expect(new Set(protocols.filter(Boolean))).toEqual(new Set(["h2"]));
+    });
+
     await test.step("it shows a help request and a proposal, and offers no write", async () => {
       const help = needs(page).locator("li[data-key^='help:']");
       await expect(help.getByText("A paired phone only reads.")).toBeVisible();
@@ -399,20 +408,41 @@ test("a phone whose connection died says so, and catches up", async ({
     await expect(connection).toHaveText("Live");
     await expect(needs(page).getByText("Nothing needs you now.")).toBeVisible();
 
+    /** What each stream was asked for, as its requests go out. */
+    const opens: string[] = [];
+    page.on("request", (request) => {
+      const stream = /(SubscribeOperations|SubscribePresence|WatchInbox)$/.exec(request.url());
+      if (stream?.[1]) opens.push(stream[1]);
+    });
+    /** Time moves on until the page is live again: the browser gives the dead connection up. */
+    const liveAgain = async () => {
+      await expect
+        .poll(
+          async () => {
+            await page.clock.fastForward(5_000);
+            return connection.textContent();
+          },
+          { timeout: 60_000, intervals: [1_000] },
+        )
+        .toBe("Live");
+    };
+
     await test.step("while frames arrive, nothing is opened again", async () => {
-      const accepted = proxy.accepted;
-      let streams = 0;
-      page.on("request", (request) => {
-        if (/Subscribe|WatchInbox/.test(request.url())) streams += 1;
-      });
+      // Past the first keepalives, and then past the 40 s of the opening.
+      const keepalive = page.waitForFunction(
+        (from) => performance.now() - from > 17_000,
+        await page.evaluate(() => performance.now()),
+        { timeout: 60_000 },
+      );
+      await keepalive;
+      await page.clock.fastForward(15_000);
       for (const event of ["pageshow", "online"]) {
         await page.evaluate((name) => window.dispatchEvent(new Event(name)), event);
       }
       await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
       await page.clock.fastForward(10_000);
       await expect(connection).toHaveText("Live");
-      expect(streams).toBe(0);
-      expect(proxy.accepted).toBe(accepted);
+      expect(opens).toEqual([]);
     });
 
     await test.step("a dead connection is not live, and the inbox comes back on another", async () => {
@@ -435,19 +465,21 @@ test("a phone whose connection died says so, and catches up", async ({
       await expect(connection).toHaveText("Live");
       await page.clock.fastForward(45_000);
       await expect(connection).toHaveText("Reconnecting");
-      // The browser gives the dead connection up some 12 s after a request on
-      // it, if nothing has come on it for 10 s (Chromium): time moves on here.
-      await expect
-        .poll(
-          async () => {
-            await page.clock.fastForward(5_000);
-            return connection.textContent();
-          },
-          { timeout: 60_000, intervals: [1_000] },
-        )
-        .toBe("Live");
+      await liveAgain();
+      expect(new Set(opens)).toEqual(
+        new Set(["SubscribeOperations", "SubscribePresence", "WatchInbox"]),
+      );
       await needs(page).getByRole("button", { name: "Show 1 new item" }).click();
       await expect(needs(page).getByText("TOML or YAML?")).toBeVisible();
+    });
+
+    await test.step("shown again after it died, it is not live at once", async () => {
+      proxy.freeze();
+      await page.clock.fastForward(25_000);
+      await expect(connection).toHaveText("Live");
+      await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+      // At once, and not once 40 s have passed.
+      await expect(connection).toHaveText("Reconnecting", { timeout: 2_000 });
     });
   } finally {
     await context.close();

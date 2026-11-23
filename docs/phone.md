@@ -86,7 +86,8 @@ Set `listen` to the machine's tailnet IPv4 address (`tailscale ip -4`), so that 
 ## Limits
 
 - **Your computer asleep answers nothing.** A daemon on a machine that stays up is the answer.
-- **The app notices a dead connection** and opens another: when the app comes back to the screen or to the network, or after 40 s of silence. It then says **Reconnecting** until the inbox is current. In Chromium and WebKit on a Mac the browser took 10 to 13 s more to give a dead connection up.
+- **The app notices a dead connection** and opens another: when the app comes back to the screen or to the network after 20 s of silence, or after 40 s of it. It then says **Reconnecting** until the inbox is current, and shows what it had. In Chromium and WebKit on a Mac the browser took 10 to 13 s more to give a dead connection up.
+- **Five tabs at once**, if you read in a browser: each has three live streams, and a token may hold 16.
 - **Nothing is readable offline**, on purpose: the phone keeps no copy of your code. It keeps the token, its name and its end.
 - **A program that runs as you** can read the TLS key, stop the daemon and serve its own page at the phone's address, which the app then opens with its token ([threat model](threat-model.md), S-281). A daemon on another machine, or under another user, closes that.
 - **Wrong codes slow their address down.** After 10 in a minute the daemon closes new connections from that address for a minute, and longer each time. A paired phone there keeps its pairing and reconnects when that ends. Over IPv6 every peer in one /64 counts as one address, so let `listen` name the IPv4 address.

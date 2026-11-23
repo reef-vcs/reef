@@ -186,7 +186,10 @@ describe("a paired phone", () => {
   });
 
   /** The app with its streams open; their signals. */
-  function app(token = PAIRED_TOKEN): AbortSignal[] {
+  function app(
+    token = PAIRED_TOKEN,
+    getDaemonStatus: () => unknown = () => new Promise(() => undefined),
+  ): AbortSignal[] {
     const signals: AbortSignal[] = [];
     const streams = new FakeStreams();
     const { subscribeOperations } = streams;
@@ -197,7 +200,12 @@ describe("a paired phone", () => {
     window.history.replaceState(null, "", "/states");
     render(
       <App
-        session={{ connection: streams.connection(), token }}
+        session={{
+          connection: streams.connection({
+            services: { [DaemonService.typeName]: { getDaemonStatus } },
+          }),
+          token,
+        }}
         environment={environment(manualFrames().frame)}
       />,
     );
@@ -236,6 +244,16 @@ describe("a paired phone", () => {
     localStorage.clear();
     await changed(SESSION_KEY);
     expect(notConnected()).toBeNull();
+  });
+
+  it("ends its streams when a call is refused", async () => {
+    paired();
+    const signals = app(PAIRED_TOKEN, () => {
+      throw daemonError(Code.PermissionDenied, { reason: "REMOTE_TOKEN_INVALID" });
+    });
+    await screen.findByRole("heading", { name: "Not connected" });
+    expect(signals.map((signal) => signal.aborted)).toEqual([true]);
+    expect(localStorage.length).toBe(0);
   });
 
   it("ends its streams when Settings unpairs it", async () => {
@@ -317,6 +335,12 @@ describe("a phone whose daemon's address moved", () => {
     expect(screen.queryByRole("button", { name: "Pair this browser instead" })).toBeNull();
     expect(localStorage.getItem(SESSION_KEY)).toBe(PAIRED_TOKEN);
     expect(device()).toEqual(PAIRED);
+  });
+
+  it("shows the daemon's words as words", async () => {
+    await refused("<img src=x>");
+    expect(screen.getByText(/Open <img src=x> on the device/)).toBeTruthy();
+    expect(document.querySelector("img")).toBeNull();
   });
 
   it("offers a code where the daemon is at this address", async () => {

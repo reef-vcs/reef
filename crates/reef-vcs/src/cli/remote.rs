@@ -866,6 +866,7 @@ mod tests {
             ("mac.example.ts.net", "mac.example.ts.net"),
             ("MAC.example.ts.net.", "mac.example.ts.net"),
             ("*.example.ts.net", "mac.example.ts.net"),
+            ("*.Example.TS.net", "mac.example.ts.net"),
             ("*.example.com", "mac.example.com"),
         ] {
             assert!(covers(presented, host), "{presented} for {host}");
