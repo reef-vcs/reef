@@ -341,16 +341,23 @@ jobs:
     env:
       APPLE_SIGNING_IDENTITY: "-"
     steps:
+      # On the self-hosted Mac, as `check`: checkout keeps target/, and rustup installs the
+      # toolchain in place of setup-rust-toolchain, whose macOS step needs Homebrew's bash.
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+          clean: ${{ runner.environment == 'github-hosted' }}
       - uses: actions/setup-node@v7
         with:
           node-version-file: web/.node-version
       - uses: actions-rust-lang/setup-rust-toolchain@v2
+        if: runner.environment == 'github-hosted'
         with:
           cache-workspaces: "shell -> ../target/shell"
           cache-save-if: ${{ env.RUST_CACHE_SAVE }}
+      - name: Rust toolchain (self-hosted)
+        if: runner.environment == 'self-hosted'
+        run: rustup toolchain install && rustc --version
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny@0.19
