@@ -70,7 +70,11 @@ impl RemoteTokensService {
             .iter()
             .find(|name| name.parse::<std::net::IpAddr>().is_err())
             .map_or("mac.example", String::as_str);
-        format!("origin = \"https://{host}:{port}\"")
+        // A browser leaves out https's own port, and so must the origin.
+        match port {
+            "443" => format!("origin = \"https://{host}\""),
+            port => format!("origin = \"https://{host}:{port}\""),
+        }
     }
 
     /// The live identity `name` links a new token to; `None` for an empty

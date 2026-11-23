@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { Connection } from "../api/connection";
+import type { ReefError } from "../api/errors";
 import { AppBar } from "../ui/AppBar";
 import { PairForm } from "./PairForm";
 
@@ -12,6 +13,31 @@ function standalone(): boolean {
 }
 
 /**
+ * The daemon's address is another now, or it has none: no code works here.
+ * The token is kept, since the daemon takes it again where its address is
+ * this one again.
+ */
+function Moved({ error }: { error: ReefError }) {
+  return (
+    <div className="card center-card">
+      <h1>Not connected</h1>
+      <p>This phone was paired at {error.metadata.device_origin}.</p>
+      {error.hint && <p>{error.hint}</p>}
+      <p className="actions">
+        <button
+          type="button"
+          onClick={() => {
+            window.location.reload();
+          }}
+        >
+          Try again
+        </button>
+      </p>
+    </div>
+  );
+}
+
+/**
  * Over the remote listener (R2.08) the page is https: a phone pairs here
  * (R3.40). From a browser's tab the Home Screen steps come first, since
  * what a tab stores never reaches the app.
@@ -19,11 +45,14 @@ function standalone(): boolean {
 function RemoteSession({
   onPaired,
   connect,
+  moved,
 }: {
   onPaired: (token: string) => void;
   connect?: ((code: string) => Connection) | undefined;
+  moved: ReefError | null;
 }) {
   const [here, setHere] = useState(standalone);
+  if (moved && moved.metadata.origin !== window.location.origin) return <Moved error={moved} />;
   return (
     <div className="card center-card">
       <h1>Not connected</h1>
@@ -65,10 +94,13 @@ function RemoteSession({
 export function NoSession({
   onPaired = () => undefined,
   connect,
-  remote = window.location.protocol === "https:",
+  moved = null,
+  remote = moved !== null || window.location.protocol === "https:",
 }: {
   onPaired?: ((token: string) => void) | undefined;
   connect?: ((code: string) => Connection) | undefined;
+  /** Why the session ended, when the daemon's address moved (`REMOTE_ORIGIN_CHANGED`). */
+  moved?: ReefError | null;
   remote?: boolean;
 }) {
   useEffect(() => {
@@ -79,7 +111,7 @@ export function NoSession({
       <AppBar live={null} status={null} />
       <main>
         {remote ? (
-          <RemoteSession onPaired={onPaired} connect={connect} />
+          <RemoteSession onPaired={onPaired} connect={connect} moved={moved} />
         ) : (
           <div className="card center-card">
             <h1>Not connected</h1>

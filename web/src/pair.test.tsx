@@ -4,13 +4,14 @@
 import { timestampFromMs } from "@bufbuild/protobuf/wkt";
 import { Code, createRouterTransport } from "@connectrpc/connect";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { Connection } from "./api/connection";
-import { reefError } from "./api/errors";
+import { client, noteRefusals, type Connection } from "./api/connection";
 import { App } from "./App";
 import { device, endDevice, keepDevice, openSession } from "./device";
+import { DaemonService } from "./gen/reef/api/v1/daemon_pb";
+import { OperationService } from "./gen/reef/api/v1/operations_pb";
 import { RemoteScope, RemoteService } from "./gen/reef/api/v1/remote_pb";
 import { typedCode } from "./pair";
-import { SESSION_KEY, storeSession } from "./session";
+import { embedded, SESSION_KEY, storeSession } from "./session";
 import { daemonError, environment, FakeStreams, manualFrames } from "./test/fakes";
 import { PAIRED, paired, PAIRED_TOKEN } from "./test/paired";
 import { act, cleanup, fireEvent, render, screen } from "./test/testing-library";
@@ -68,6 +69,15 @@ async function type(code: string) {
 }
 
 describe("the pairing form", () => {
+  it("is first in a Home Screen app of an iOS that says so only in its own way", () => {
+    vi.stubGlobal(
+      "navigator",
+      Object.assign(Object.create(navigator) as object, { standalone: true }),
+    );
+    render(<NoSession remote />);
+    expect(screen.getByLabelText("Pairing code")).toBeTruthy();
+  });
+
   it("in a tab, shows the Home Screen steps first", async () => {
     render(<NoSession remote />);
     expect(screen.getByText("Add to Home Screen")).toBeTruthy();
@@ -139,11 +149,32 @@ describe("a paired phone", () => {
     expect(localStorage.getItem(SESSION_KEY)).toBe(PAIRED_TOKEN);
     expect(window.location.hash).toBe("");
     expect(device()).toEqual(PAIRED);
-    // A page that is no phone's takes it.
+    // A page that is no phone's takes it, whatever it holds.
     localStorage.clear();
+    storeSession("older");
     window.history.replaceState(null, "", "/#session=other");
     expect(openSession()).toBe("other");
     window.history.replaceState(null, "", "/");
+  });
+
+  it("takes nothing else from such a link", () => {
+    paired();
+    window.history.replaceState(null, "", "/#session=other&embedded=1");
+    expect(openSession()).toBe(PAIRED_TOKEN);
+    expect(window.location.hash).toBe("");
+    expect(embedded()).toBe(false);
+    expect(sessionStorage.getItem("reef.embedded")).toBeNull();
+  });
+
+  it("is one no more once its pairing has ended", () => {
+    vi.useFakeTimers({ now: PAIRED.expiresAt - 1, toFake: ["Date"] });
+    paired();
+    expect(device()).toEqual(PAIRED);
+    vi.setSystemTime(PAIRED.expiresAt);
+    expect(device()).toBeNull();
+    window.history.replaceState(null, "", "/#session=other");
+    expect(openSession()).toBe("other");
+    vi.useRealTimers();
   });
 
   it("is forgotten with its own token, not with an older one", () => {
@@ -154,21 +185,70 @@ describe("a paired phone", () => {
     expect(localStorage.getItem("reef.device")).toBeNull();
   });
 
-  it("ends in every tab once it is unpaired in one", async () => {
-    paired();
+  /** The app with its streams open; their signals. */
+  function app(token = PAIRED_TOKEN): AbortSignal[] {
+    const signals: AbortSignal[] = [];
+    const streams = new FakeStreams();
+    const { subscribeOperations } = streams;
+    streams.subscribeOperations = (request, options) => {
+      if (options.signal) signals.push(options.signal);
+      return subscribeOperations(request, options);
+    };
     window.history.replaceState(null, "", "/states");
     render(
       <App
-        session={{ connection: new FakeStreams().connection(), token: PAIRED_TOKEN }}
+        session={{ connection: streams.connection(), token }}
         environment={environment(manualFrames().frame)}
       />,
     );
-    expect(screen.queryByRole("heading", { name: "Not connected" })).toBeNull();
-    localStorage.clear();
-    await act(() => {
-      window.dispatchEvent(new StorageEvent("storage", { key: SESSION_KEY, newValue: null }));
+    return signals;
+  }
+  const notConnected = () => screen.queryByRole("heading", { name: "Not connected" });
+  const changed = (key: string | null) =>
+    act(() => {
+      window.dispatchEvent(new StorageEvent("storage", { key }));
     });
-    expect(screen.getByRole("heading", { name: "Not connected" })).toBeTruthy();
+
+  it.each([SESSION_KEY, null])("ends in every tab once it is unpaired in one (%s)", async (key) => {
+    paired();
+    const signals = app();
+    expect(notConnected()).toBeNull();
+    localStorage.clear();
+    await changed(key);
+    expect(notConnected()).toBeTruthy();
+    expect(signals.map((signal) => signal.aborted)).toEqual([true]);
+  });
+
+  it("goes on while a tab opens at a link's token and puts the phone's back", async () => {
+    paired();
+    const signals = app();
+    storeSession("other");
+    await changed(SESSION_KEY);
+    storeSession(PAIRED_TOKEN);
+    await changed(SESSION_KEY);
+    expect(notConnected()).toBeNull();
+    expect(signals.map((signal) => signal.aborted)).toEqual([false]);
+  });
+
+  it("is the only page that ends with the storage", async () => {
+    storeSession("another");
+    app("another");
+    localStorage.clear();
+    await changed(SESSION_KEY);
+    expect(notConnected()).toBeNull();
+  });
+
+  it("ends its streams when Settings unpairs it", async () => {
+    paired();
+    const signals = app();
+    for (const name of ["Settings", "Unpair this phone", "Unpair"]) {
+      await act(() => {
+        screen.getByRole("button", { name }).click();
+      });
+    }
+    expect(notConnected()).toBeTruthy();
+    expect(localStorage.length).toBe(0);
+    expect(signals.map((signal) => signal.aborted)).toEqual([true]);
   });
 
   it("says its name and end in Settings, and unpairs", async () => {
@@ -193,10 +273,76 @@ describe("a paired phone", () => {
   });
 });
 
-describe("the daemon's refusal of a moved device", () => {
-  it("ends the session", async () => {
-    const { isSessionInvalid } = await import("./api/errors");
-    const moved = daemonError(Code.PermissionDenied, { reason: "REMOTE_ORIGIN_CHANGED" });
-    expect(isSessionInvalid(reefError(moved))).toBe(true);
+describe("a phone whose daemon's address moved", () => {
+  /** The app over a daemon that refuses every call, as the gate does. */
+  async function refused(origin: string, reason = "REMOTE_ORIGIN_CHANGED") {
+    const made: { connection?: Connection } = {};
+    const refuse = () => {
+      throw daemonError(Code.PermissionDenied, {
+        reason,
+        hint: `Open ${origin} on the device and pair it again.`,
+        metadata: { device_origin: "https://old.example:7470", origin },
+      });
+    };
+    const transport = createRouterTransport(
+      ({ service }) => {
+        service(DaemonService, { getDaemonStatus: () => new Promise(() => undefined) });
+        service(OperationService, {
+          // eslint-disable-next-line require-yield
+          async *subscribeOperations() {
+            refuse();
+          },
+        });
+      },
+      { transport: { interceptors: [noteRefusals(() => made.connection)] } },
+    );
+    made.connection = { transport, label: "test" };
+    paired();
+    window.history.replaceState(null, "", "/states");
+    render(
+      <App
+        session={{ connection: made.connection, token: PAIRED_TOKEN }}
+        environment={environment(manualFrames().frame)}
+      />,
+    );
+    await screen.findByRole("heading", { name: "Not connected" });
+  }
+
+  it("says where it is now, offers no code there, and keeps its pairing", async () => {
+    await refused("https://new.example:7470");
+    expect(screen.getByText(/Open https:\/\/new\.example:7470 on the device/)).toBeTruthy();
+    expect(screen.getByText(/was paired at https:\/\/old\.example:7470/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();
+    expect(screen.queryByLabelText("Pairing code")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Pair this browser instead" })).toBeNull();
+    expect(localStorage.getItem(SESSION_KEY)).toBe(PAIRED_TOKEN);
+    expect(device()).toEqual(PAIRED);
+  });
+
+  it("offers a code where the daemon is at this address", async () => {
+    await refused(window.location.origin);
+    expect(screen.getByRole("button", { name: "Pair this browser instead" })).toBeTruthy();
+  });
+
+  it("forgets a pairing that was revoked", async () => {
+    await refused("", "REMOTE_TOKEN_INVALID");
+    expect(localStorage.length).toBe(0);
+  });
+
+  it("is told by a unary call too", async () => {
+    const made: { connection?: Connection } = {};
+    const transport = createRouterTransport(
+      ({ service }) => {
+        service(DaemonService, {
+          getDaemonStatus: () => {
+            throw daemonError(Code.PermissionDenied, { reason: "REMOTE_ORIGIN_CHANGED" });
+          },
+        });
+      },
+      { transport: { interceptors: [noteRefusals(() => made.connection)] } },
+    );
+    made.connection = { transport, label: "test" };
+    await expect(client(made.connection, DaemonService).getDaemonStatus({})).rejects.toThrow();
+    expect(made.connection.refused?.reason).toBe("REMOTE_ORIGIN_CHANGED");
   });
 });

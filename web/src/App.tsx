@@ -6,7 +6,7 @@
 // repository.
 import { useEffect, useMemo, useState } from "react";
 import { client, type Connection } from "./api/connection";
-import { isSessionInvalid, reefError, type ReefError } from "./api/errors";
+import { isSessionInvalid, REMOTE_ORIGIN_CHANGED, reefError, type ReefError } from "./api/errors";
 import { device, endDevice } from "./device";
 import { DaemonService, type GetDaemonStatusResponse } from "./gen/reef/api/v1/daemon_pb";
 import { animationFrame, type FrameScheduler } from "./live/frame";
@@ -82,11 +82,13 @@ function Shell({
   live,
   frame,
   onSessionInvalid,
+  onUnpair,
 }: {
   connection: Connection;
   live: Live;
   frame: FrameScheduler;
   onSessionInvalid: () => void;
+  onUnpair: () => void;
 }) {
   const path = usePath();
   const search = useSearch();
@@ -117,7 +119,7 @@ function Shell({
         <AppBar
           live={live}
           status={status}
-          onUnpair={onSessionInvalid}
+          onUnpair={onUnpair}
           onCrumb={setCrumb}
           onTabs={setTabs}
           onStrip={setStrip}
@@ -178,15 +180,25 @@ export function App({
 }) {
   const connection = session?.connection ?? null;
   const [ended, setEnded] = useState(session === null);
+  const [moved, setMoved] = useState<ReefError | null>(null);
   const [live] = useState(() => (connection ? new Live(connection, environment) : null));
+  function forget() {
+    if (!session) return;
+    endDevice(session.token);
+    endSession(session.token);
+  }
   const [end] = useState(() => () => {
     // Stop the streams too: an ended tab must not keep the lock and feed
     // other tabs on a refused token.
     live?.close();
-    if (session) {
-      endDevice(session.token);
-      endSession(session.token);
-    }
+    const refused = session?.connection.refused;
+    if (refused?.reason === REMOTE_ORIGIN_CHANGED) setMoved(refused);
+    else forget();
+    setEnded(true);
+  });
+  const [unpair] = useState(() => () => {
+    live?.close();
+    forget();
     setEnded(true);
   });
 
@@ -195,14 +207,14 @@ export function App({
     if (!device()) return;
     const onStorage = (event: StorageEvent) => {
       if (event.key === null || event.key === SESSION_KEY) {
-        if (storedSession() === null) end();
+        if (storedSession() === null) unpair();
       }
     };
     window.addEventListener("storage", onStorage);
     return () => {
       window.removeEventListener("storage", onStorage);
     };
-  }, [end]);
+  }, [unpair]);
 
   useEffect(() => {
     if (!live) return;
@@ -214,13 +226,14 @@ export function App({
     };
   }, [live, end]);
 
-  if (ended || !connection || !live) return <NoSession onPaired={onPaired} />;
+  if (ended || !connection || !live) return <NoSession onPaired={onPaired} moved={moved} />;
   return (
     <Shell
       connection={connection}
       live={live}
       frame={environment?.frame ?? animationFrame}
       onSessionInvalid={end}
+      onUnpair={unpair}
     />
   );
 }

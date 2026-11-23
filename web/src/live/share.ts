@@ -11,6 +11,11 @@
 // its operation stream's position. When the leader closes, the lock passes to
 // another tab, which resumes from the last cursor it saw and resubscribes to
 // presence and the inbox. Without `navigator.locks`, every tab leads alone.
+//
+// Streams that fall silent are cut and opened again (live/silence.ts), and
+// the tab is not `live` until each has a frame. A follower that hears
+// nothing from its leader asks it, and takes the lock over from a leader
+// that does not answer: a browser may have suspended it.
 import { fromBinary, toBinary } from "@bufbuild/protobuf";
 import { client, type Connection } from "../api/connection";
 import { isSessionInvalid, reefError } from "../api/errors";
@@ -21,16 +26,28 @@ import {
   SubscribeOperationsResponseSchema,
 } from "../gen/reef/api/v1/operations_pb";
 import { PresenceService, SubscribePresenceResponseSchema } from "../gen/reef/api/v1/presence_pb";
-import { Backoff, sleep } from "./backoff";
+import { after, Backoff, sleep, type Cancel } from "./backoff";
 import { animationFrame, FrameNotifier, type FrameScheduler } from "./frame";
 import { InboxStore, runInbox } from "./inbox";
 import { OperationStore, positionFrame, runOperations } from "./operations";
 import { PresenceStore, runPresence } from "./presence";
+import {
+  browserClock,
+  onWake,
+  SILENT_MS,
+  SILENT_ON_WAKE_MS,
+  Silence,
+  Since,
+  type Clock,
+} from "./silence";
 
 export const LIVE_NAME = "reef-live";
 
 /** Operation-frame cursors a follower remembers, to drop repeats after a handover. */
 const RECENT_CURSORS = 1024;
+
+/** How long a follower waits for its leader's answer before it takes over. */
+export const ANSWER_MS = 5_000;
 
 export type ConnectionState = "connecting" | "live" | "reconnecting" | "ended";
 
@@ -51,6 +68,7 @@ type Message =
   | { t: "inboxResync" }
   | { t: "inbox"; frame: Uint8Array }
   | { t: "state"; state: ConnectionState }
+  | { t: "silent" }
   | { t: "ended" };
 
 /** What `BroadcastChannel` provides, so tests can supply their own. */
@@ -65,6 +83,9 @@ export interface LiveEnvironment {
   channel: ((name: string) => Channel) | undefined;
   frame: FrameScheduler;
   sleep: (ms: number, signal: AbortSignal) => Promise<void>;
+  after: (ms: number, run: () => void) => Cancel;
+  clock: Clock;
+  onWake: (run: () => void) => () => void;
 }
 
 export function browserEnvironment(): LiveEnvironment {
@@ -74,6 +95,9 @@ export function browserEnvironment(): LiveEnvironment {
       typeof BroadcastChannel !== "undefined" ? (name) => new BroadcastChannel(name) : undefined,
     frame: animationFrame,
     sleep,
+    after,
+    clock: browserClock,
+    onWake,
   };
 }
 
@@ -89,6 +113,17 @@ export class Live {
   private readonly stop = new AbortController();
   private channel: Channel | undefined;
   private releaseLock: (() => void) | undefined;
+  /** Aborted when this tab stops leading: its streams end. */
+  private lane = new AbortController();
+  /** Aborted to leave the queue for the lock. */
+  private queue = new AbortController();
+  private readonly silence: Silence;
+  /** When a follower last heard its leader. */
+  private readonly heard: Since;
+  /** How many messages of a leader's this follower has had. */
+  private messages = 0;
+  private cancelFollow: Cancel | undefined;
+  private stopWaking: (() => void) | undefined;
   private operationsFailing = false;
   private presenceFailing = false;
   private inboxFailing = false;
@@ -117,10 +152,16 @@ export class Live {
     this.presence = new PresenceStore(env.frame);
     this.inbox = new InboxStore(env.frame);
     this.stateNotifier = new FrameNotifier(env.frame);
+    this.silence = new Silence(env.clock, env.after);
+    this.heard = new Since(env.clock);
   }
 
   start() {
     const { locks, channel } = this.env;
+    this.stopWaking = this.env.onWake(() => {
+      if (this.leading) this.silence.check(SILENT_ON_WAKE_MS);
+      else this.checkLeader(SILENT_ON_WAKE_MS);
+    });
     if (!locks || !channel) {
       this.lead();
       return;
@@ -129,10 +170,39 @@ export class Live {
     this.channel.addEventListener("message", (event) => {
       this.receive(event.data as Message);
     });
+    this.follow(locks);
+  }
+
+  close() {
+    this.halt();
+    this.channel?.close();
+  }
+
+  /** Ends the streams, the timers and the claim to the lock. */
+  private halt() {
+    this.stop.abort();
+    this.lane.abort();
+    this.queue.abort();
+    this.cancelFollow?.();
+    this.stopWaking?.();
+    this.releaseLock?.();
+  }
+
+  /** Waits for the lock, on what the leader sends until then. */
+  private follow(locks: Pick<LockManager, "request">) {
+    this.heard.now();
     this.post({ t: "hello", from: this.id });
+    this.watchLeader();
+    this.queue = new AbortController();
+    this.claim(locks, { mode: "exclusive", signal: this.queue.signal });
+  }
+
+  private claim(locks: Pick<LockManager, "request">, options: LockOptions) {
+    let held = false;
     locks
-      .request(LIVE_NAME, { mode: "exclusive", signal: this.stop.signal }, () => {
+      .request(LIVE_NAME, options, () => {
         if (this.stop.signal.aborted) return;
+        held = true;
         this.lead();
         // Held until this tab closes or `close` runs.
         return new Promise<void>((release) => {
@@ -140,14 +210,47 @@ export class Live {
         });
       })
       .catch(() => {
-        // Aborted by `close` while waiting for the lock.
+        // Aborted while waiting for the lock, or, once held, taken over by a
+        // tab that this one did not answer.
+        if (held && !this.stop.signal.aborted) this.stepDown(locks);
       });
   }
 
-  close() {
-    this.stop.abort();
-    this.releaseLock?.();
-    this.channel?.close();
+  private stepDown(locks: Pick<LockManager, "request">) {
+    this.lane.abort();
+    this.leading = false;
+    this.inboxJoined = false;
+    this.follow(locks);
+  }
+
+  private watchLeader() {
+    this.cancelFollow?.();
+    this.cancelFollow = this.env.after(Math.max(SILENT_MS - this.heard.elapsed(), 1000), () => {
+      if (!this.checkLeader(SILENT_MS)) this.watchLeader();
+    });
+  }
+
+  /**
+   * Asks a leader silent for `limit` whether it is there, and takes over from
+   * one that is not. Whether it asked.
+   */
+  private checkLeader(limit: number): boolean {
+    const { locks } = this.env;
+    if (this.leading || !locks || this.heard.elapsed() < limit) return false;
+    const { messages } = this;
+    this.channel?.postMessage({ t: "silent" } satisfies Message);
+    this.cancelFollow?.();
+    this.cancelFollow = this.env.after(ANSWER_MS, () => {
+      if (this.leading || this.stop.signal.aborted) return;
+      if (this.messages > messages) {
+        this.watchLeader();
+        return;
+      }
+      this.setState(this.everLive ? "reconnecting" : "connecting");
+      this.queue.abort();
+      this.claim(locks, { mode: "exclusive", steal: true });
+    });
+    return true;
   }
 
   subscribeState(listener: () => void): () => void {
@@ -164,7 +267,12 @@ export class Live {
 
   private lead() {
     this.leading = true;
-    const { signal } = this.stop;
+    this.cancelFollow?.();
+    this.cancelFollow = undefined;
+    this.lane = new AbortController();
+    const { signal } = this.lane;
+    // What a follower holds says nothing about the streams it opens now.
+    this.operationsFailing = this.presenceFailing = this.inboxFailing = true;
     const operations = client(this.connection, OperationService);
     const presence = client(this.connection, PresenceService);
     const inbox = client(this.connection, InboxService);
@@ -177,9 +285,11 @@ export class Live {
     };
     void runOperations(
       (cursor, signal) =>
-        operations.subscribeOperations(
-          cursor === undefined ? {} : { start: { case: "cursor", value: cursor } },
-          { signal },
+        this.silence.watch(signal, (signal) =>
+          operations.subscribeOperations(
+            cursor === undefined ? {} : { start: { case: "cursor", value: cursor } },
+            { signal },
+          ),
         ),
       this.operations,
       {
@@ -199,7 +309,9 @@ export class Live {
         this.post({ t: "reset" });
       },
     );
-    void runPresence((signal) => presence.subscribePresence({}, { signal }), this.presence, {
+    const watchPresence = (signal: AbortSignal) =>
+      this.silence.watch(signal, (signal) => presence.subscribePresence({}, { signal }));
+    void runPresence(watchPresence, this.presence, {
       ...shared,
       backoff: new Backoff(),
       onResync: () => {
@@ -216,7 +328,9 @@ export class Live {
         this.updateState();
       },
     });
-    void runInbox((signal) => inbox.watchInbox({}, { signal }), this.inbox, {
+    const watchInbox = (signal: AbortSignal) =>
+      this.silence.watch(signal, (signal) => inbox.watchInbox({}, { signal }));
+    void runInbox(watchInbox, this.inbox, {
       ...shared,
       backoff: new Backoff(),
       onResync: () => {
@@ -247,11 +361,20 @@ export class Live {
           inbox: toBinary(WatchInboxResponseSchema, this.inbox.snapshotFrame()),
           state: this.state,
         });
+      } else if (message.t === "silent") {
+        this.silence.check(SILENT_ON_WAKE_MS);
+        this.post({ t: "state", state: this.state });
       }
       return;
     }
+    // Another follower's question is no sign of the leader.
+    if (message.t !== "hello" && message.t !== "silent") {
+      this.heard.now();
+      this.messages += 1;
+    }
     switch (message.t) {
       case "hello":
+      case "silent":
         return;
       case "welcome":
         // Another tab's answer: this tab already holds what it carries.
@@ -334,12 +457,12 @@ export class Live {
       !this.operationsFailing &&
       !this.presenceFailing &&
       !this.inboxFailing;
-    if (live) this.everLive = true;
     this.setState(live ? "live" : this.everLive ? "reconnecting" : "connecting");
   }
 
   private setState(state: ConnectionState) {
     if (this.state === state || this.state === "ended") return;
+    if (state === "live") this.everLive = true;
     this.state = state;
     if (this.leading) this.post({ t: "state", state });
     this.stateNotifier.notify();
@@ -350,8 +473,7 @@ export class Live {
     this.post({ t: "ended" });
     this.state = "ended";
     this.stateNotifier.notify();
-    this.stop.abort();
-    this.releaseLock?.();
+    this.halt();
     for (const listener of [...this.endedListeners]) listener();
   }
 }

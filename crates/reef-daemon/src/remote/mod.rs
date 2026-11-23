@@ -365,9 +365,12 @@ impl Advise for RemoteError {
             Self::PairingCodeInvalid => Some(Advice::hint(
                 "The code is wrong, used or expired, or this is not the address it was printed with. Run `reef remote pair` on the daemon's machine again, and type the new code at the address it prints.",
             )),
-            Self::OriginRequired { line } => Some(Advice::hint(format!(
-                "Add the address the phone opens to `[remote]` in config.toml, with its host in `names`, and restart the daemon: {line}"
-            ))),
+            Self::OriginRequired { line } => Some(Advice::run(
+                format!(
+                    "Add the address the phone opens to `[remote]` in config.toml, with its host in `names`, and restart the daemon: {line}. The next command says where the file is."
+                ),
+                ["reef", "config", "show"],
+            )),
             Self::OriginChanged { origin, .. } if origin.is_empty() => Some(Advice::hint(
                 "The daemon has no `[remote] origin` any more, so no device works.",
             )),

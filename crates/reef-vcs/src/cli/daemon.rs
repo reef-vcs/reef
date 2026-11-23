@@ -126,7 +126,8 @@ pub(crate) async fn run(global: &Global, out: &Out, args: Args) -> Result<(), Cl
                 .filter(|days| *days < super::remote::CERTIFICATE_WARN_DAYS)
             {
                 out.note(&format!(
-                    "reef: the remote listener's certificate has {days} days left"
+                    "reef: the remote listener's certificate has {}",
+                    super::remote::days_left(days)
                 ));
             }
             out.object(&status)

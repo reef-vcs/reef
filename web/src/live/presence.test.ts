@@ -102,7 +102,7 @@ describe("connection state", () => {
     await settle();
     expect(live.state).toBe("live");
     streams.lastPresence().fail(new ConnectError("down", Code.Unavailable));
-    await settle(3);
+    await settle();
     expect(live.state).toBe("reconnecting");
     live.close();
   });

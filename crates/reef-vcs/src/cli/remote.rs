@@ -506,7 +506,7 @@ impl TextRender for RemoteListener {
             pairs.push((
                 "expires",
                 match cert.days_left {
-                    Some(days) => format!("{expires} ({days} days left)"),
+                    Some(days) => format!("{expires} ({})", days_left(days)),
                     None => expires,
                 },
             ));
@@ -547,6 +547,31 @@ impl TextRender for PairingCode {
     }
 }
 
+/// A certificate's days left in words.
+pub(super) fn days_left(days: i64) -> String {
+    match days {
+        ..=-1 => "expired".to_owned(),
+        1 => "1 day left".to_owned(),
+        days => format!("{days} days left"),
+    }
+}
+
+/// Whether the certificate name `presented` is for the DNS name `host`, as
+/// TLS clients match them: the whole name, or `*` for the first label of at
+/// least three.
+fn covers(presented: &str, host: &str) -> bool {
+    let presented = presented.trim_end_matches('.');
+    match presented.strip_prefix("*.") {
+        Some(under) => {
+            under.contains('.')
+                && host
+                    .split_once('.')
+                    .is_some_and(|(_, rest)| rest.eq_ignore_ascii_case(under))
+        }
+        None => presented.eq_ignore_ascii_case(host),
+    }
+}
+
 /// What in the listener's state keeps a phone out.
 fn pair_warnings(remote: Option<&RemoteListener>) -> Vec<String> {
     let Some(remote) = remote else {
@@ -572,7 +597,19 @@ fn pair_warnings(remote: Option<&RemoteListener>) -> Vec<String> {
             );
         }
         if let Some(days) = cert.days_left.filter(|days| *days < CERTIFICATE_WARN_DAYS) {
-            warnings.push(format!("the certificate has {days} days left"));
+            warnings.push(format!("the certificate has {}", days_left(days)));
+        }
+        if let Some(host) = remote
+            .origin
+            .as_deref()
+            .and_then(RemoteUrl::parse)
+            .map(|url| url.host)
+            && !cert.subject_names.iter().any(|name| covers(name, &host))
+        {
+            warnings.push(format!(
+                "the certificate is not for {host} (it names {}), so the phone will not open the app",
+                cert.subject_names.join(", ")
+            ));
         }
     }
     warnings
@@ -813,6 +850,83 @@ async fn token(ctx: &Ctx, command: TokenCommand) -> Result<(), CliError> {
             let response = ctx.call(ctx.client.revoke_remote_token(&name)).await?;
             let token = RemoteToken::from(&response.token.unwrap_or_default());
             ctx.out.done(&token, &format!("revoked {name}"))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use reef_client::json::RemoteCertificate;
+
+    use super::*;
+
+    #[test]
+    fn certificate_names_cover_hosts_as_tls_clients_match_them() {
+        for (presented, host) in [
+            ("mac.example.ts.net", "mac.example.ts.net"),
+            ("MAC.example.ts.net.", "mac.example.ts.net"),
+            ("*.example.ts.net", "mac.example.ts.net"),
+            ("*.example.com", "mac.example.com"),
+        ] {
+            assert!(covers(presented, host), "{presented} for {host}");
+        }
+        for (presented, host) in [
+            ("wrong.example", "mac.example"),
+            ("example.ts.net", "mac.example.ts.net"),
+            ("*.example.ts.net", "example.ts.net"),
+            ("*.example.ts.net", "a.mac.example.ts.net"),
+            ("*.net", "mac.net"),
+            ("m*.example.ts.net", "mac.example.ts.net"),
+            ("*", "mac"),
+            ("10.0.0.1", "mac.example.ts.net"),
+            ("", "mac.example.ts.net"),
+        ] {
+            assert!(!covers(presented, host), "{presented} for {host}");
+        }
+    }
+
+    fn listener(names: &[&str], days_left: i64) -> RemoteListener {
+        RemoteListener {
+            state: "listening".to_owned(),
+            enabled_by: Some("config".to_owned()),
+            address: "0.0.0.0:7470".to_owned(),
+            names: vec!["mac.example.ts.net".to_owned()],
+            certificate: Some(RemoteCertificate {
+                source: "file".to_owned(),
+                fingerprint: "sha256:00".to_owned(),
+                not_after: None,
+                days_left: Some(days_left),
+                subject_names: names.iter().map(|name| (*name).to_owned()).collect(),
+            }),
+            error: None,
+            live_tokens: 0,
+            origin: Some("https://mac.example.ts.net:7470".to_owned()),
+        }
+    }
+
+    #[test]
+    fn pairing_warns_of_a_certificate_the_phone_refuses() {
+        let warned = |names: &[&str], days| pair_warnings(Some(&listener(names, days)));
+        for names in [
+            &["mac.example.ts.net"][..],
+            &["10.0.0.1", "*.example.ts.net"],
+        ] {
+            assert_eq!(warned(names, 14), [""; 0]);
+        }
+        let wrong = warned(&["wrong.example", "10.0.0.1"], 90);
+        assert_eq!(wrong.len(), 1);
+        assert!(
+            wrong[0].contains("not for mac.example.ts.net (it names wrong.example, 10.0.0.1)"),
+            "{wrong:?}"
+        );
+        for (days, said) in [
+            (13, "13 days left"),
+            (1, "1 day left"),
+            (0, "0 days left"),
+            (-4, "expired"),
+        ] {
+            let warnings = warned(&["mac.example.ts.net"], days);
+            assert_eq!(warnings, [format!("the certificate has {said}")]);
         }
     }
 }

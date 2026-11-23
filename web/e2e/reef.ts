@@ -245,12 +245,12 @@ export class Reef {
 
   /**
    * Restarts the daemon with its remote listener on a free loopback port
-   * (R3.40); `[remote] origin`.
+   * (R3.40), or on `listen` behind the port `through`; `[remote] origin`.
    */
-  async serveRemote(): Promise<string> {
+  async serveRemote(behind?: { through: number; listen: number }): Promise<string> {
     await this.stop();
-    const port = String(await freePort());
-    const origin = `https://localhost:${port}`;
+    const port = String(behind?.listen ?? (await freePort()));
+    const origin = `https://localhost:${String(behind?.through ?? port)}`;
     const config = join(this.state, "config.toml");
     await appendFile(
       config,
@@ -258,6 +258,14 @@ export class Reef {
     );
     await this.start();
     return origin;
+  }
+
+  /** Restarts the daemon with its configuration file edited. */
+  async reconfigure(edit: (text: string) => string) {
+    await this.stop();
+    const config = join(this.state, "config.toml");
+    await writeFile(config, edit(await readFile(config, "utf8")));
+    await this.start();
   }
 
   async start() {

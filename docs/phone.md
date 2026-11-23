@@ -39,7 +39,7 @@ The app's storage is its own, so pair inside the app, not in Safari. **Pair this
 | | |
 | --- | --- |
 | Read | Every registered repository: the inbox, proposals with their evidence and diffs, the smartlog, workspaces, activity |
-| Write | Your own "landed since you last looked" mark, and nothing else |
+| Write | Your own "landed since you last looked" mark, and the snapshots a read may take: a read that names a workspace's change (`@`) first records what its agent has written, as any such read does, in an operation that names the phone |
 | Where | Only at the `origin` it was paired at. When `origin` changes, pair again |
 | Until | 90 days (`--expires`, 1 minute to 366 days), or until you end it |
 | Who | The person it was paired for (`--identity`), your daemon's default person if you name none |
@@ -75,7 +75,7 @@ The daemon reads the two files again when either changes, at most once a minute,
 tailscale cert --cert-file ~/.config/reef/mac.crt --key-file ~/.config/reef/mac.key mac.example.ts.net
 ```
 
-Set `listen` to the machine's tailnet address, so that the port is open on the tailnet alone.
+Set `listen` to the machine's tailnet IPv4 address (`tailscale ip -4`), so that the port is open on the tailnet alone and each device counts as its own address.
 
 **Your own domain.** Point a name at an address the phone reaches, have the client write `fullchain.pem` and the key where `[remote]` names them, and put the name in `names` and `origin`.
 
@@ -86,8 +86,9 @@ Set `listen` to the machine's tailnet address, so that the port is open on the t
 ## Limits
 
 - **Your computer asleep answers nothing.** A daemon on a machine that stays up is the answer.
+- **The app notices a dead connection** and opens another: when the app comes back to the screen or to the network, or after 40 s of silence. It then says **Reconnecting** until the inbox is current. In Chromium and WebKit on a Mac the browser took 10 to 13 s more to give a dead connection up.
 - **Nothing is readable offline**, on purpose: the phone keeps no copy of your code. It keeps the token, its name and its end.
 - **A program that runs as you** can read the TLS key, stop the daemon and serve its own page at the phone's address, which the app then opens with its token ([threat model](threat-model.md), S-281). A daemon on another machine, or under another user, closes that.
-- **Wrong codes slow their address down.** After 10 in a minute the daemon closes new connections from that address for a minute, and longer each time. A paired phone there keeps its pairing and reconnects when that ends.
+- **Wrong codes slow their address down.** After 10 in a minute the daemon closes new connections from that address for a minute, and longer each time. A paired phone there keeps its pairing and reconnects when that ends. Over IPv6 every peer in one /64 counts as one address, so let `listen` name the IPv4 address.
 - **A link does not change a paired phone's session.** A page opened with a token in its link keeps the phone's own. Unpair first to use the link.
-- **What the app was tested on.** The browser tests run the pages at 375 by 812 in Chromium, Firefox and WebKit. The Home Screen app was tried as a prototype in the iOS 26.1 Simulator. No real phone has run this code yet.
+- **What the app was tested on.** The browser tests run the pages at 375 by 812 in Chromium, Firefox and WebKit. The Home Screen app was tried as a prototype in the iOS 26.1 Simulator. On an iPhone (iOS 27.2.1, over Tailscale) a throwaway server of the same shape loaded trusted, its storage survived a restart of the phone, and links opened the exact page. No real phone has run this code yet.

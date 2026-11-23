@@ -5,11 +5,14 @@
 import type { DescService } from "@bufbuild/protobuf";
 import { createClient, type Client, type Interceptor, type Transport } from "@connectrpc/connect";
 import { createGrpcWebTransport } from "@connectrpc/connect-web";
+import { isSessionInvalid, reefError, type ReefError } from "./errors";
 
 export interface Connection {
   transport: Transport;
   /** Where the connection goes, for display. */
   label: string;
+  /** The daemon's last refusal of the page's token, for why the session ended. */
+  refused?: ReefError;
 }
 
 const clients = new WeakMap<Transport, Map<DescService, Client<DescService>>>();
@@ -36,12 +39,38 @@ export function bearer(token: string): Interceptor {
   };
 }
 
+/** Keeps each refusal of the token, of a call or of a stream, as `connection.refused`. */
+export function noteRefusals(connection: () => Connection | undefined): Interceptor {
+  const noted = (thrown: unknown) => {
+    const error = reefError(thrown);
+    const to = connection();
+    if (to && isSessionInvalid(error)) to.refused = error;
+    return thrown;
+  };
+  async function* each<T>(messages: AsyncIterable<T>): AsyncGenerator<T> {
+    try {
+      yield* messages;
+    } catch (thrown) {
+      throw noted(thrown);
+    }
+  }
+  return (next) => async (request) => {
+    try {
+      const response = await next(request);
+      return response.stream ? { ...response, message: each(response.message) } : response;
+    } catch (thrown) {
+      throw noted(thrown);
+    }
+  };
+}
+
 /** gRPC-web, binary only, to `baseUrl` (this page's origin by default). */
 export function browserConnection(token: string, baseUrl: string = location.origin): Connection {
+  let made: Connection | undefined = undefined;
   const transport = createGrpcWebTransport({
     baseUrl,
     useBinaryFormat: true,
-    interceptors: [bearer(token)],
+    interceptors: [noteRefusals(() => made), bearer(token)],
   });
-  return { transport, label: baseUrl };
+  return (made = { transport, label: baseUrl });
 }

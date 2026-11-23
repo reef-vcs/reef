@@ -63,6 +63,17 @@ pub(crate) fn pairing_started(name: &str, identity_id: &str) {
     );
 }
 
+/// A code taken by `peer` for the device `name`: it works no more, whatever
+/// becomes of the redeem.
+pub(crate) fn pairing_taken(peer: SocketAddr, name: &str) {
+    tracing::info!(
+        target: "reef_daemon::remote::audit",
+        peer = %peer,
+        token_name = name,
+        "pairing code taken"
+    );
+}
+
 /// Every code waiting ended after too many wrong ones, the last from `peer`.
 pub(crate) fn pairings_ended(peer: SocketAddr) {
     tracing::warn!(

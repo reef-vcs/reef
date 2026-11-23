@@ -204,6 +204,19 @@ mod tests {
         assert_eq!(pairings.take(&code), Err(Wrong { ended_all: false }));
     }
 
+    // Review R6: every character may be each of the 32, and codes do not repeat.
+    #[test]
+    fn codes_are_40_bits() {
+        use std::collections::HashSet;
+        let codes: HashSet<String> = (0..2_000).map(|_| new_code()).collect();
+        assert_eq!(codes.len(), 2_000);
+        for position in 0..CODE_LEN {
+            let seen: HashSet<u8> = codes.iter().map(|code| code.as_bytes()[position]).collect();
+            assert_eq!(seen, HashSet::from(*ALPHABET), "character {position}");
+        }
+        assert!(codes.iter().all(|code| code.len() == CODE_LEN));
+    }
+
     #[test]
     fn letters_a_person_mistakes_are_read_as_digits() {
         assert_eq!(canonical("oO-iI lL-9z"), "0011119Z");

@@ -66,6 +66,16 @@ export function storeSession(token: string, storage: Storage | null = localStora
   write(storage, token);
 }
 
+/** Takes `#session=` out of the URL; what it held. */
+export function stripSession(
+  location: Location = window.location,
+  history: History = window.history,
+): RegExpExecArray | null {
+  const match = FRAGMENT.exec(location.hash);
+  if (match) history.replaceState(history.state, "", location.pathname + location.search);
+  return match;
+}
+
 /**
  * The tab's token: from `#session=` (stored, then removed from the URL), else
  * from storage. Null means the tab has no session.
@@ -76,7 +86,7 @@ export function takeSession(
   storage: Storage | null = localStorageOrNull(),
   tab: Storage | null = sessionStorageOrNull(),
 ): string | null {
-  const match = FRAGMENT.exec(location.hash);
+  const match = stripSession(location, history);
   if (match?.[1]) {
     write(storage, match[1]);
     if (match[2]) {
@@ -87,7 +97,6 @@ export function takeSession(
       }
       embeddedNow = true;
     }
-    history.replaceState(history.state, "", location.pathname + location.search);
     return match[1];
   }
   return read(storage);

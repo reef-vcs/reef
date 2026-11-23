@@ -3,7 +3,7 @@
 - Status: accepted
 - Date: 2026-11-23
 - Ticket: R3.40 ([brief](../dev-tickets/phase-3/R3.40-phone-web-app.md)), pull request 1. Pull request 2 adds passkeys at the remote origin and what a device decides.
-- Amends: [0029](0029-daemon-api-v1.md) (decision 12's exceptions gain `RedeemPairing`, whose token is an access record), [0005](0005-tauri-desktop-shell.md) (the phone's app is the web app, not the shell), [0047](0047-web-ui-transport-and-local-listener.md) (the security headers refuse service workers, and the local listener serves nothing an app is installed from), [0049](0049-remote-listener.md) (decision 5: a third scope; decision 8: the gate takes a pairing code for one method; decision 11: a backoff spares live tokens on open connections)
+- Amends: [0029](0029-daemon-api-v1.md) (decision 12's exceptions gain `RedeemPairing`, whose token is an access record), [0005](0005-tauri-desktop-shell.md) (the phone's app is the web app, not the shell), [0047](0047-web-ui-transport-and-local-listener.md) (the security headers refuse service workers, the local listener serves nothing an app is installed from, and live streams that fall silent are opened again, from another tab when the browser suspended the one that held them), [0049](0049-remote-listener.md) (decision 5: a third scope; decision 8: the gate takes a pairing code for one method; decision 11: a backoff spares live tokens on open connections)
 
 ## Context
 
@@ -23,9 +23,10 @@ The user decided that the phone's app is a Home Screen web app served by the rem
 
 ## Consequences
 
-- A lost phone reads every repository, its diffs and its inbox until `reef remote token revoke` or the 90 days end. It changes nothing but its person's inbox marks.
-- A changed `[remote] origin` ends every device, and each pairs again. A port forward works while the phone's address is the one in `[remote] origin`.
+- A lost phone reads every repository, its diffs and its inbox until `reef remote token revoke` or the 90 days end. It changes nothing but its person's inbox marks, and the snapshots a read may take (a read that names `@` records what the workspace holds, with the device's token on the operation).
+- A changed `[remote] origin` stops every device, and each pairs again at the new one. Its page says where that is and keeps its token, so an `origin` missing once, or put back, unpairs nobody. A port forward works while the phone's address is the one in `[remote] origin`.
 - A phone must trust the certificate, so the generated one does not do. [docs/phone.md](../phone.md) gives three ways.
+- A connection that dies silently (a phone asleep, or on another network) is cut by the page: every live stream has a frame at least every 15 s, and one silent for 40 s, or for 20 s when the page is shown or the network is back, is opened again with the others (`web/src/live/silence.ts`). It applies to every page, on either listener.
 - A restart of the daemon drops the codes waiting.
 - `StartPairing`'s answer and the terminal `reef remote pair` runs in hold a credential for 10 minutes.
 

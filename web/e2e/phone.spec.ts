@@ -5,7 +5,8 @@
 // code `reef remote pair` prints, at the remote listener's address, it shows
 // the inbox, a proposal and its diff, writes nothing, and ends when told.
 import type { Page } from "@playwright/test";
-import { expect, test, type Reef } from "./reef";
+import { FreezingProxy } from "./freeze";
+import { expect, freePort, test, type Reef } from "./reef";
 
 const AGENT = "claude@e2e";
 const LONG = "a_very_long_name_that_no_phone_is_wide_enough_for_".repeat(4);
@@ -102,6 +103,15 @@ async function rowsAreTappable(page: Page) {
     expect(box?.height, "a row's link").toBeGreaterThanOrEqual(44);
     expect(box?.width, "a row's link").toBeGreaterThan(300);
   }
+}
+
+/** Pairs `page` at the daemon's remote address. */
+async function pairBrowser(page: Page, reef: Reef) {
+  const { code } = (await reef.reef(["remote", "pair", "iphone"])) as { code: string };
+  await page.goto("/");
+  await page.getByRole("button", { name: "Pair this browser instead" }).click();
+  await page.getByLabel("Pairing code").fill(code);
+  await page.getByRole("button", { name: "Pair", exact: true }).click();
 }
 
 /** Opens the proposal from its inbox row. */
@@ -282,12 +292,15 @@ test("a paired phone reads, and ends when told", async ({ browser, reef }) => {
     await test.step("a link's token does not take its place; unpairing ends every tab", async () => {
       const token = () => page.evaluate(() => localStorage.getItem("reef.session"));
       const own = await token();
-      await page.goto("/#session=another");
-      await rowsAreTappable(page);
-      expect(await token()).toBe(own);
       const other = await context.newPage();
       await other.goto("/");
       await rowsAreTappable(other);
+      await page.goto("/#session=another&embedded=1");
+      await rowsAreTappable(page);
+      expect(await token()).toBe(own);
+      expect(await page.evaluate(() => sessionStorage.length)).toBe(0);
+      // The phone's other tab went on.
+      await expect(other.locator(".connection")).toHaveText("Live");
       await page.getByRole("button", { name: "Settings" }).click();
       const phone = page.getByRole("region", { name: "This phone" });
       await phone.getByRole("button", { name: "Unpair this phone" }).click();
@@ -301,6 +314,27 @@ test("a paired phone reads, and ends when told", async ({ browser, reef }) => {
       await page.getByRole("button", { name: "Pair this browser instead" }).click();
       await page.getByLabel("Pairing code").fill(again.code);
       await page.getByRole("button", { name: "Pair", exact: true }).click();
+      await openProposal(page);
+    });
+
+    await test.step("a daemon with no origin for a while keeps the phone paired", async () => {
+      const token = () => page.evaluate(() => localStorage.getItem("reef.session"));
+      const own = await token();
+      const without = { line: "" };
+      await reef.reconfigure((text) =>
+        text.replace(/^origin = .*$/m, (line) => {
+          without.line = line;
+          return "";
+        }),
+      );
+      await page.goto("/");
+      await expect(page.getByText(`This phone was paired at ${origin}.`)).toBeVisible();
+      await expect(page.getByText("has no `[remote] origin` any more")).toBeVisible();
+      await expect(page.getByRole("button", { name: "Pair this browser instead" })).toHaveCount(0);
+      expect(await token()).toBe(own);
+      await reef.reconfigure((text) => text.replace("[remote]\n", `[remote]\n${without.line}\n`));
+      await page.getByRole("button", { name: "Try again" }).click();
+      await rowsAreTappable(page);
       await openProposal(page);
     });
 
@@ -337,5 +371,86 @@ test("a paired phone reads, and ends when told", async ({ browser, reef }) => {
     expect(errors).toEqual([]);
   } finally {
     await context.close();
+  }
+});
+
+test("a phone whose connection died says so, and catches up", async ({
+  browser,
+  browserName,
+  reef,
+}) => {
+  test.skip(browserName === "firefox", "a phone's Home Screen app is WebKit's or Chromium's");
+  const proxy = new FreezingProxy();
+  const through = await proxy.listen();
+  const listen = await freePort();
+  proxy.to(listen);
+  const origin = await reef.serveRemote({ through, listen });
+  const context = await browser.newContext({
+    ignoreHTTPSErrors: true,
+    viewport: { width: 375, height: 812 },
+    baseURL: origin,
+  });
+  try {
+    const page = await context.newPage();
+    // Time flows as it does, and can be moved on.
+    await page.clock.install();
+    await pairBrowser(page, reef);
+    const connection = page.locator(".connection");
+    await expect(connection).toHaveText("Live");
+    await expect(needs(page).getByText("Nothing needs you now.")).toBeVisible();
+
+    await test.step("while frames arrive, nothing is opened again", async () => {
+      const accepted = proxy.accepted;
+      let streams = 0;
+      page.on("request", (request) => {
+        if (/Subscribe|WatchInbox/.test(request.url())) streams += 1;
+      });
+      for (const event of ["pageshow", "online"]) {
+        await page.evaluate((name) => window.dispatchEvent(new Event(name)), event);
+      }
+      await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+      await page.clock.fastForward(10_000);
+      await expect(connection).toHaveText("Live");
+      expect(streams).toBe(0);
+      expect(proxy.accepted).toBe(accepted);
+    });
+
+    await test.step("a dead connection is not live, and the inbox comes back on another", async () => {
+      proxy.freeze();
+      const [asking] = reef.workspaces;
+      if (!asking) throw new Error("setup made no workspace");
+      await reef.edit(asking, { "config.txt": "format = ?\n" });
+      await reef.reef(["describe", "--workspace", asking.id, "-m", "Pick a format"], {
+        agent: AGENT,
+      });
+      await reef.reef(
+        ["ask", "--workspace", asking.id, "-m", "Two fit.", "--tried", "the docs"].concat([
+          "--question",
+          "TOML or YAML?",
+          "--reason",
+          "decision",
+        ]),
+        { agent: AGENT },
+      );
+      await expect(connection).toHaveText("Live");
+      await page.clock.fastForward(45_000);
+      await expect(connection).toHaveText("Reconnecting");
+      // The browser gives the dead connection up some 12 s after a request on
+      // it, if nothing has come on it for 10 s (Chromium): time moves on here.
+      await expect
+        .poll(
+          async () => {
+            await page.clock.fastForward(5_000);
+            return connection.textContent();
+          },
+          { timeout: 60_000, intervals: [1_000] },
+        )
+        .toBe("Live");
+      await needs(page).getByRole("button", { name: "Show 1 new item" }).click();
+      await expect(needs(page).getByText("TOML or YAML?")).toBeVisible();
+    });
+  } finally {
+    await context.close();
+    proxy.close();
   }
 });

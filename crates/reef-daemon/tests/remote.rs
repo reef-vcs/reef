@@ -1522,6 +1522,7 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Sink {
 
 // R2.08 11 and 18: the audit lines, and no secret in any log line.
 #[tokio::test(flavor = "multi_thread")]
+#[expect(clippy::too_many_lines, reason = "one log, read once")]
 async fn audit_log_and_no_secrets() {
     let sink = Sink::default();
     tracing_subscriber::fmt()
@@ -1576,6 +1577,29 @@ async fn audit_log_and_no_secrets() {
     let code = start_pairing(&daemon, "taken").await;
     let taken = token(&daemon, "taken", RemoteScope::Read).await;
     redeem(addr, &code).await.unwrap_err();
+    // A code whose request does not decode is used up, and says so; a device
+    // elsewhere is refused, and logged.
+    let code = start_pairing(&daemon, "garbled").await;
+    let (_, _, trailers) = send(
+        addr,
+        true,
+        request(
+            Method::POST,
+            AT_ORIGIN,
+            REDEEM,
+            &[
+                ("content-type", "application/grpc"),
+                ("te", "trailers"),
+                ("authorization", &format!("Bearer reef_pair_{code}")),
+            ],
+            vec![0, 0, 0, 0, 2, 0xff, 0xff],
+        ),
+    )
+    .await;
+    drop(trailers);
+    assert_eq!(redeem(addr, &code).await.unwrap_err(), PAIRING_CODE_INVALID);
+    let headers = call_at(addr, "localhost:7470", STATUS, &again).await;
+    assert_eq!(reason_in(&headers), reef_api::error::REMOTE_ORIGIN_CHANGED);
     start_pairing(&daemon, "tablet").await;
     redeem(addr, "ZZZZZZZZ").await.unwrap_err();
     redeem(addr, "ZZZZZZZZ").await.unwrap_err();
@@ -1615,6 +1639,17 @@ async fn audit_log_and_no_secrets() {
         "{audit:#?}"
     );
     assert!(has("pairing failed after its code was taken"), "{audit:#?}");
+    assert!(
+        audit
+            .iter()
+            .any(|line| line.contains("pairing code taken") && line.contains("garbled")),
+        "{audit:#?}"
+    );
+    assert!(
+        audit.iter().any(|line| line.contains("remote call refused")
+            && line.contains("this device was paired at https://phone.test:7470")),
+        "{audit:#?}"
+    );
     assert!(has("every code waiting ended"), "{audit:#?}");
     for secret in [&read, &write, &rotated, &device, &again, &taken] {
         let raw = &secret[22..];
@@ -1764,7 +1799,19 @@ async fn pairing_starts_on_the_socket() {
         .unwrap_err();
     assert_eq!(reason(&error), reef_api::error::REMOTE_ORIGIN_REQUIRED);
     let line = format!("origin = \"https://mac.example:{}\"", addr.port());
-    assert!(error.advice().unwrap().hint.contains(&line), "{error:?}");
+    let advice = error.advice().unwrap();
+    assert!(advice.hint.contains(&line), "{error:?}");
+    assert_eq!(advice.next, ["reef", "config", "show"]);
+    // Off, as a listener on a port this test may not bind: https's own port
+    // is left out, as the configuration asks.
+    let off = TestDaemon::start_with(|config| {
+        config.file.remote.names = vec!["mac.example".to_owned()];
+        "0.0.0.0:443".clone_into(&mut config.file.remote.listen);
+    })
+    .await;
+    let error = off.client.start_pairing("phone", "", None).await;
+    let hint = error.unwrap_err().advice().unwrap().hint;
+    assert!(hint.contains("origin = \"https://mac.example\""), "{hint}");
 
     let (daemon, addr, _) = daemon_with(paired_at).await;
     assert_eq!(remote_status(&daemon).await.origin, ORIGIN);

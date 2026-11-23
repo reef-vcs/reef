@@ -1,7 +1,7 @@
 // A paired phone (R3.40): what the daemon answered when a code was typed
 // here. The token is the page's session (`session.ts`); this record is for
 // the page's words and for what it offers, and the daemon decides.
-import { localStorageOrNull, storedSession, storeSession, takeSession } from "./session";
+import { localStorageOrNull, storedSession, stripSession, takeSession } from "./session";
 
 export const DEVICE_KEY = "reef.device";
 
@@ -28,6 +28,8 @@ export function device(storage: Storage | null = localStorageOrNull()): Device |
   try {
     const text = storage?.getItem(DEVICE_KEY);
     const paired = text ? parse(text) : null;
+    // The daemon refuses it from then on.
+    if (paired?.expiresAt != null && paired.expiresAt <= Date.now()) return null;
     // A link that brought another token took the pairing's place.
     return paired && storedSession(storage)?.startsWith(`reef_${paired.id}_`) ? paired : null;
   } catch {
@@ -59,9 +61,7 @@ export function endDevice(token: string, storage: Storage | null = localStorageO
  * again from a link.
  */
 export function openSession(): string | null {
-  const paired = device() ? storedSession() : null;
-  const opened = takeSession();
-  if (paired === null || opened === paired) return opened;
-  storeSession(paired);
-  return paired;
+  if (!device()) return takeSession();
+  stripSession();
+  return storedSession();
 }

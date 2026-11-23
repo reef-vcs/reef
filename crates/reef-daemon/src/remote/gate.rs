@@ -254,13 +254,15 @@ impl Gate {
         } else {
             Err(false)
         };
-        taken.map_err(|ended_all| {
-            self.count(peer, path, "pairing_code");
-            if ended_all {
-                audit::pairings_ended(peer);
-            }
-            RemoteError::PairingCodeInvalid
-        })
+        taken
+            .inspect(|pairing| audit::pairing_taken(peer, &pairing.name))
+            .map_err(|ended_all| {
+                self.count(peer, path, "pairing_code");
+                if ended_all {
+                    audit::pairings_ended(peer);
+                }
+                RemoteError::PairingCodeInvalid
+            })
     }
 
     /// Steps 8 to 10 for `request` from `peer`: the caller and its hold on
