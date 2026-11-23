@@ -3815,6 +3815,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "reef-shell"
+version = "0.4.2"
+dependencies = [
+ "reef-api",
+ "reef-client",
+ "reef-daemon",
+ "reef-testing",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tonic",
+ "tracing",
+]
+
+[[package]]
 name = "reef-symbols"
 version = "0.4.2"
 dependencies = [

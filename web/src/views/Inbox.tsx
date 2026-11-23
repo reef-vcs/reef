@@ -23,9 +23,8 @@ import { Time } from "../ui/TimeLabel";
 import { plural } from "../ui/words";
 import { activityHref } from "./activity-route";
 import { Answer } from "./AnswerBox";
-import { fleetHref } from "./fleet-route";
 import { InboxModel, type BucketName, type DigestState } from "./inbox-model";
-import { proposalHref } from "./proposal-route";
+import { targetOf } from "./inbox-route";
 import { changeLabel } from "./proposal-words";
 import { smartlogHref } from "./smartlog-route";
 
@@ -53,15 +52,6 @@ const DEPARTED_WORDS = {
 } as const;
 
 /** Where a row's item is acted on or read. */
-function targetOf(item: InboxItem): string {
-  const repo = item.repoId;
-  const record = item.record;
-  if (record.case === "proposal") return proposalHref({ repo, change: item.changeId });
-  if (record.case === "workspace") return fleetHref({ repo, workspace: record.value.id });
-  if (item.changeId) return smartlogHref({ repo, change: item.changeId });
-  return smartlogHref({ repo });
-}
-
 /**
  * A row's words: its link (a proposal's subject, else the daemon's
  * sentence), the sentence under it for a proposal, and the agent's own
@@ -187,10 +177,12 @@ function Bucket({
   connection,
   model,
   version,
+  reading,
 }: {
   name: BucketName;
   title: string;
   held: HeldBucket | null;
+  reading: boolean;
   empty: string;
   repoNames: ReadonlyMap<string, string> | undefined;
   connection: Connection;
@@ -221,7 +213,10 @@ function Bucket({
         </p>
       )}
       {held === null && <p className="secondary">Reading the inbox.</p>}
-      {held && held.rows.length === 0 && fresh === 0 && <p className="secondary">{empty}</p>}
+      {held && held.rows.length === 0 && fresh === 0 && !reading && (
+        <p className="secondary">{empty}</p>
+      )}
+      {held && reading && <p className="secondary">Reading more repositories.</p>}
       {held && held.rows.length > 0 && (
         <ul className="card inbox-list">
           {held.rows.map((row) => (
@@ -389,6 +384,7 @@ export function Inbox({
         name="needs"
         title="Needs you now"
         held={snapshot.needs}
+        reading={snapshot.reading}
         empty="Nothing needs you now."
         repoNames={names}
         connection={connection}
@@ -399,6 +395,7 @@ export function Inbox({
         name="watching"
         title="Watching"
         held={snapshot.watching}
+        reading={snapshot.reading}
         empty="No proposals or instructions in flight."
         repoNames={names}
         connection={connection}

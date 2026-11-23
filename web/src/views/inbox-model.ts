@@ -21,7 +21,6 @@ import {
 import { RepositoryService } from "../gen/reef/api/v1/repositories_pb";
 import { holdDigest, shown, type VisitDigest } from "../inbox/digest";
 import { holdRead, showNew, type HeldBucket } from "../inbox/held";
-import { NeedsWatcher } from "../inbox/needs";
 import { FrameNotifier, type FrameScheduler } from "../live/frame";
 import type { InboxStore, SectionState } from "../live/inbox";
 
@@ -39,7 +38,6 @@ export interface DigestState {
 }
 
 export interface InboxSnapshot {
-  /** Null until the stream's first inbox is complete. */
   needs: HeldBucket | null;
   watching: HeldBucket | null;
   /** Repositories with something landed since the base, in the order sent. */
@@ -48,8 +46,7 @@ export interface InboxSnapshot {
   failed: readonly SectionState[];
   /** The daemon's count of what needs the person now: the title's number. */
   needsTotal: number;
-  /** Needs-you-now items new since the last update (inbox/needs.ts). */
-  added: readonly InboxItem[];
+  reading: boolean;
   /** The repository the tab names could not be found, or a mark failed. */
   error: ReefError | null;
   version: number;
@@ -61,7 +58,7 @@ const EMPTY: InboxSnapshot = {
   digests: [],
   failed: [],
   needsTotal: 0,
-  added: [],
+  reading: true,
   error: null,
   version: 0,
 };
@@ -88,7 +85,7 @@ function mergeSections(
 export class InboxModel {
   private snapshot: InboxSnapshot = EMPTY;
   private readonly notifier: FrameNotifier;
-  private readonly needs = new NeedsWatcher();
+  private whole = false;
   private readonly visits = new Map<string, VisitDigest>();
   private readonly answered = new Set<string>();
   private readonly marked = new Map<string, bigint>();
@@ -199,11 +196,17 @@ export class InboxModel {
 
   /** The store's inbox, as this page shows it. */
   private project() {
-    if (this.stopped || !this.inbox.synced) return;
+    if (this.stopped) return;
     if (this.repo !== undefined && this.repoId === undefined) return;
     const sections = [...this.inbox.sections.values()].filter(
       (section) => this.repoId === undefined || section.repoId === this.repoId,
     );
+    const reading =
+      !this.inbox.synced &&
+      (this.repoId === undefined || !sections.some((section) => section.listed));
+    if (reading && !sections.some((section) => section.listed)) return;
+    const hold = this.whole;
+    this.whole ||= !reading;
     for (const repoId of [...this.visits.keys()]) {
       if (!sections.some((section) => section.repoId === repoId)) this.visits.delete(repoId);
     }
@@ -226,12 +229,12 @@ export class InboxModel {
     const watchingKeys = new Set(watching.items.map((item) => item.key));
     this.snapshot = {
       ...this.snapshot,
-      needs: holdRead(this.snapshot.needs, {
+      needs: holdRead(hold ? this.snapshot.needs : null, {
         ...needs,
         elsewhere: watchingKeys,
         answered: this.answered,
       }),
-      watching: holdRead(this.snapshot.watching, {
+      watching: holdRead(hold ? this.snapshot.watching : null, {
         ...watching,
         elsewhere: needsKeys,
         answered: this.answered,
@@ -239,7 +242,7 @@ export class InboxModel {
       digests,
       failed: sections.filter((section) => section.error),
       needsTotal: needs.total,
-      added: this.needs.next(needs.items),
+      reading,
       version: this.snapshot.version + 1,
     };
     this.notifier.notify();

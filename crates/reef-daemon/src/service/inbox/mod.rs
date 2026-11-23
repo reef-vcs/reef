@@ -148,15 +148,17 @@ async fn read_section(
 ) -> Result<v1::InboxSection, Status> {
     let buckets = buckets(state, repo, workspaces?).await?;
     let landed = digest(state, repo, viewer, from, None).await?;
+    let mut needs_you_now: Vec<v1::InboxItem> = buckets
+        .needs_you_now
+        .into_iter()
+        .map(|item| item.message(repo))
+        .collect();
+    inbox::raises::lookup(&state.db, repo, &mut needs_you_now).map_err(status)?;
     Ok(v1::InboxSection {
         repo_id: repo.as_hex(),
         needs_you_now_total: u32::try_from(buckets.needs_you_now_total).unwrap_or(u32::MAX),
         watching_total: u32::try_from(buckets.watching_total).unwrap_or(u32::MAX),
-        needs_you_now: buckets
-            .needs_you_now
-            .into_iter()
-            .map(|item| item.message(repo))
-            .collect(),
+        needs_you_now,
         watching: buckets
             .watching
             .into_iter()
@@ -460,6 +462,15 @@ pub(crate) async fn attention(
     }
 }
 
+pub(crate) fn raise_epoch(state: &AppState) -> Result<String, Status> {
+    let meta = |key| state.db.meta(key).map_err(status);
+    let instance = meta(crate::db::META_DAEMON_INSTANCE_ID)?.unwrap_or_default();
+    Ok(match meta(crate::db::META_RESTORED_AT)? {
+        Some(restored) => format!("{instance}.{restored}"),
+        None => instance,
+    })
+}
+
 /// A read failure as a section carries it.
 pub(crate) fn inbox_error(error: &Status) -> v1::InboxError {
     v1::InboxError {
@@ -493,6 +504,7 @@ impl InboxService for InboxHandler {
         } else {
             Some(repos(&self.state, &request.repos)?)
         };
+        let raise_epoch = raise_epoch(&self.state)?;
         let slot = self
             .state
             .subscriptions
@@ -506,6 +518,7 @@ impl InboxService for InboxHandler {
                 named,
                 watch,
                 slot,
+                raise_epoch,
             },
         );
         Ok(Response::new(Box::pin(

@@ -1,0 +1,56 @@
+[package]
+name = "reef-app"
+description = "Reef's desktop app: the web UI in a window, banners for what needs you, and a menu bar."
+version = "0.4.2"
+edition = "2024"
+rust-version = "1.97.1"
+license = "Apache-2.0"
+repository = "https://github.com/reef-vcs/reef"
+publish = false
+
+[workspace]
+
+[[bin]]
+name = "reef-app"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2.7", features = [] }
+
+[dependencies]
+reef-shell = { path = "../crates/reef-shell" }
+reef-client = { path = "../crates/reef-client" }
+tauri = { version = "2.12", features = ["tray-icon", "image-png"] }
+tauri-plugin-deep-link = "2.6"
+tauri-plugin-autostart = "2.7"
+serde_json = "1"                 # `tauri::generate_context!` expands to it
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+block2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSArray", "NSError", "NSObject"] }
+objc2-user-notifications = { version = "0.3", features = [
+  "block2",
+  "UNNotification",
+  "UNNotificationContent",
+  "UNNotificationRequest",
+  "UNNotificationResponse",
+  "UNNotificationSettings",
+  "UNNotificationSound",
+  "UNNotificationTrigger",
+  "UNUserNotificationCenter",
+] }
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = true
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

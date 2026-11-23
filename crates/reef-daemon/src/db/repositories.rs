@@ -231,6 +231,7 @@ impl Db {
             )?;
             tx.execute("DELETE FROM conflict_assignments WHERE repo_id = ?1", [id])?;
             tx.execute("DELETE FROM inbox_marks WHERE repo_id = ?1", [id])?;
+            tx.execute("DELETE FROM inbox_raises WHERE repo_id = ?1", [id])?;
             tx.execute(
                 "DELETE FROM meta WHERE key = ?1",
                 [super::conflict_assignments::seq_key(id)],

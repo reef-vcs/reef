@@ -7,7 +7,7 @@
 //! it last sent and sends [`diff`] against the newest, so a slow stream
 //! skips intermediate states and nothing queues.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use prost::Message as _;
@@ -31,6 +31,9 @@ pub(crate) struct RepoBoard {
     pub items: BTreeMap<String, v1::InboxItem>,
     pub needs_you_now_total: u32,
     pub watching_total: u32,
+    /// Every key in either bucket, the ones past the cap included: the
+    /// raise ledger keeps a row while its key is here. No stream sees it.
+    pub keys: BTreeSet<String>,
     /// Set while the repository fails to read; `items` are the last good
     /// read's.
     pub error: Option<v1::InboxError>,
@@ -40,6 +43,10 @@ pub(crate) struct RepoBoard {
     /// When an item's words change with no event: a pending instruction's
     /// target turns unseen for `UNCLAIMED_AFTER_MS`.
     pub restale_at: Option<Timestamp>,
+    /// False only for a failed first read, whose empty items are no listing.
+    pub read: bool,
+    /// The newest raise of the repository; never lower than the last board's.
+    pub raised_through: u64,
 }
 
 impl RepoBoard {
@@ -70,9 +77,12 @@ impl RepoBoard {
             items,
             needs_you_now_total: total(buckets.needs_you_now_total),
             watching_total: total(buckets.watching_total),
+            keys: buckets.keys,
             error: None,
             subjects,
             restale_at,
+            read: true,
+            raised_through: 0,
         }
     }
 
@@ -83,9 +93,12 @@ impl RepoBoard {
             items: BTreeMap::new(),
             needs_you_now_total: 0,
             watching_total: 0,
+            keys: BTreeSet::new(),
             error: None,
             subjects: Arc::default(),
             restale_at: None,
+            read: false,
+            raised_through: 0,
         });
         board.error = Some(error);
         // The retry governs when a failing repository is read again.
@@ -100,6 +113,8 @@ impl RepoBoard {
             && self.watching_total == other.watching_total
             && self.error == other.error
             && self.subjects == other.subjects
+            && self.read == other.read
+            && self.raised_through == other.raised_through
     }
 }
 
@@ -189,8 +204,15 @@ pub(crate) fn frames(changes: Vec<v1::InboxSectionChange>) -> Vec<Vec<v1::InboxS
                 }
             }
             rest.left = left.collect();
+            let last = rest.items.is_empty() && rest.left.is_empty();
+            if !last {
+                part.raised_through = 0;
+                if part.listing() == v1::InboxListing::End {
+                    part.set_listing(v1::InboxListing::Part);
+                }
+            }
             frame.push(part);
-            if rest.items.is_empty() && rest.left.is_empty() {
+            if last {
                 break;
             }
             frames.push(std::mem::take(&mut frame));
@@ -229,9 +251,12 @@ mod tests {
                 .collect(),
             needs_you_now_total: 0,
             watching_total: 0,
+            keys: items.iter().map(|item| item.key.clone()).collect(),
             error: None,
             subjects: Arc::default(),
             restale_at: None,
+            read: true,
+            raised_through: 0,
         }
     }
 
@@ -411,5 +436,34 @@ mod tests {
         let left: usize = all.iter().map(|s| s.left.len()).sum();
         assert_eq!((items, left), (2_500, 11));
         assert_eq!(frames[2].last().map(|s| s.repo_id.as_str()), Some("s"));
+    }
+
+    #[test]
+    fn only_a_listings_last_part_ends_it_and_carries_its_raises() {
+        let items: Vec<v1::InboxItem> = (0..2_500)
+            .map(|n| item(&format!("help:r:{n:04}"), NeedsYouNow, n, "asks"))
+            .collect();
+        let listing = v1::InboxSectionChange {
+            repo_id: "r".to_owned(),
+            items,
+            listing: v1::InboxListing::End.into(),
+            raised_through: 7,
+            ..v1::InboxSectionChange::default()
+        };
+        let parts: Vec<v1::InboxSectionChange> =
+            frames(vec![listing]).into_iter().flatten().collect();
+        assert_eq!(parts.len(), 3);
+        let shape: Vec<(v1::InboxListing, u64)> = parts
+            .iter()
+            .map(|part| (part.listing(), part.raised_through))
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                (v1::InboxListing::Part, 0),
+                (v1::InboxListing::Part, 0),
+                (v1::InboxListing::End, 7)
+            ]
+        );
     }
 }

@@ -332,6 +332,47 @@ jobs:
         if: always()
         run: python3 scripts/ci-flaky-tests.py "executor sandbox, macOS, CLI"
 
+  shell:
+    name: desktop app (macOS)
+    needs: plan
+    if: needs.plan.outputs.macos == 'true'
+    runs-on: ${{ fromJSON(needs.plan.outputs.macos_runner) }}
+    timeout-minutes: 40
+    env:
+      APPLE_SIGNING_IDENTITY: "-"
+    steps:
+      # On the self-hosted Mac, as `check`: checkout keeps target/, and rustup installs the
+      # toolchain in place of setup-rust-toolchain, whose macOS step needs Homebrew's bash.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          clean: ${{ runner.environment == 'github-hosted' }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: web/.node-version
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        if: runner.environment == 'github-hosted'
+        with:
+          cache-workspaces: "shell -> ../target/shell"
+          cache-save-if: ${{ env.RUST_CACHE_SAVE }}
+      - name: Rust toolchain (self-hosted)
+        if: runner.environment == 'self-hosted'
+        run: rustup toolchain install && rustc --version
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.19
+      - uses: extractions/setup-just@v4
+        with:
+          just-version: "1"
+      - name: Format, lint and bundle
+        run: just shell-check
+      - name: The bundle
+        run: |
+          app="target/shell/debug/bundle/macos/Reef.app"
+          codesign --verify --deep "$app"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleURLTypes:0:CFBundleURLSchemes:0' "$app/Contents/Info.plist"
+
   # The overlay backends (R1.09, ADR 0016): fuse-overlayfs unprivileged, then
   # kernel overlayfs as root. The root step runs last, and target/ goes back to
   # the runner user after it, or the cache save fails on root-owned files. Main's runs took
@@ -701,7 +742,7 @@ jobs:
     # always(), not !cancelled(): a skipped required check counts as passing on GitHub, so this
     # job must run and fail when anything it needs was cancelled.
     if: always()
-    needs: [plan, fmt, api, deny, lint, check, overlayfs, synth-determinism, cli-shape, web, web-e2e, python, typescript, executor-sandbox-macos]
+    needs: [plan, fmt, api, deny, lint, check, overlayfs, synth-determinism, cli-shape, web, web-e2e, python, typescript, executor-sandbox-macos, shell]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -724,7 +765,9 @@ jobs:
           TYPESCRIPT: ${{ needs.typescript.result }}
           # Skipped on a pull request without the `macos` label.
           EXECUTOR_MAC: ${{ needs.executor-sandbox-macos.result }}
+          SHELL_MAC: ${{ needs.shell.result }}
         run: |
           echo "$NEEDS"
           [[ "$PLAN" == "success" && "$FMT" == "success" &&"$API" == "success" && "$DENY" == "success" && "$LINT" == "success" && "$CHECK" == "success" && "$OVERLAYFS" == "success" && "$SYNTH" == "success" && "$CLI_SHAPE" == "success" && "$WEB" == "success" && "$WEB_E2E" == "success" && "$PYTHON" == "success" && "$TYPESCRIPT" == "success" ]]
           [[ "$EXECUTOR_MAC" == "success" || "$EXECUTOR_MAC" == "skipped" ]]
+          [[ "$SHELL_MAC" == "success" || "$SHELL_MAC" == "skipped" ]]

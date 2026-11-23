@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use reef_api::v1::{
     self, CommentKind, CreateCommentRequest, CreateIdentityRequest, EditFilesRequest, FileEdit,
-    GetInboxRequest, HelpInput, HelpReason, IdentityKind, InboxBucket, InboxMark,
+    GetInboxRequest, HelpInput, HelpReason, IdentityKind, InboxBucket, InboxListing, InboxMark,
     LandChangeRequest, MarkInboxSeenRequest, TransitionChangeRequest, WatchInboxRequest,
     WatchInboxResponse, edit_files_request, file_edit,
 };
@@ -198,6 +198,8 @@ struct Held {
     watching_total: u32,
     landed: Option<v1::LandedDigest>,
     error: Option<v1::InboxError>,
+    listed: bool,
+    raised_through: u64,
 }
 
 /// A stream and the client's fold of it.
@@ -206,6 +208,8 @@ struct Watched {
     repos: BTreeMap<String, Held>,
     synced: bool,
     frames: usize,
+    /// The last frame's raise ledger.
+    epoch: String,
 }
 
 impl Watched {
@@ -221,6 +225,7 @@ impl Watched {
             repos: BTreeMap::new(),
             synced: false,
             frames: 0,
+            epoch: String::new(),
         };
         while !watched.synced {
             watched.next().await;
@@ -231,6 +236,11 @@ impl Watched {
     fn apply(&mut self, frame: WatchInboxResponse) {
         self.frames += 1;
         self.synced = frame.synced;
+        assert!(
+            !frame.raise_epoch.is_empty(),
+            "every frame names the ledger"
+        );
+        self.epoch = frame.raise_epoch;
         for section in frame.sections {
             if section.removed {
                 let held = self.repos.remove(&section.repo_id).unwrap_or_default();
@@ -241,6 +251,12 @@ impl Watched {
                 continue;
             }
             let held = self.repos.entry(section.repo_id.clone()).or_default();
+            let listing = section.listing();
+            assert!(
+                listing == InboxListing::Unspecified || !held.listed,
+                "a repository lists once per stream: {section:?}"
+            );
+            held.listed |= listing == InboxListing::End;
             for key in &section.left {
                 held.items.remove(key);
             }
@@ -251,6 +267,33 @@ impl Watched {
             held.watching_total = section.watching_total;
             held.landed = section.landed;
             held.error = section.error;
+            if section.raised_through > 0 {
+                for item in held.items.values() {
+                    if item.bucket() == InboxBucket::NeedsYouNow {
+                        // 0 for a proposal not judged yet that has no number.
+                        let provisional = matches!(
+                            &item.record,
+                            Some(v1::inbox_item::Record::Proposal(entry))
+                                if entry.automatic.as_ref().is_none_or(
+                                    |status| status.state() == v1::AutomaticState::Pending
+                                )
+                        );
+                        assert!(
+                            (item.raised > 0 || provisional)
+                                && item.raised <= section.raised_through,
+                            "{item:?} against {}",
+                            section.raised_through
+                        );
+                    } else {
+                        assert_eq!(item.raised, 0, "{item:?}");
+                    }
+                }
+                assert!(
+                    section.raised_through >= held.raised_through,
+                    "raises only grow"
+                );
+                held.raised_through = section.raised_through;
+            }
         }
     }
 
@@ -839,4 +882,121 @@ async fn a_board_started_while_a_repository_is_busy_sends_the_others_first() {
     assert!(named_first < quick, "{report}");
     assert!(b_first.is_some_and(|at| at < quick), "{report}");
     assert!(every_synced + quick >= STALL, "{report}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_item_that_arrives_before_synced_is_raised_above_its_listing() {
+    let (daemon, a) = fixture().await;
+    let client = &daemon.client;
+    let b = second(&daemon).await;
+    let on_b = commit_on(client, &b, "root()", &[("b.txt", "b\n")]).await;
+    let before = ask(client, &b, &on_b.commit_id, "agent-b0").await;
+    let before_key = format!("help:{b}:{}", before.id);
+
+    let held = hold(&daemon, &a.id, STALL);
+    let mut stream = client
+        .watch_inbox(WatchInboxRequest::default())
+        .await
+        .unwrap();
+    let mut listed_through = None;
+    let mut epoch = String::new();
+    while listed_through.is_none() {
+        let frame = tokio::time::timeout(Duration::from_secs(30), stream.message())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(
+            !frame.raise_epoch.is_empty(),
+            "every frame names the ledger"
+        );
+        epoch.clone_from(&frame.raise_epoch);
+        for section in frame.sections.iter().filter(|section| section.repo_id == b) {
+            if section.listing() == InboxListing::End {
+                assert!(!frame.synced, "B lists while A is held");
+                let listed = section
+                    .items
+                    .iter()
+                    .find(|item| item.key == before_key)
+                    .unwrap();
+                assert!(listed.raised > 0 && listed.raised <= section.raised_through);
+                listed_through = Some(section.raised_through);
+            }
+        }
+    }
+    let listed_through = listed_through.unwrap();
+
+    let after = ask(client, &b, &on_b.commit_id, "agent-b1").await;
+    let after_key = format!("help:{b}:{}", after.id);
+    let arrived = loop {
+        let frame = tokio::time::timeout(Duration::from_secs(30), stream.message())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(frame.raise_epoch, epoch);
+        let found = frame
+            .sections
+            .iter()
+            .filter(|section| section.repo_id == b)
+            .find_map(|section| {
+                let item = section.items.iter().find(|item| item.key == after_key)?;
+                Some((section.listing(), item.raised, frame.synced))
+            });
+        if let Some(found) = found {
+            break found;
+        }
+    };
+    let (listing, raised, synced) = arrived;
+    assert!(!synced, "the #389 case: it arrived before A was read");
+    assert_eq!(
+        listing,
+        InboxListing::Unspecified,
+        "a change, not B's listing"
+    );
+    assert!(
+        raised > listed_through,
+        "news by number: {raised} > {listed_through}"
+    );
+    held.await.unwrap();
+
+    // GetInbox numbers the same items the same way.
+    let response = client.get_inbox(GetInboxRequest::default()).await.unwrap();
+    let section = response
+        .sections
+        .iter()
+        .find(|section| section.repo_id == b)
+        .unwrap();
+    let numbered: BTreeMap<&str, u64> = section
+        .needs_you_now
+        .iter()
+        .map(|item| (item.key.as_str(), item.raised))
+        .collect();
+    assert_eq!(numbered[after_key.as_str()], raised);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn raises_survive_a_daemon_restart() {
+    let (daemon, a) = fixture().await;
+    let client = &daemon.client;
+    let on_a = commit_on(client, &a.id, "root()", &[("a.txt", "a\n")]).await;
+    let asked = ask(client, &a.id, &on_a.commit_id, "agent-a").await;
+    let key = format!("help:{}:{}", a.id, asked.id);
+    let mut watched = Watched::open(client, &[]).await;
+    watched
+        .until("the help request", |w| w.item(&key).is_some())
+        .await;
+    let before = watched.item(&key).unwrap().raised;
+    let epoch = watched.epoch.clone();
+    drop(watched);
+
+    let daemon = daemon.restart().await;
+    let client = &daemon.client;
+    let mut watched = Watched::open(client, &[]).await;
+    watched
+        .until("the help request again", |w| w.item(&key).is_some())
+        .await;
+    assert_eq!(watched.item(&key).unwrap().raised, before);
+    assert_eq!(watched.epoch, epoch, "a restart keeps the ledger");
+    assert!(watched.repos[&a.id].listed);
 }

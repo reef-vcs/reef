@@ -4,8 +4,12 @@
 //! A mark is the newest `lifecycle_transitions.seq` a person has seen. It
 //! only moves forward, in one transaction, so two tabs marking at once
 //! converge and a repeat changes nothing.
+//!
+//! A raise (R3.39, ADR 0093) is the number of one needs-you-now episode:
+//! an item's key, its reason and a cause. Numbers only grow, so a client
+//! that has handled raises up to n treats a larger one as news.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use rusqlite::{OptionalExtension as _, params};
 
@@ -245,6 +249,121 @@ impl Db {
                 params![repo],
                 |row| row.get(0),
             )
+        })
+    }
+}
+
+/// One needs-you-now episode as a read placed it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Episode {
+    /// The item's key.
+    pub key: String,
+    /// The `InboxReason` number.
+    pub reason: i32,
+    /// A reading that cannot tell its reason yet (a proposal whose automatic
+    /// status is absent or `Pending`: not judged since the daemon started,
+    /// or waiting for a job slot): it keeps the number its key and cause
+    /// hold, whatever the reason.
+    pub provisional: bool,
+    /// The commit id for a proposal or a conflict; empty otherwise.
+    pub cause: String,
+}
+
+impl Db {
+    /// Gives each of `repo`'s `episodes` its raise in one transaction: a
+    /// key whose row has the same cause and the same reason (any, for a
+    /// provisional episode) keeps its number, and a new episode, or one
+    /// whose reason or cause moved, takes the next. A provisional episode
+    /// with no row for its cause writes nothing and reads 0. Rows of `repo`
+    /// whose key is not in `keys`, every key a read placed in either bucket,
+    /// go. Returns the raises in order, and the newest raise `repo` holds.
+    /// The same call twice changes nothing.
+    pub fn settle_inbox_raises(
+        &self,
+        repo: RepoId,
+        episodes: &[Episode],
+        keys: &BTreeSet<String>,
+    ) -> Result<(Vec<u64>, u64), DbError> {
+        self.in_transaction(|tx| {
+            let mut raises = Vec::with_capacity(episodes.len());
+            for episode in episodes {
+                let row: Option<(i64, i32, String)> = tx
+                    .query_row(
+                        "SELECT seq, reason, cause FROM inbox_raises WHERE key = ?1",
+                        params![episode.key],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .optional()?;
+                let seq = match row {
+                    Some((seq, reason, cause))
+                        if cause == episode.cause
+                            && (reason == episode.reason || episode.provisional) =>
+                    {
+                        seq
+                    }
+                    // A provisional reading numbers nothing: its judgment does.
+                    _ if episode.provisional => 0,
+                    other => {
+                        if other.is_some() {
+                            tx.execute(
+                                "DELETE FROM inbox_raises WHERE key = ?1",
+                                params![episode.key],
+                            )?;
+                        }
+                        tx.query_row(
+                            "INSERT INTO inbox_raises(repo_id, key, reason, cause)
+                             VALUES (?1, ?2, ?3, ?4) RETURNING seq",
+                            params![repo, episode.key, episode.reason, episode.cause],
+                            |row| row.get(0),
+                        )?
+                    }
+                };
+                raises.push(u64::try_from(seq).unwrap_or(0));
+            }
+            let held: Vec<String> = tx
+                .prepare("SELECT key FROM inbox_raises WHERE repo_id = ?1")?
+                .query_map(params![repo], |row| row.get(0))?
+                .collect::<Result<_, _>>()?;
+            for key in held.iter().filter(|key| !keys.contains(*key)) {
+                tx.execute("DELETE FROM inbox_raises WHERE key = ?1", params![key])?;
+            }
+            let newest: i64 = tx.query_row(
+                "SELECT coalesce(max(seq), 0) FROM inbox_raises WHERE repo_id = ?1",
+                params![repo],
+                |row| row.get(0),
+            )?;
+            Ok((raises, u64::try_from(newest).unwrap_or(0)))
+        })
+    }
+
+    /// The raise of each of `repo`'s episodes the ledger holds with the same
+    /// cause and reason (as `settle_inbox_raises` matches them), in order, 0
+    /// for one it does not. It writes nothing.
+    pub fn inbox_raises(&self, repo: RepoId, episodes: &[Episode]) -> Result<Vec<u64>, DbError> {
+        self.with(|conn| {
+            let mut select = conn.prepare(
+                "SELECT seq FROM inbox_raises
+                 WHERE repo_id = ?1 AND key = ?2 AND cause = ?3
+                   AND (reason = ?4 OR ?5)",
+            )?;
+            episodes
+                .iter()
+                .map(|episode| {
+                    select
+                        .query_row(
+                            params![
+                                repo,
+                                episode.key,
+                                episode.cause,
+                                episode.reason,
+                                episode.provisional
+                            ],
+                            |row| row.get::<_, i64>(0),
+                        )
+                        .optional()
+                        .map(|seq| seq.and_then(|seq| u64::try_from(seq).ok()).unwrap_or(0))
+                })
+                .collect()
         })
     }
 }

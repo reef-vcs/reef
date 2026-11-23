@@ -219,29 +219,6 @@ pub struct WebUi {
     origin: OnceLock<String>,
 }
 
-/// The longest path `CreateWebSession` opens.
-const MAX_PATH_BYTES: usize = 256;
-
-/// Whether `path` is a path of the app to open: empty, or `/` and
-/// letters, digits and `/._-`, with no empty, `.` or `..` segment after
-/// the first `/`.
-fn is_app_path(path: &str) -> bool {
-    if path.is_empty() {
-        return true;
-    }
-    let Some(rest) = path.strip_prefix('/') else {
-        return false;
-    };
-    path.len() <= MAX_PATH_BYTES
-        && rest
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"/._-".contains(&b))
-        && (rest.is_empty()
-            || rest
-                .split('/')
-                .all(|segment| !matches!(segment, "" | "." | "..")))
-}
-
 impl WebUi {
     pub(crate) fn new(limits: Limits) -> WebUi {
         WebUi {
@@ -263,7 +240,7 @@ impl WebUi {
         launch_file: bool,
         path: &str,
     ) -> Result<CreateWebSessionResponse, WebError> {
-        if !is_app_path(path) {
+        if !reef_client::web::is_app_path(path) {
             return Err(WebError::InvalidPath {
                 path: path.to_owned(),
             });
@@ -579,39 +556,5 @@ impl Stream for Capped {
                 open: Arc::clone(&self.open),
             })));
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::is_app_path;
-
-    #[test]
-    fn app_paths() {
-        for good in [
-            "",
-            "/",
-            "/approve/apr_0123456789abcdef",
-            "/passkeys",
-            "/repos/abc/smartlog",
-        ] {
-            assert!(is_app_path(good), "{good}");
-        }
-        for bad in [
-            "approve",
-            "//evil.example",
-            "/a//b",
-            "/a/../b",
-            "/./a",
-            "/a?x=1",
-            "/a#b",
-            "/a b",
-            "/a%2f",
-            "/a/",
-            "\\evil",
-        ] {
-            assert!(!is_app_path(bad), "{bad}");
-        }
-        assert!(!is_app_path(&format!("/{}", "a".repeat(256))));
     }
 }

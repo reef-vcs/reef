@@ -11,6 +11,7 @@ import { CommentKind, HelpState } from "../gen/reef/api/v1/comment_event_pb";
 import { CommentService, type CreateCommentRequest } from "../gen/reef/api/v1/comments_pb";
 import {
   InboxBucket,
+  InboxListing,
   InboxItemSchema,
   InboxReason,
   InboxSectionChangeSchema,
@@ -124,7 +125,8 @@ export class InboxDaemon {
         ...section.watching.map((item) => ({ ...item, bucket: InboxBucket.WATCHING })),
       ];
       const keys = new Set(items.map((item) => item.key));
-      const left = [...(this.sent.get(section.repoId) ?? [])].filter((key) => !keys.has(key));
+      const sent = this.sent.get(section.repoId);
+      const left = [...(sent ?? [])].filter((key) => !keys.has(key));
       this.sent.set(section.repoId, keys);
       changes.push(
         create(InboxSectionChangeSchema, {
@@ -135,6 +137,7 @@ export class InboxDaemon {
           watchingTotal: section.watchingTotal,
           landed: section.landed,
           error: section.error,
+          listing: sent === undefined ? InboxListing.END : InboxListing.UNSPECIFIED,
         }),
       );
     }

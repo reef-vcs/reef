@@ -574,7 +574,10 @@ async fn snapshot(
         }
         _ => Arc::new(super::read_subjects(state, &hex, &newest).await?),
     };
-    Ok(RepoBoard::read(repo, buckets, subjects))
+    let mut board = RepoBoard::read(repo, buckets, subjects);
+    crate::inbox::raises::settle(&state.db, repo, &mut board, last)
+        .map_err(crate::error::status)?;
+    Ok(board)
 }
 
 #[cfg(test)]

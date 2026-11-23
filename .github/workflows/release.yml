@@ -234,6 +234,15 @@ jobs:
           bundle="$(scripts/package-mcpb.sh "target/$TARGET/dist" "$VERSION" "$TARGET" dist)"
           ls -l "$bundle"
           scripts/test-mcpb.sh "$bundle" "$VERSION" "$TARGET"
+      - name: Desktop app
+        if: runner.os == 'macOS'
+        run: |
+          bundle="$(scripts/shell-build.sh release "target/$TARGET/dist" "$TARGET")"
+          app="$bundle/macos/Reef.app"
+          "$app/Contents/MacOS/reef" --version | grep -Fq "reef $VERSION "
+          [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")" == "$VERSION" ]]
+          codesign --verify --deep "$app"
+          cp "$bundle"/dmg/*.dmg "dist/Reef-$VERSION-$TARGET.dmg"
       # `reef schema`'s document and descriptor set (R2.24), once: they are the same on every target
       # but for the document's `reef.target`.
       - name: Schema
@@ -249,6 +258,7 @@ jobs:
           path: |
             dist/*.tar.gz
             dist/*.mcpb
+            dist/*.dmg
             dist/*-schema.json
             dist/*-api.binpb
           if-no-files-found: error
@@ -269,9 +279,10 @@ jobs:
           cd dist
           [[ "$(ls ./*.tar.gz | wc -l)" -eq 4 ]]
           [[ "$(ls ./*.mcpb | wc -l)" -eq 4 ]]
+          [[ "$(ls ./*.dmg | wc -l)" -eq 2 ]]
           [[ "$(ls ./*-schema.json ./*-api.binpb | wc -l)" -eq 2 ]]
-          sha256sum ./*.tar.gz ./*.mcpb ./*-schema.json ./*-api.binpb | sed 's| \./| |' >SHA256SUMS
-          [[ "$(wc -l <SHA256SUMS)" -eq 10 ]]
+          sha256sum ./*.tar.gz ./*.mcpb ./*.dmg ./*-schema.json ./*-api.binpb | sed 's| \./| |' >SHA256SUMS
+          [[ "$(wc -l <SHA256SUMS)" -eq 12 ]]
           sha256sum -c SHA256SUMS
           cat SHA256SUMS
       - uses: actions/upload-artifact@v7
@@ -590,6 +601,7 @@ jobs:
           subject-path: |
             dist/*.tar.gz
             dist/*.mcpb
+            dist/*.dmg
             dist/*-schema.json
             dist/*-api.binpb
             dist/SHA256SUMS
@@ -599,7 +611,7 @@ jobs:
           scripts/release-notes.sh "$VERSION" >notes.md
           gh release create "v$VERSION" --repo "$GITHUB_REPOSITORY" --verify-tag \
             --title "Reef $VERSION" --notes-file notes.md \
-            dist/*.tar.gz dist/*.mcpb dist/*-schema.json dist/*-api.binpb dist/SHA256SUMS install.sh
+            dist/*.tar.gz dist/*.mcpb dist/*.dmg dist/*-schema.json dist/*-api.binpb dist/SHA256SUMS install.sh
 
   # Pushes the formula `homebrew-test` installed to the tap's main, with the tap's deploy key (write
   # access to that repository only). A failure here does not fail the release: the formula can be

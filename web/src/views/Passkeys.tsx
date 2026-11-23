@@ -22,10 +22,12 @@ import {
   NO_SUPPORT,
   type Failure,
 } from "../sign/passkey";
+import { embedded } from "../session";
 import { Copy } from "../ui/Copy";
 import { ErrorView } from "../ui/ErrorView";
 import { FailureView } from "../ui/FailureView";
 import { dateTime } from "../ui/time";
+import { NoPasskeysHere } from "./Handoff";
 
 const PAGE = 1_000;
 
@@ -347,7 +349,12 @@ export function Passkeys({
         A passkey lets a person, not an agent running as them, sign off on a change: each sign-off
         takes one touch that approves exactly that sign-off.
       </p>
-      {!hasPasskeySupport() && <FailureView failure={{ kind: "browser", words: NO_SUPPORT }} />}
+      {!hasPasskeySupport() &&
+        (embedded() ? (
+          <NoPasskeysHere />
+        ) : (
+          <FailureView failure={{ kind: "browser", words: NO_SUPPORT }} />
+        ))}
       {load.kind === "loading" && <p className="secondary">Reading the identities.</p>}
       {load.kind === "failed" && <ErrorView error={load.error} />}
       {load.kind === "loaded" && load.people.length === 0 && (

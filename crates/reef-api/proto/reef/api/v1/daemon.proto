@@ -43,8 +43,9 @@ message CreateWebSessionRequest {
   bool launch_file = 1;
   // The app's page `session_url` and the launch file open (R3.43), such as
   // `/approve/apr_0123456789abcdef`: a path of at most 256 bytes starting
-  // with `/`, of letters, digits and `/._-`, with no `//` or `..`
-  // segment; empty for the app's start page.
+  // with `/`, of letters, digits and `/._-:`, with no empty, `.` or `..`
+  // segment (so no `//` and no trailing `/`); empty for the app's start
+  // page.
   string path = 2;
 }
 

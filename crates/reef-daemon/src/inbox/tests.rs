@@ -333,6 +333,11 @@ fn a_bucket_is_cut_with_its_total() {
     assert_eq!(buckets.needs_you_now.len(), BUCKET_CAP);
     assert_eq!(buckets.needs_you_now_total, 250);
     assert_eq!(buckets.needs_you_now[0].key, "help:aaaa000000000001:cmt249");
+    assert_eq!(buckets.keys.len(), 250, "the raise ledger keeps every key");
+    assert!(
+        buckets.keys.contains("help:aaaa000000000001:cmt0"),
+        "past the cap"
+    );
 }
 
 #[test]

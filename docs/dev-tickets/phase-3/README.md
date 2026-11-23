@@ -54,7 +54,7 @@ Phase 2 is complete and released as 0.2.0 to 0.4.0 (0.4.2 on jj-lib 0.47.0, 2026
 | R3.36 | not yet briefed (Map view with conflict warning) | L | R2.10, R2.18 | none listed |
 | R3.37 | not yet briefed (Audit and explain) | M | R3.04, R2.16 | R3.38 |
 | R3.38 | not yet briefed (File browser with time axis and symbol search) | M | R2.18, R2.14, R3.37 | none listed |
-| R3.39 | not yet briefed (Desktop shell) | L | R3.33 | R3.40, R3.41 |
+| R3.39 | [R3.39-desktop-shell.md](R3.39-desktop-shell.md) | L | R3.33, #372 | R3.40, R3.41, R4.17; closes #389 |
 | R3.40 | not yet briefed (Mobile shell and push notifications) | L | R3.39, R3.33, R2.08 | R4.13, R4.17 |
 | R3.41 | not yet briefed (Desktop shell on Linux and Windows) | L | R3.39 | none listed |
 | R3.42 | [R3.42-sigstore-keyless-identity.md](R3.42-sigstore-keyless-identity.md) | M | R3.03 | none listed |

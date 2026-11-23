@@ -2,11 +2,14 @@
 // `/#session=<token>`. The bootstrap stores the token in `localStorage`
 // (per origin, so every tab of this daemon's listener shares it) and strips
 // it from the address bar, so no bookmark, copy or screenshot of the URL
-// carries it.
+// carries it. A host that cannot run passkey ceremonies, such as the
+// desktop app's webview (R3.39), adds `&embedded=1`; the tab keeps it in
+// `sessionStorage`, and the passkey pages hand the ceremony to the browser.
 
 export const SESSION_KEY = "reef.session";
+export const EMBEDDED_KEY = "reef.embedded";
 
-const FRAGMENT = /^#session=([A-Za-z0-9_-]+)$/;
+const FRAGMENT = /^#session=([A-Za-z0-9_-]+)(&embedded=1)?$/;
 
 function read(storage: Storage | null): string | null {
   try {
@@ -26,6 +29,25 @@ function write(storage: Storage | null, token: string | null) {
   }
 }
 
+function sessionStorageOrNull(): Storage | null {
+  try {
+    return window.sessionStorage;
+  } catch {
+    return null;
+  }
+}
+
+let embeddedNow = false;
+
+export function embedded(tab: Storage | null = sessionStorageOrNull()): boolean {
+  if (embeddedNow) return true;
+  try {
+    return tab?.getItem(EMBEDDED_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
 export function localStorageOrNull(): Storage | null {
   try {
     return window.localStorage;
@@ -42,10 +64,19 @@ export function takeSession(
   location: Location = window.location,
   history: History = window.history,
   storage: Storage | null = localStorageOrNull(),
+  tab: Storage | null = sessionStorageOrNull(),
 ): string | null {
   const match = FRAGMENT.exec(location.hash);
   if (match?.[1]) {
     write(storage, match[1]);
+    if (match[2]) {
+      try {
+        tab?.setItem(EMBEDDED_KEY, "1");
+      } catch {
+        // Storage refused: this page load still knows (`embeddedNow`).
+      }
+      embeddedNow = true;
+    }
     history.replaceState(history.state, "", location.pathname + location.search);
     return match[1];
   }

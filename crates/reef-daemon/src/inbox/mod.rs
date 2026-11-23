@@ -7,12 +7,13 @@
 //! reads; a person's mark is the only stored state (`db::inbox`).
 
 pub(crate) mod board;
+pub(crate) mod raises;
 pub(crate) mod rules;
 #[cfg(test)]
 mod tests;
 mod words;
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use reef_api::v1::{self, OperationKind, PresenceKind};
 
@@ -229,6 +230,7 @@ impl Item {
             next: self.next,
             record: Some(self.record),
             bucket: self.reason.bucket().wire().into(),
+            raised: 0,
         }
     }
 }
@@ -241,6 +243,8 @@ pub(crate) struct Buckets {
     pub needs_you_now_total: usize,
     pub watching: Vec<Item>,
     pub watching_total: usize,
+    /// Every placed item's key, the ones past the cap included.
+    pub keys: BTreeSet<String>,
     pub now: Timestamp,
 }
 
@@ -294,6 +298,7 @@ pub(crate) fn classify(sources: Sources) -> Buckets {
         needs_you_now_total: 0,
         watching: Vec::new(),
         watching_total: 0,
+        keys: items.iter().map(|item| item.key.clone()).collect(),
         now,
     };
     for item in items {

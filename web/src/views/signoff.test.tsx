@@ -16,6 +16,7 @@ import {
   removeAuthenticator,
   type FakeAuthenticator,
 } from "../test/webauthn";
+import { EMBEDDED_KEY } from "../session";
 import { SignOff } from "./SignOff";
 
 afterEach(() => {
@@ -81,6 +82,22 @@ describe("Sign off", () => {
     await setup(daemon);
     expect(signOffButton().disabled).toBe(true);
     expect(screen.getByText("This browser has no passkey support.")).toBeTruthy();
+  });
+
+  it("hands the sign-off to the browser in a host that cannot run passkeys", async () => {
+    installAuthenticator();
+    sessionStorage.setItem(EMBEDDED_KEY, "1");
+    try {
+      const daemon = new IdentityDaemon();
+      daemon.passkeys = [passkey(daemon.arsood, "MacBook Touch ID", 1)];
+      await setup(daemon);
+      expect(signOffButton().disabled).toBe(true);
+      const link = screen.getByRole("link", { name: "Continue in your browser" });
+      expect(link.getAttribute("target")).toBe("_blank");
+      expect(link.getAttribute("href")).toBe(location.pathname);
+    } finally {
+      sessionStorage.clear();
+    }
   });
 
   it("signs off: one approval for this statement and change, one touch, the same bytes added", async () => {

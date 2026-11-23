@@ -307,7 +307,7 @@ impl Script {
 
     /// A watch (`op watch`, `presence watch`) while `trigger` makes an
     /// event, in `form` (`json` or `brief`): its lines, checked.
-    async fn watch(&mut self, dir: &Path, form: &str, args: &[&str], trigger: &[&str]) {
+    async fn watch(&mut self, dir: &Path, form: &str, args: &[&str], trigger: &[&str]) -> Vec<u8> {
         let mut command = reef_in(&self.state);
         let mut line = vec!["-o", form];
         line.extend_from_slice(args);
@@ -323,6 +323,7 @@ impl Script {
         let entry = common::schema::command_of(&line).unwrap();
         self.ran
             .insert(serde_json::from_value(entry["command"].clone()).unwrap());
+        output.stdout
     }
 
     /// With `-o json`, then on a pipe; the JSON form's value.
@@ -618,9 +619,25 @@ async fn outputs_match_their_schemas() {
         "{inbox}"
     );
     // `inbox watch` (#372) prints the inbox, then the next help request.
-    script
+    let watched = script
         .watch(&c_dir, "json", &["inbox", "watch"], &ask("asker-4"))
         .await;
+    let lines: Vec<Value> = String::from_utf8(watched)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let new: Vec<&Value> = lines
+        .iter()
+        .flat_map(|line| line["new"].as_array().unwrap())
+        .collect();
+    assert_eq!(new.len(), 1, "only asker-4's request is news: {lines:#?}");
+    let raised = lines
+        .iter()
+        .flat_map(|line| line["items"].as_array().unwrap())
+        .find(|item| &item["key"] == new[0])
+        .map(|item| item["raised"].as_u64().unwrap());
+    assert!(raised.is_some_and(|raised| raised > 0), "{lines:#?}");
     script
         .watch(&c_dir, "brief", &["inbox", "watch"], &ask("asker-5"))
         .await;

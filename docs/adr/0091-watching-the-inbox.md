@@ -2,6 +2,7 @@
 
 - Status: accepted
 - Date: 2026-11-21
+- Amended by: [0093](0093-the-desktop-shell-and-raised-items.md) (each repository's first section is its listing, `synced` no longer marks the starting inbox, and needs-you-now items carry a raise; the desktop shell reads the stream in its own process)
 - Ticket: #372 ([brief](../dev-tickets/phase-3/issue-372-watch-inbox.md))
 - Amends: [0088](0088-triage-inbox.md) (decision 1: the inbox is also kept, as a board, while someone watches; decision 3: a status first judged `OFF` gets an `AUTOMATIC` entry ended at once; decision 5: the web page reads the stream; the maintained-inbox alternative), [0037](0037-presence-channel.md) (a third long stream in the web UI's leader tab)
 

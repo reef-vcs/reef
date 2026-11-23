@@ -104,6 +104,24 @@ web-dev:
 web-clean:
     rm -rf crates/reef-web/assets web/src/gen
 
+# The desktop app (shell/, macOS only): format, cargo deny, clippy with warnings denied and a debug
+# bundle, as CI's `shell` job runs. Unmaintained crates are allowed: Tauri's Linux toolkit (gtk-rs)
+# brings proc-macro-error, which has no patched release (RUSTSEC-2024-0370).
+shell-check:
+    cd shell && cargo fmt --check
+    cargo deny --manifest-path shell/Cargo.toml check -A unmaintained advisories bans licenses sources
+    cd shell && CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/../target}/shell" cargo clippy -- -D warnings
+    scripts/shell-build.sh debug
+
+# A debug Reef.app that starts an installed reef, signed with APPLE_SIGNING_IDENTITY, else your
+# keychain's Apple Development identity, else ad hoc (then notifications reset at each rebuild).
+shell-build:
+    scripts/shell-build.sh debug
+
+# The debug Reef.app on your own daemon; REEF_SOCKET and REEF_STATE_DIR pick another.
+shell-run:
+    open -n "$(scripts/shell-build.sh debug)/Reef.app" --env REEF_SOCKET="${REEF_SOCKET:-}" --env REEF_STATE_DIR="${REEF_STATE_DIR:-}"
+
 # The Python SDK (R2.06, ADR 0054) needs uv (https://docs.astral.sh/uv/); nothing else here does.
 # Its gRPC code and methods are generated from the protos at every build and never committed.
 # The generated code, for an editor's types; `uv sync` (and every recipe below) regenerates it.

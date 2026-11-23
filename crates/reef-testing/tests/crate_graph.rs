@@ -29,7 +29,7 @@ use std::process::Command;
 
 use serde_json::Value;
 
-const MEMBERS: [&str; 13] = [
+const MEMBERS: [&str; 14] = [
     "reef-api",
     "reef-broker",
     "reef-client",
@@ -39,6 +39,7 @@ const MEMBERS: [&str; 13] = [
     "reef-executor",
     "reef-lib",
     "reef-policy",
+    "reef-shell",
     "reef-symbols",
     "reef-testing",
     "reef-vcs",
@@ -189,7 +190,7 @@ const NOT_IN_EVIDENCE: [&str; 13] = [
 ];
 
 #[test]
-fn workspace_members_are_the_twelve_crates() {
+fn workspace_members_are_the_listed_crates() {
     let metadata = metadata();
     let mut members: Vec<&str> = metadata["packages"]
         .as_array()
@@ -239,6 +240,12 @@ fn crate_edges() {
             "reef-executor",
             "reef-policy"
         ]
+    );
+    // R3.39: the desktop shell's core is a client of the daemon too; the
+    // Tauri app (`shell/`) is outside the workspace.
+    assert_eq!(
+        reef_dependencies(&metadata, "reef-shell", &shipped),
+        ["reef-api", "reef-client"]
     );
     // R3.06: the reference executor is a client of the daemon.
     assert_eq!(
@@ -296,10 +303,24 @@ fn crate_edges() {
 #[test]
 fn reef_binary_has_no_jj_lib() {
     let metadata = resolved_metadata();
-    for root in ["reef-vcs", "reef-client", "reef-executor"] {
+    for root in ["reef-vcs", "reef-client", "reef-executor", "reef-shell"] {
         let reached = assert_unreachable(&metadata, root, &NOT_IN_THE_CLIENT, false);
         assert!(reached > 20, "{root}: only {reached} packages reached");
     }
+}
+
+/// R3.39: the desktop shell's core builds and is tested on every platform,
+/// so no UI toolkit is reachable from it; the Tauri app in `shell/` holds them.
+#[test]
+fn reef_shell_links_no_ui_toolkit() {
+    let metadata = resolved_metadata();
+    let reached = assert_unreachable(
+        &metadata,
+        "reef-shell",
+        &["tauri", "wry", "tao", "objc2"],
+        false,
+    );
+    assert!(reached > 20, "reef-shell: only {reached} packages reached");
 }
 
 /// R2.08: `reef` and `reef-daemon` reach rustls through ring only, whatever
