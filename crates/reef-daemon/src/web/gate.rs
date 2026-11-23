@@ -1,9 +1,12 @@
 //! What the web listener accepts (R2.18, ADR 0047): [`WebGateLayer`] sits
 //! outside `tonic_web::GrpcWebLayer` and checks every request, in order:
 //!
-//! 1. `Host` (or HTTP/2's `:authority`) is exactly `localhost:<port>`, or
-//!    `421`: DNS rebinding, and one origin (a `127.0.0.1` or `[::1]` host
-//!    too is `421`).
+//! 1. `Host` (or HTTP/2's `:authority`) is exactly this run's
+//!    `<16 hex>.reef.localhost:<port>`, or `421`: DNS rebinding, and one
+//!    origin (`localhost`, `reef.localhost`, `127.0.0.1` and an earlier
+//!    run's name too are `421`). An API call at an earlier run's name is
+//!    `WEB_SESSION_INVALID`, whatever token it has: a tab of that run then
+//!    says that its session ended (#346).
 //! 2. No `Upgrade` (`400`) and no `OPTIONS` (`405`): no WebSocket, and
 //!    every cross-origin preflight fails. No response carries CORS headers.
 //! 3. `GET` and `HEAD` on any path but an API path serve the assets.
@@ -65,7 +68,7 @@ pub(crate) const GRPC_WEB: [&str; 2] = ["application/grpc-web", "application/grp
 /// What the gate checks against.
 #[derive(Debug)]
 pub(crate) struct Gate {
-    /// The bound authority, `localhost:<port>`.
+    /// The bound authority, `<16 hex>.reef.localhost:<port>`.
     pub(crate) authority: String,
     /// `http://<authority>`.
     pub(crate) origin: String,
@@ -135,11 +138,29 @@ pub(crate) fn bearer(headers: &http::HeaderMap) -> Option<&str> {
 }
 
 impl Gate {
+    /// Whether `host` is a run's name at this port, though not this run's.
+    fn is_another_run(&self, host: &str) -> bool {
+        let under = |host: &str| host.split_once('.').map(|(_, under)| under.to_owned());
+        under(host) == under(&self.authority)
+            && host.find('.') == self.authority.find('.')
+            && host
+                .bytes()
+                .take_while(|b| *b != b'.')
+                .all(|b| b.is_ascii_hexdigit())
+    }
+
     /// Steps 1 to 6: a refusal, the assets' answer, or `None` for a request
     /// that goes on to the session check.
     fn screen(&self, request: &http::Request<Body>) -> Option<http::Response<Body>> {
         if authority(request) != Some(self.authority.as_str()) {
-            return Some(plain(StatusCode::MISDIRECTED_REQUEST));
+            let earlier = request.method() == Method::POST
+                && is_api_path(request.uri().path())
+                && authority(request).is_some_and(|host| self.is_another_run(host));
+            return Some(if earlier {
+                refusal(WebError::SessionInvalid)
+            } else {
+                plain(StatusCode::MISDIRECTED_REQUEST)
+            });
         }
         let method = request.method();
         if request.headers().contains_key(header::UPGRADE) {

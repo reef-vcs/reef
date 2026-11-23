@@ -141,7 +141,8 @@ export const MOVED_AFTER_SIGNING =
 
 /**
  * Why the web UI could not land a tree it signed off: the destination's
- * policy pins no passkey, or not the one that touched (ADR 0086 decision 2).
+ * policy pins no passkey, or not the one that touched, or not where it did
+ * (ADR 0086 decision 2, #346).
  * A destination with no policy, or one that does not load, lands nothing
  * from a terminal either, so its policy is committed by hand. Null for any
  * other refusal.
@@ -164,6 +165,8 @@ export function unpinnedWords(metadata: Record<string, string>, commit: string):
       }
     case "pinned_touch":
       return `Signed off, but ${destination} does not pin the passkey you touched, so the web UI cannot land it. Accept again with a passkey ${destination}'s reef-policy.toml pins (reef identity passkey list shows the line that pins each); ${terminal}.`;
+    case "pinned_origin":
+      return `Signed off, but your touch ran at ${metadata.origin ?? "this address"}, and ${destination}'s reef-policy.toml pins that passkey at another, so the web UI cannot land it. If you moved Reef's port, pin this address (reef identity passkey list prints the line); if you did not, this may not be Reef's page: open it with reef ui from your terminal, and ${terminal}.`;
     default:
       return null;
   }

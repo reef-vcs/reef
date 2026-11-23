@@ -46,7 +46,7 @@ pub use reef::daemon::v0;
 /// The revision of `reef.api.v1` this build serves. It increases by one with
 /// every change to the schema, and [`API_DIGEST`] changes with it; v1 only
 /// grows (ADR 0029). `GetDaemonStatus` reports it.
-pub const API_REVISION: u32 = 46;
+pub const API_REVISION: u32 = 47;
 
 /// blake3 of the v1 descriptors without comments, one per revision, oldest
 /// first: entry `n - 1` is revision `n`'s. A schema change appends one entry
@@ -214,6 +214,10 @@ pub const API_DIGESTS: &[&str] = &[
     // `InboxSectionChange.listing` and `raised_through`, and
     // `WatchInboxResponse.raise_epoch`.
     "6e18b4acd5e42667baaf7d9b5b90d93d7465e82d2a6a8bc498fe90eeb735deda",
+    // #346: `SessionKey.passkey_origin`, `PolicyVerifiedSigner.origin` and
+    // `unpinned`, `WebUiStatus`, `WebUiState` and
+    // `GetDaemonStatusResponse.web_ui`.
+    "c0d877ace4c586d5c55809b87ef9e4b80e2528a421ad77198ceb88353853397f",
 ];
 
 /// blake3 of the v1 descriptors without comments, as of [`API_REVISION`]:
@@ -881,10 +885,12 @@ pub mod error {
     /// destination's `[passkeys]` pins for them (R3.31, ADR 0086).
     /// Metadata: `missing` (`pin`: the destination pins no passkey;
     /// `touch`: no passkey-verified sign-off; `pinned_touch`: only ones
-    /// whose passkey is unpinned or removed), `change_id`, `commit_id`,
-    /// `tree_id` (empty for a conflicted tree), `destination`, and with
-    /// `pin`, `policy` (`no_policy`, `invalid_policy` or `no_pins`: the
-    /// first two land nothing from a terminal either).
+    /// whose passkey is unpinned or removed; `pinned_origin`: a live, pinned
+    /// passkey's, at a web origin no pin of it names, #346), `change_id`,
+    /// `commit_id`, `tree_id` (empty for a conflicted tree), `destination`,
+    /// with `pin`, `policy` (`no_policy`, `invalid_policy` or `no_pins`: the
+    /// first two land nothing from a terminal either), and with
+    /// `pinned_origin`, `origin` (where the touch ran).
     pub const VERIFIED_SIGNOFF_REQUIRED: &str = "VERIFIED_SIGNOFF_REQUIRED";
     /// `GetLanding` naming no landing, or a change with none (R3.13).
     /// Metadata: `id` or `change_id`.

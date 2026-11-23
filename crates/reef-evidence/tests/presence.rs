@@ -712,6 +712,77 @@ fn user_verified_round_trips() {
     }
 }
 
+// #346: a certificate carries the origin its touch ran at, and its reader
+// accepts any port of the RP ID's host: which one counts is a policy's pin,
+// since whoever holds the authority's key can certify a touch at another.
+#[test]
+fn a_certificate_carries_its_origin_and_judges_no_port() {
+    // Chromium's own bytes name the port that recording ran at.
+    let recorded = vector("es256").json["origin"].as_str().unwrap().to_owned();
+    assert_eq!(chromium_evidence().origin(), recorded);
+    for origin in [
+        "http://localhost:49953",
+        "http://localhost",
+        "https://localhost",
+    ] {
+        for &algorithm in Algorithm::ALL {
+            let mut authenticator = Authenticator::new(algorithm);
+            let evidence = PresenceEvidence {
+                passkey: authenticator.passkey().clone(),
+                credential_id: authenticator.credential_id().to_vec(),
+                rp_id: RP.into(),
+                approves: approves(),
+                assertion: authenticator.assert(RP, origin, &challenge_for(&approves())),
+            };
+            assert_eq!(evidence.origin(), origin);
+            let envelope = certify(&authority_key(), &binding(evidence)).unwrap();
+            let read = check_certificate(&envelope.to_bytes(), &known).unwrap();
+            let read = read.binding.presence.evidence().unwrap().origin();
+            assert_eq!(read, origin, "{algorithm}");
+        }
+    }
+    // Client data that names no origin reads as none; no check passes it.
+    let mut unreadable = chromium_evidence();
+    unreadable.assertion.client_data_json = b"{}".to_vec();
+    assert_eq!(unreadable.origin(), "");
+}
+
+// #346: the web UI is at a run's own name under its RP ID, `reef.localhost`.
+#[test]
+fn an_origin_may_be_a_name_under_the_rp_id() {
+    let challenge = [7; 32];
+    let check = |rp: &str, origin: &str| {
+        let mut authenticator = Authenticator::new(Algorithm::EdDsa);
+        let assertion = authenticator.assert(rp, origin, &challenge);
+        check_assertion(authenticator.passkey(), rp, &challenge, &assertion)
+            .map(|asserted| asserted.origin)
+    };
+    for (rp, origin) in [
+        (
+            "reef.localhost",
+            "http://0123456789abcdef.reef.localhost:17333",
+        ),
+        ("reef.localhost", "http://reef.localhost:17333"),
+        ("reef.example", "https://a.b.reef.example"),
+        ("reef.example", "https://reef.example:8443"),
+    ] {
+        assert_eq!(check(rp, origin).as_deref(), Ok(origin), "{rp}");
+    }
+    for (rp, origin) in [
+        ("reef.localhost", "http://localhost:17333"),
+        ("reef.localhost", "http://evilreef.localhost:17333"),
+        ("reef.localhost", "http://reef.localhost.example:17333"),
+        ("reef.localhost", "http://.reef.localhost:17333"),
+        ("reef.localhost", "http://a@b.reef.localhost:17333"),
+        ("reef.localhost", "http://reef.localhost:17333:1"),
+        ("reef.example", "http://a.reef.example"),
+        ("reef.example", "https://example"),
+        ("a.reef.example", "https://reef.example"),
+    ] {
+        assert!(check(rp, origin).is_err(), "{rp} {origin}");
+    }
+}
+
 /// The user-verified certificate's statement as JSON.
 fn statement() -> Value {
     serde_json::from_slice(&binding(chromium_evidence()).payload().unwrap()).unwrap()

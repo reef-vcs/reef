@@ -428,6 +428,7 @@ pub fn session_key_message(read: &ReadKey, with_bytes: bool) -> v1::SessionKey {
                     .unwrap_or_default(),
                 fingerprint: evidence.passkey.fingerprint().to_string(),
             });
+            message.passkey_origin = evidence.origin();
             message.approves = Some(v1::Approves {
                 statement_sha256: evidence.approves.statement.clone(),
                 change_id: evidence.approves.change.clone(),

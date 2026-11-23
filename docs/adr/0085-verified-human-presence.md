@@ -3,6 +3,7 @@
 - Status: accepted
 - Date: 2026-11-19
 - Ticket: R3.43 ([brief](../dev-tickets/phase-3/R3.43-verified-human-presence.md))
+- Amended by: [0094](0094-the-pinned-web-origin.md) (the RP ID is `reef.localhost`, and the listener serves at a name of its run under it; decision 2: a pin names the origin too, so what a look-alike page on another port gets approved counts for nothing)
 - Amends: [0047](0047-web-ui-transport-and-local-listener.md) (decisions 2, 4, 5 and 6: the listener is `localhost` on both loopback families and passes an allowlist of writes; the app runs on Preact behind React's API), [0057](0057-operator-identities-and-session-keys.md) (decision 5: the web listener issues `user_verified` keys through approvals; decision 8: `user_verified` exists), [0055](0055-evidence-object-format.md) (the session-key predicate's `presence` gains `user_verified`, with `presenceEvidence` required exactly then), [0061](0061-repository-policy-file.md) (`[passkeys]`; the input's key gains `passkey`; a key's `presence` is its effective presence), [0029](0029-daemon-api-v1.md) (decision 12's exceptions gain the five passkey and approval WRITE RPCs)
 
 ## Context

@@ -267,7 +267,7 @@ service IdentityService {
   // `navigator.credentials.create` (RP ID `rp_id`, user verification
   // required, attestation `none`), then the result to RegisterPasskey.
   // Only through the web UI's listener: a ceremony needs a browser at
-  // `http://localhost:<port>`.
+  // `http://<16 hex>.reef.localhost:<port>`.
   //
   // Errors: NOT_FOUND with reason IDENTITY_NOT_FOUND (metadata `name`);
   // FAILED_PRECONDITION with reason IDENTITY_REVOKED (metadata `name`,
@@ -282,8 +282,8 @@ service IdentityService {
   }
   // Adds the passkey a registration created (R3.43). The daemon checks the
   // client data (type `webauthn.create`, the challenge this web UI session
-  // started, the origin `http://localhost:<the listener's port>`), the
-  // authenticator data (SHA-256 of `localhost`, user present and user
+  // started, the origin the listener's own), the
+  // authenticator data (SHA-256 of `reef.localhost`, user present and user
   // verified, attested credential data), and the public key (ES256, EdDSA
   // or RS256). When the identity already has a live passkey, `approval`
   // must be a user-verified assertion by one of them over the challenge
@@ -374,7 +374,7 @@ service IdentityService {
   // Approves a pending approval with a passkey, or declines it (R3.43).
   // Approve: `approve` is a user-verified assertion by a live passkey of
   // the approval's identity over the approval's `challenge`, from the
-  // origin `http://localhost:<the listener's port>`, with a sign count above
+  // origin the listener's own, with a sign count above
   // the passkey's last (or both zero); the daemon then certifies the key
   // for 2 minutes with presence `user_verified`, the assertion in the
   // certificate, and records the passkey, the approval and this web UI
@@ -666,6 +666,11 @@ message SessionKey {
   // The approval it was issued through (R3.43), `apr_` and 16 hex digits;
   // empty for a key issued any other way.
   string approval_id = 25;
+  // The web origin a `user_verified` key's assertion ran at (#346), from
+  // the certificate: `http://<16 hex>.reef.localhost:17333`; empty
+  // otherwise. A policy counts the key only at an origin its `[passkeys]`
+  // pins.
+  string passkey_origin = 26;
 }
 
 // A passkey, as a `user_verified` key names it (R3.43).
@@ -988,7 +993,7 @@ message Passkey {
   bytes public_key = 7;
   // Its COSE algorithm: -7 (ES256), -8 (EdDSA) or -257 (RS256).
   sint32 algorithm = 8;
-  // The WebAuthn RP ID: `localhost`.
+  // The WebAuthn RP ID: `reef.localhost`.
   string rp_id = 9;
   // The authenticator's AAGUID, 32 lowercase hex digits; all zeros when it
   // gives none.
@@ -1056,14 +1061,14 @@ message StartPasskeyRegistrationResponse {
   bytes challenge = 1;
   // When it stops being accepted: 5 minutes from now.
   google.protobuf.Timestamp expires_at = 2;
-  // The RP ID: `localhost`.
+  // The RP ID: `reef.localhost`.
   string rp_id = 3;
   // The identity's id; its UTF-8 bytes are the WebAuthn user handle.
   string identity_id = 4;
   // The identity's name.
   string identity = 5;
   // The WebAuthn `user.name` and `user.displayName`: `Reef: <identity>`,
-  // since a passkey picker lists every `localhost` app's credentials
+  // since a passkey picker lists every `reef.localhost` page's credentials
   // together.
   string user_name = 6;
   // The COSE algorithms accepted, in order of preference: -8, -7, -257.
@@ -1180,7 +1185,7 @@ message Approval {
   // identity_id + "\nhuman\n" + session_id + "\n" +
   // approves.statement_sha256 + "\n" + approves.change_id + "\n")).
   bytes challenge = 9;
-  // The RP ID: `localhost`.
+  // The RP ID: `reef.localhost`.
   string rp_id = 10;
   // The credential ids of the identity's live passkeys, for
   // `allowCredentials`; empty when it has none.

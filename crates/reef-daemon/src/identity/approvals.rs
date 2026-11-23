@@ -30,7 +30,6 @@ use reef_evidence::{Index, KeyId, PublicKey};
 use tokio::sync::watch;
 
 use super::issue::{Channel, Issuance, SessionFor};
-use super::passkeys::RP_ID;
 use super::{Identities, IdentityError, audit, new_id};
 use crate::db::IdentityRow;
 use crate::model::Timestamp;
@@ -604,7 +603,7 @@ impl Identities {
         let evidence = PresenceEvidence {
             passkey: key,
             credential_id: passkey.credential_id.clone(),
-            rp_id: RP_ID.to_owned(),
+            rp_id: passkey.rp_id.clone(),
             approves: approval.approves.clone(),
             assertion: bytes,
         };

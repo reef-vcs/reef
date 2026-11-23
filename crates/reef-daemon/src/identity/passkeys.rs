@@ -17,7 +17,7 @@
 //! `Identities::verify_assertion` is the check every assertion goes
 //! through, an approval's too: a live passkey of the identity, the pure
 //! checks of `reef_evidence::webauthn`, the exact origin of the web UI's
-//! listener (the RP ID `localhost` is every local web server's), and a sign
+//! listener (the RP ID `reef.localhost` is any local web server's at a name under it), and a sign
 //! count that went up.
 
 use std::collections::HashMap;
@@ -37,8 +37,9 @@ use super::{Identities, IdentityError, Refusal, audit, new_id};
 use crate::db::{IdentityRow, PasskeyInserted, PasskeyRow, PasskeyUsed};
 use crate::model::Timestamp;
 
-/// The RP ID of the web UI's listener, which serves `http://localhost`.
-pub const RP_ID: &str = "localhost";
+/// The RP ID of the web UI's listener, which serves at a name of its run
+/// under it.
+pub const RP_ID: &str = reef_policy::origin::LOCAL_HOST;
 
 /// The most live passkeys one identity may hold.
 pub const MAX_PASSKEYS: usize = 32;

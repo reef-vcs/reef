@@ -6,7 +6,7 @@ import { client, type Connection } from "../api/connection";
 import { isSessionInvalid, reefError, type ReefError } from "../api/errors";
 import type { Change } from "../gen/reef/api/v1/changes_pb";
 import { EvidenceResult, EvidenceService, type Evidence } from "../gen/reef/api/v1/evidence_pb";
-import { PolicyService } from "../gen/reef/api/v1/policy_pb";
+import { PolicyService, type PolicyVerifiedSigner } from "../gen/reef/api/v1/policy_pb";
 import {
   IdentityService,
   IdentityStatus,
@@ -80,7 +80,7 @@ export function useSigner(connection: Connection, onSessionInvalid: () => void):
 interface SignOffs {
   evidence: Evidence[];
   /** Whether the trunk's policy pins each `user_verified` sign-off's passkey, by evidence id. */
-  pins: ReadonlyMap<string, boolean>;
+  pins: ReadonlyMap<string, PolicyVerifiedSigner>;
 }
 
 /** The change's sign-offs, read again after each of this panel's. */
@@ -101,8 +101,8 @@ function useSignOffs(
       .evaluatePolicy({ repo, revision: commitId, skipSnapshot: true })
       .then(
         ({ evaluation }) =>
-          new Map((evaluation?.verified ?? []).map((signer) => [signer.evidenceId, signer.pinned])),
-        () => new Map<string, boolean>(),
+          new Map((evaluation?.verified ?? []).map((signer) => [signer.evidenceId, signer])),
+        () => new Map<string, PolicyVerifiedSigner>(),
       );
     client(connection, EvidenceService)
       .listEvidence({ repo, changeId, kinds: ["signoff"] })
@@ -130,10 +130,25 @@ export function presenceWords(evidence: Evidence): string {
   if (key?.presence !== SessionPresence.USER_VERIFIED) return "not verified";
   const passkey = key.passkey;
   const name = passkey?.label ? `“${passkey.label}”` : shortId(passkey?.fingerprint ?? "");
-  return `user verified, passkey ${name}`;
+  const at = key.passkeyOrigin ? ` at ${key.passkeyOrigin}` : "";
+  return `user verified, passkey ${name}${at}`;
 }
 
-function SignOffRow({ evidence, pinned }: { evidence: Evidence; pinned: boolean | undefined }) {
+/** Whether the repository's policy pins a verified sign-off's touch, or why not. */
+export function pinWords(signer: PolicyVerifiedSigner): string {
+  if (signer.pinned) return "pinned by this repository's policy";
+  return signer.unpinned === "origin"
+    ? "touched at an address this repository's policy does not pin"
+    : "not pinned by this repository's policy";
+}
+
+function SignOffRow({
+  evidence,
+  signer,
+}: {
+  evidence: Evidence;
+  signer: PolicyVerifiedSigner | undefined;
+}) {
   const status = evidence.identity?.status;
   const who = evidence.identity?.key?.identity || `key ${shortId(evidence.keyId)}`;
   return (
@@ -144,10 +159,10 @@ function SignOffRow({ evidence, pinned }: { evidence: Evidence; pinned: boolean 
       <span className="secondary">
         · <Time at={evidence.addedAt} />
       </span>
-      {pinned !== undefined && (
+      {signer && (
         <span className="pinning">
           {" · "}
-          {pinned ? "pinned by this repository's policy" : "not pinned by this repository's policy"}
+          {pinWords(signer)}
         </span>
       )}
     </li>
@@ -206,7 +221,7 @@ export function SignOff({
             <SignOffRow
               key={evidence.evidenceId}
               evidence={evidence}
-              pinned={signOffs.pins.get(evidence.evidenceId)}
+              signer={signOffs.pins.get(evidence.evidenceId)}
             />
           ))}
         </ul>
@@ -224,7 +239,7 @@ export function SignOff({
               Sign off
             </button>{" "}
             <span className="secondary">
-              as {signer.identity.name}, on tree{" "}
+              as {signer.identity.name}, at {window.location.origin}, on tree{" "}
               <span className="mono">{shortId(change.treeId)}</span> of change{" "}
               <span className="mono">{shortId(reverseHex(change.changeId))}</span>, with one passkey
               touch

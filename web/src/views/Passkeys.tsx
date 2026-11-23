@@ -1,10 +1,12 @@
 // `/passkeys` (R3.43): each person identity's passkeys, the `[passkeys]`
 // lines that pin them in a repository's policy, and the ceremonies that add
 // and remove them. A passkey verifies a person for a sign-off; a policy
-// counts it only where it pins the fingerprint.
+// counts it only where it pins the fingerprint, and the local address the
+// touch runs under (#346), which this page's is.
 import { useEffect, useState, type SubmitEvent } from "react";
 import { client, type Connection } from "../api/connection";
 import { isSessionInvalid, reefError, type ReefError } from "../api/errors";
+import { DaemonService } from "../gen/reef/api/v1/daemon_pb";
 import {
   IdentityKind,
   IdentityService,
@@ -37,7 +39,10 @@ interface Person {
 }
 
 type Load =
-  { kind: "loading" } | { kind: "failed"; error: ReefError } | { kind: "loaded"; people: Person[] };
+  | { kind: "loading" }
+  | { kind: "failed"; error: ReefError }
+  /** `site`: what a policy pins for this page, empty when its port ends with the run. */
+  | { kind: "loaded"; people: Person[]; site: string };
 
 /** What one identity's last add or remove is doing, or how it ended. */
 type Action =
@@ -47,11 +52,14 @@ type Action =
 
 const TOML_BARE_KEY = /^[A-Za-z0-9_-]+$/;
 
-/** The `[passkeys]` table pinning `person`'s passkeys. */
-export function policySnippet({ identity, passkeys }: Person): string {
+/** The `[passkeys]` table pinning `person`'s passkeys at `origin`. */
+export function policySnippet({ identity, passkeys }: Person, origin: string): string {
   const key = TOML_BARE_KEY.test(identity.name) ? identity.name : JSON.stringify(identity.name);
-  const fingerprints = passkeys.map((passkey) => JSON.stringify(passkey.fingerprint)).join(", ");
-  return `[passkeys]\n${key} = [${fingerprints}]\n`;
+  const pins = passkeys.map(
+    ({ fingerprint }) =>
+      `  { fingerprint = ${JSON.stringify(fingerprint)}, origin = ${JSON.stringify(origin)} },\n`,
+  );
+  return `[passkeys]\n${key} = [\n${pins.join("")}]\n`;
 }
 
 function usePeople(connection: Connection, version: number, onSessionInvalid: () => void) {
@@ -62,8 +70,9 @@ function usePeople(connection: Connection, version: number, onSessionInvalid: ()
     Promise.all([
       identities.listIdentities({ pageSize: PAGE }),
       identities.listPasskeys({ pageSize: PAGE }),
+      client(connection, DaemonService).getDaemonStatus({ skipBackends: true }),
     ]).then(
-      ([listed, keys]) => {
+      ([listed, keys, daemon]) => {
         if (!current) return;
         const people = listed.identities
           .filter((identity) => identity.kind === IdentityKind.PERSON && !identity.revocation)
@@ -72,7 +81,7 @@ function usePeople(connection: Connection, version: number, onSessionInvalid: ()
             passkeys: keys.passkeys.filter((passkey) => passkey.identityId === identity.id),
           }))
           .sort((a, b) => Number(b.identity.isDefault) - Number(a.identity.isDefault));
-        setLoad({ kind: "loaded", people });
+        setLoad({ kind: "loaded", people, site: daemon.webUi?.site ?? "" });
       },
       (thrown: unknown) => {
         if (!current) return;
@@ -95,12 +104,14 @@ function When({ at }: { at: Parameters<typeof dateTime>[0] }) {
 
 function PersonCard({
   person,
+  site,
   action,
   busy,
   onAdd,
   onRemove,
 }: {
   person: Person;
+  site: string;
   action: Action | null;
   busy: boolean;
   onAdd: (label: string) => void;
@@ -119,14 +130,14 @@ function PersonCard({
     const fingerprint = held.get(passkey.id);
     return fingerprint === undefined ? [] : [{ ...passkey, fingerprint }];
   });
-  const snippet = policySnippet({ identity, passkeys: pinned });
+  const snippet = policySnippet({ identity, passkeys: pinned }, site);
   async function confirm() {
     setConfirming("busy");
     try {
       const challenge = crypto.getRandomValues(new Uint8Array(32));
       const asserted = await assert({
         challenge,
-        rpId: passkeys[0]?.rpId ?? "localhost",
+        rpId: passkeys[0]?.rpId ?? "reef.localhost",
         credentialIds: passkeys.map((passkey) => passkey.credentialId),
       });
       const used = asserted.credentialId ?? new Uint8Array();
@@ -240,10 +251,20 @@ function PersonCard({
                   .join(", ")}
                 . Pin only a passkey you recognize.
               </p>
-              <pre className="snippet">{snippet}</pre>
-              <p>
-                <Copy text={snippet} label="Copy policy snippet" />
-              </p>
+              {site ? (
+                <>
+                  <pre className="snippet">{snippet}</pre>
+                  <p>
+                    <Copy text={snippet} label="Copy policy snippet" />
+                  </p>
+                </>
+              ) : (
+                <p>
+                  A pin names this page&apos;s address, and this daemon&apos;s port changes at every
+                  start. Set <code>[ui] listen = &quot;127.0.0.1:&lt;port&gt;&quot;</code> in its{" "}
+                  <code>config.toml</code>, restart it, and confirm again for the line to pin.
+                </p>
+              )}
             </>
           )}
         </>
@@ -365,6 +386,7 @@ export function Passkeys({
           <PersonCard
             key={person.identity.id}
             person={person}
+            site={load.site}
             action={action?.identity === person.identity.id ? action : null}
             busy={busy}
             onAdd={(label) => {

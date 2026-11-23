@@ -210,7 +210,7 @@ The policy evaluation is the structured refusal. For every evidence pair a `[[re
 | `error` | The check gave no verdict. |
 | `key_unbound`, `key_expired`, `key_revoked`, `key_invalid` | The signing key's status when the daemon witnessed the object. |
 | `self` | Signed in the change's own provenance session or by its agent. |
-| `presence` | The key's effective presence is below the attestor set's: a `user_verified` key whose passkey the policy does not pin counts as `none` ([policy](policy.md#pinned-passkeys)). |
+| `presence` | The key's effective presence is below the attestor set's: a `user_verified` key whose passkey the policy does not pin, at the origin of its touch, counts as `none` ([policy](policy.md#pinned-passkeys)). |
 | `condition` | An attestor set's `when` was false for it. |
 | `untrusted` | No attestor set of the rule accepts its signer. |
 

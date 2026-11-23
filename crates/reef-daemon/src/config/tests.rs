@@ -1089,3 +1089,27 @@ fn build_section() {
     };
     assert_eq!(key, "build.workers");
 }
+
+// #346: the web UI's port is fixed in the default state directory, whose
+// origin a policy pins, and the kernel's in any other; a file wins.
+#[test]
+fn the_web_ui_port_is_fixed_in_the_default_state_directory() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = tmp.path().join("state");
+    std::fs::create_dir_all(&state).unwrap();
+    let listen = || load_default(&state, tmp.path()).unwrap().file.ui.listen;
+    assert_eq!(listen(), "127.0.0.1:17333");
+    std::fs::write(state.join("config.toml"), "[ui]\nenabled = true\n").unwrap();
+    assert_eq!(listen(), "127.0.0.1:17333");
+    for set in ["127.0.0.1:0", "[::1]:7878"] {
+        let text = format!("[ui]\nlisten = \"{set}\"\n");
+        std::fs::write(state.join("config.toml"), text).unwrap();
+        assert_eq!(listen(), set);
+    }
+
+    let other = tempfile::tempdir().unwrap();
+    let config = load(&other, &PathOverrides::default(), &[]).unwrap();
+    assert_eq!(config.file.ui.listen, "127.0.0.1:0");
+    let paths = Paths::in_state_dir(other.path()).unwrap();
+    assert_eq!(Config::with_defaults(paths).file.ui.listen, "127.0.0.1:0");
+}

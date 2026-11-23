@@ -14,6 +14,7 @@ import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { closeSync, existsSync, openSync, realpathSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -51,11 +52,38 @@ export interface Workspace {
 }
 
 export interface Session {
-  /** `http://localhost:<port>/`. */
+  /** `http://<run>.reef.localhost:<port>/`. */
   url: string;
   /** `url` with `#session=<token>`. */
   sessionUrl: string;
   token: string;
+}
+
+/** A port nothing holds now, on either loopback family. */
+export async function freePort(): Promise<number> {
+  const listen = (port: number, host: string) =>
+    new Promise<number>((resolve, reject) => {
+      const server = createServer();
+      server.once("error", reject);
+      server.listen(port, host, () => {
+        const address = server.address();
+        server.close(() => {
+          resolve(typeof address === "object" && address ? address.port : 0);
+        });
+      });
+    });
+  // Below the ephemeral ranges, where no `:0` bind lands in between.
+  for (;;) {
+    const port = 20_000 + Math.floor(Math.random() * 12_000);
+    try {
+      await listen(port, "127.0.0.1");
+      await listen(port, "::1");
+      return port;
+    } catch (error) {
+      const { code } = error as NodeJS.ErrnoException;
+      if (code === "EADDRNOTAVAIL" || code === "EAFNOSUPPORT") return port;
+    }
+  }
 }
 
 export class Reef {
@@ -123,12 +151,13 @@ export class Reef {
   /**
    * A configuration, a running daemon, the fixture and two workspaces. With
    * `policy`, the fixture's first commit holds `reef-policy.toml`, its text
-   * given the default identity's name.
+   * given the default identity's name, and the web UI's port is fixed: a pin
+   * names its origin (#346).
    */
   async setup(options: { policy?: (identity: string) => string } = {}) {
     await mkdir(this.state, { mode: 0o700 });
     await mkdir(join(this.root, "home"));
-    await this.writeConfig("127.0.0.1:0");
+    await this.writeConfig(`127.0.0.1:${String(options.policy ? await freePort() : 0)}`);
     await this.start();
 
     await mkdir(this.fixture);

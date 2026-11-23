@@ -32,6 +32,7 @@ fn key(identity: &str, id: &str, kind: &str, actor: &str) -> Key {
         session: format!("ses_{identity}"),
         presence: "none".to_owned(),
         passkey: String::new(),
+        passkey_origin: String::new(),
         custody: "client".to_owned(),
         authority: AUTHORITY.to_owned(),
         issuer_kind: "reef-daemon".to_owned(),
@@ -666,7 +667,15 @@ fn changes_to_the_policy_files_need_the_owners() {
 }
 
 const PASSKEY: &str = "3c9e0d5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f";
+/// What a pin names, and where a touch of it runs.
+const SITE: &str = "http://reef.localhost:17333";
+const ORIGIN: &str = "http://0123456789abcdef.reef.localhost:17333";
 const BOB_ID: &str = "idn_0000000000000002";
+
+/// `PASSKEY` pinned for `who` at `origin`, as a `[passkeys]` line.
+fn pin(who: &str, origin: &str) -> String {
+    format!("{who} = [{{ fingerprint = \"{PASSKEY}\", origin = \"{origin}\" }}]")
+}
 
 /// A policy whose attestor set, `[[signoff]]` and `[owners]` all ask for
 /// `user_verified`, with `pins` as its `[passkeys]` lines.
@@ -699,12 +708,14 @@ presence = "user_verified"
 }
 
 /// The three rules' statuses when `who` reviews and signs off a change to
-/// the policy file with a key of `presence` and `passkey`.
+/// the policy file with a key of `presence` and `passkey`, touched at
+/// `origin`.
 fn presence_statuses(
     policy: &Policy,
     who: (&str, &str),
     presence: &str,
     passkey: &str,
+    origin: &str,
 ) -> [Status; 3] {
     let mut changed = input(&["reef-policy.toml"], Vec::new());
     changed.proposed_policy = ProposedPolicy {
@@ -714,6 +725,7 @@ fn presence_statuses(
     let signer = Key {
         presence: presence.to_owned(),
         passkey: passkey.to_owned(),
+        passkey_origin: origin.to_owned(),
         ..key(who.0, who.1, "person", "human")
     };
     for (id, kind) in [("r1", "review"), ("s1", "signoff")] {
@@ -732,26 +744,26 @@ fn verified_presence_counts_only_with_a_pinned_passkey() {
     use Status::{Satisfied, Unsatisfied};
     let alice = ("alice", ALICE_ID);
     let bob = ("bob", BOB_ID);
-    let by_name = verified_policy(&format!("alice = [\"{PASSKEY}\"]"));
+    let by_name = verified_policy(&pin("alice", SITE));
     assert_eq!(by_name.warnings(), []);
     assert_eq!(
-        presence_statuses(&by_name, alice, "user_verified", PASSKEY),
+        presence_statuses(&by_name, alice, "user_verified", PASSKEY, ORIGIN),
         [Satisfied; 3]
     );
     // Pinned by id, for an identity a group lists by name, and the reverse.
-    let by_id = verified_policy(&format!("{ALICE_ID} = [\"{PASSKEY}\"]"));
+    let by_id = verified_policy(&pin(ALICE_ID, SITE));
     assert_eq!(
-        presence_statuses(&by_id, alice, "user_verified", PASSKEY),
+        presence_statuses(&by_id, alice, "user_verified", PASSKEY, ORIGIN),
         [Satisfied; 3]
     );
-    let bob_by_name = verified_policy(&format!("bob = [\"{PASSKEY}\"]"));
+    let bob_by_name = verified_policy(&pin("bob", SITE));
     assert_eq!(
-        presence_statuses(&bob_by_name, bob, "user_verified", PASSKEY),
+        presence_statuses(&bob_by_name, bob, "user_verified", PASSKEY, ORIGIN),
         [Satisfied; 3]
     );
     // A pin for bob does not count for alice, even for the same passkey.
     assert_eq!(
-        presence_statuses(&bob_by_name, alice, "user_verified", PASSKEY),
+        presence_statuses(&bob_by_name, alice, "user_verified", PASSKEY, ORIGIN),
         [Unsatisfied; 3]
     );
     // A passkey alice has not pinned, a key with no passkey, and a pinned
@@ -763,7 +775,7 @@ fn verified_presence_counts_only_with_a_pinned_passkey() {
         ("none", PASSKEY),
     ] {
         assert_eq!(
-            presence_statuses(&by_name, alice, presence, passkey),
+            presence_statuses(&by_name, alice, presence, passkey, ORIGIN),
             [Unsatisfied; 3],
             "{presence} {passkey}"
         );
@@ -793,11 +805,92 @@ fn verified_presence_counts_only_with_a_pinned_passkey() {
     );
 }
 
-// R3.43: CEL reads a key's passkey.
+// #346: a pinned passkey's touch counts only at a pinned origin, in every
+// reader of presence.
+#[test]
+fn verified_presence_counts_only_at_a_pinned_origin() {
+    use Status::{Satisfied, Unsatisfied};
+    let alice = ("alice", ALICE_ID);
+    let policy = verified_policy(&pin("alice", SITE));
+    for origin in [
+        "http://0123456789abcdef.reef.localhost:17334",
+        "http://reef.localhost:17333",
+        "http://localhost:17333",
+        "https://0123456789abcdef.reef.localhost:17333",
+        "http://0123456789abcdef.reef.localhost:17333/",
+        "",
+    ] {
+        assert_eq!(
+            presence_statuses(&policy, alice, "user_verified", PASSKEY, origin),
+            [Unsatisfied; 3],
+            "{origin:?}"
+        );
+    }
+    // One passkey pinned at two origins, by name and by id.
+    let https = "https://reef.example:8443";
+    let both = verified_policy(&format!("{}\n{}", pin("alice", SITE), pin(ALICE_ID, https)));
+    for origin in [ORIGIN, https] {
+        assert_eq!(
+            presence_statuses(&both, alice, "user_verified", PASSKEY, origin),
+            [Satisfied; 3],
+            "{origin}"
+        );
+    }
+    // A pin takes its fingerprint and its origin together: another
+    // passkey's origin does not lend itself to this one.
+    let other = "0".repeat(64);
+    let crossed = verified_policy(&format!(
+        "alice = [{{ fingerprint = \"{PASSKEY}\", origin = \"{SITE}\" }}, {{ fingerprint = \"{other}\", origin = \"{https}\" }}]"
+    ));
+    assert_eq!(
+        presence_statuses(&crossed, alice, "user_verified", PASSKEY, https),
+        [Unsatisfied; 3]
+    );
+
+    // What the evaluation says of each signer.
+    let signer = |id: &str, passkey: &str, origin: &str| {
+        let mut e = signoff(id, "alice", ALICE_ID, 1);
+        e.key.presence = "user_verified".to_owned();
+        e.key.passkey = passkey.to_owned();
+        e.key.passkey_origin = origin.to_owned();
+        e
+    };
+    let evaluation = policy.evaluate(&input(
+        &["a"],
+        vec![
+            signer("s1", PASSKEY, ORIGIN),
+            signer(
+                "s2",
+                PASSKEY,
+                "http://0123456789abcdef.reef.localhost:49953",
+            ),
+            signer("s3", &other, ORIGIN),
+        ],
+    ));
+    let said: Vec<_> = evaluation
+        .verified
+        .iter()
+        .map(|v| (v.origin.as_str(), v.pinned, v.unpinned.as_str()))
+        .collect();
+    assert_eq!(
+        said,
+        [
+            (ORIGIN, true, ""),
+            (
+                "http://0123456789abcdef.reef.localhost:49953",
+                false,
+                "origin"
+            ),
+            (ORIGIN, false, "passkey"),
+        ]
+    );
+}
+
+// R3.43, #346: CEL reads a key's passkey and the origin of its touch.
 #[test]
 fn cel_reads_a_keys_passkey() {
     let policy = policy(&format!(
-        "[[rule]]\nname = \"pinned\"\nexpr = 'evidence.exists(e, e.key.passkey == \"{PASSKEY}\")'\n"
+        "[[rule]]\nname = \"pinned\"\nexpr = 'evidence.exists(e, e.key.passkey == \"{PASSKEY}\" && e.key.passkey_origin == \"{ORIGIN}\")'\n"
     ));
     let mut e = signoff("s1", "alice", ALICE_ID, 1);
     assert_eq!(
@@ -805,6 +898,7 @@ fn cel_reads_a_keys_passkey() {
         Status::Unsatisfied
     );
     e.key.passkey = PASSKEY.to_owned();
+    e.key.passkey_origin = ORIGIN.to_owned();
     assert_eq!(
         rule(&policy.evaluate(&input(&["a"], vec![e])), "pinned").status,
         Status::Satisfied
@@ -817,10 +911,11 @@ fn cel_reads_a_keys_passkey() {
 fn cel_reads_effective_presence() {
     let rule_text = "[[rule]]\nname = \"verified\"\nexpr = 'evidence.exists(e, e.key.presence == \"user_verified\")'\n";
     let unpinned = policy(rule_text);
-    let pinned = policy(&format!("{rule_text}[passkeys]\nalice = [\"{PASSKEY}\"]\n"));
+    let pinned = policy(&format!("{rule_text}[passkeys]\n{}\n", pin("alice", SITE)));
     let mut e = signoff("s1", "alice", ALICE_ID, 1);
     e.key.presence = "user_verified".to_owned();
     e.key.passkey = PASSKEY.to_owned();
+    e.key.passkey_origin = ORIGIN.to_owned();
     let changed = input(&["a"], vec![e]);
     assert_eq!(
         rule(&unpinned.evaluate(&changed), "verified").status,

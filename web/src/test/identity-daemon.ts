@@ -26,6 +26,7 @@ import {
   type AddEvidenceRequest,
   type Evidence,
 } from "../gen/reef/api/v1/evidence_pb";
+import { DaemonService } from "../gen/reef/api/v1/daemon_pb";
 import {
   ApprovalSchema,
   ApprovalState,
@@ -96,6 +97,8 @@ type Method =
   | "getApproval";
 
 export class IdentityDaemon {
+  /** What a policy pins; empty when `[ui] listen` names no port. */
+  site = "http://reef.localhost:17333";
   readonly arsood = person("arsood", { isDefault: true });
   identities: Identity[] = [this.arsood, person("ci-bot", { kind: IdentityKind.CI })];
   passkeys: Passkey[] = [];
@@ -183,6 +186,9 @@ export class IdentityDaemon {
     { changes = true, policy = true }: { changes?: boolean; policy?: boolean } = {},
   ) {
     const service = router.service.bind(router);
+    service(DaemonService, {
+      getDaemonStatus: () => ({ webUi: { site: this.site } }),
+    });
     service(IdentityService, {
       getIdentity: () => ({ identity: this.identities.find((i) => i.isDefault) }),
       listIdentities: () => ({ identities: this.identities }),

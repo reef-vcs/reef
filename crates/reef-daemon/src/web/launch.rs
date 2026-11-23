@@ -36,7 +36,7 @@ pub(crate) fn write(dir: &Path, session_url: &str) -> io::Result<PathBuf> {
 }
 
 /// `text` escaped for an HTML attribute. The URL is the daemon's own
-/// (`http://localhost:<port>/#session=<base64url>`), so nothing needs it;
+/// (`http://<run>.reef.localhost:<port>/#session=<base64url>`), so nothing needs it;
 /// this keeps the page sound if that ever changes.
 fn escape(text: &str) -> String {
     text.replace('&', "&amp;")

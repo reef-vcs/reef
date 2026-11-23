@@ -87,7 +87,7 @@ impl SessionUrl {
         &self.0
     }
 
-    /// `http://localhost:<port>`, which the window is pinned to.
+    /// `http://<run>.reef.localhost:<port>`, which the window is pinned to.
     pub fn origin(&self) -> &str {
         origin(&self.0)
     }

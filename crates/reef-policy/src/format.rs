@@ -17,6 +17,7 @@ use toml::Spanned;
 use crate::check::{self, Scope};
 use crate::env::{self, Parsed};
 use crate::glob::{PathFilter, Patterns};
+use crate::origin::Origin;
 
 /// The format version this crate reads.
 pub const VERSION: u32 = 1;
@@ -109,7 +110,7 @@ struct RawFile {
     #[serde(default)]
     groups: BTreeMap<String, Spanned<List>>,
     #[serde(default)]
-    passkeys: BTreeMap<String, Spanned<List>>,
+    passkeys: BTreeMap<String, Spanned<Vec<Spanned<toml::Value>>>>,
     #[serde(default)]
     attestors: BTreeMap<String, Spanned<RawAttestor>>,
     #[serde(default)]
@@ -270,6 +271,46 @@ struct VersionOnly {
 // ---------------------------------------------------------------------------
 // The loaded policy.
 
+/// A pinned passkey (R3.43, #346): its touches count only at `origin`.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Pin {
+    /// The passkey's fingerprint: the SHA-256 of its DER public key, as hex.
+    pub fingerprint: String,
+    /// The web origin its touch must run at.
+    pub origin: Origin,
+}
+
+impl Pin {
+    /// The pin `value` writes.
+    fn parse(value: &toml::Value) -> Result<Self, String> {
+        const FORM: &str = "a pin names a fingerprint and an origin: { fingerprint = \"3c9e…\", origin = \"http://reef.localhost:17333\" }";
+        let toml::Value::Table(table) = value else {
+            return Err(FORM.to_owned());
+        };
+        if let Some(key) = table
+            .keys()
+            .find(|key| !matches!(key.as_str(), "fingerprint" | "origin"))
+        {
+            return Err(format!("unknown key {key:?}; {FORM}"));
+        }
+        let text = |key: &str| match table.get(key) {
+            Some(toml::Value::String(text)) => Ok(text.as_str()),
+            _ => Err(FORM.to_owned()),
+        };
+        let (fingerprint, origin) = (text("fingerprint")?, text("origin")?);
+        if !is_hex64(fingerprint) {
+            return Err(format!(
+                "{fingerprint:?} is not a passkey fingerprint (64 lowercase hex digits: the SHA-256 of its public key)"
+            ));
+        }
+        Ok(Self {
+            fingerprint: fingerprint.to_owned(),
+            origin: Origin::parse(origin)
+                .map_err(|why| format!("{origin:?} is not a web origin: {why}"))?,
+        })
+    }
+}
+
 /// A loaded policy: every table checked, every pattern compiled and every
 /// expression parsed and checked. Evaluate it with [`Policy::evaluate`].
 #[derive(Debug)]
@@ -277,9 +318,8 @@ pub struct Policy {
     pub(crate) sha256: String,
     pub(crate) owners: Signoff,
     pub(crate) groups: BTreeMap<String, Vec<String>>,
-    /// `[passkeys]`: each pinned identity, by name or id, and its passkeys'
-    /// fingerprints.
-    pub(crate) passkeys: BTreeMap<String, BTreeSet<String>>,
+    /// `[passkeys]`: each pinned identity, by name or id, and its pins.
+    pub(crate) passkeys: BTreeMap<String, BTreeSet<Pin>>,
     pub(crate) attestors: BTreeMap<String, Attestor>,
     pub(crate) entries: Vec<Entry>,
     pub(crate) conflicts: Conflicts,
@@ -887,6 +927,11 @@ impl Loader<'_> {
     }
 
     fn list<'b>(&mut self, rule: &str, field: &str, list: &'b [Text]) -> Vec<&'b str> {
+        self.at_most_max_list(rule, field, list);
+        list.iter().map(|item| item.get_ref().as_str()).collect()
+    }
+
+    fn at_most_max_list<T>(&mut self, rule: &str, field: &str, list: &[Spanned<T>]) {
         if list.len() > MAX_LIST {
             let at = list.get(MAX_LIST).map_or(0, |item| item.span().start);
             self.at(
@@ -896,7 +941,6 @@ impl Loader<'_> {
                 format!("{} entries; a list has at most {MAX_LIST}", list.len()),
             );
         }
-        list.iter().map(|item| item.get_ref().as_str()).collect()
     }
 
     fn patterns(&mut self, rule: &str, field: &str, list: &[Text]) -> Patterns {
@@ -1041,7 +1085,7 @@ impl Loader<'_> {
         rule: &str,
         presence: Option<&Text>,
         members: &Members,
-        passkeys: &BTreeMap<String, BTreeSet<String>>,
+        passkeys: &BTreeMap<String, BTreeSet<Pin>>,
     ) -> Presence {
         match presence.map(|p| (p.get_ref().as_str(), p.span().start)) {
             None | Some(("none", _)) => Presence::None,
@@ -1826,12 +1870,13 @@ impl Loader<'_> {
         }
     }
 
-    /// `[passkeys]` (R3.43): each identity, by name or id, and the
-    /// fingerprints of the passkeys whose verification counts for it.
+    /// `[passkeys]` (R3.43, #346): each identity, by name or id, and the
+    /// passkeys whose verification counts for it, each with the origin it
+    /// must run at.
     fn passkeys(
         &mut self,
-        raw: &BTreeMap<String, Spanned<List>>,
-    ) -> BTreeMap<String, BTreeSet<String>> {
+        raw: &BTreeMap<String, Spanned<Vec<Spanned<toml::Value>>>>,
+    ) -> BTreeMap<String, BTreeSet<Pin>> {
         if raw.len() > MAX_LIST {
             self.at(
                 "passkeys",
@@ -1844,8 +1889,8 @@ impl Loader<'_> {
             );
         }
         let mut passkeys = BTreeMap::new();
-        for (identity, fingerprints) in raw {
-            let at = fingerprints.span().start;
+        for (identity, pins) in raw {
+            let at = pins.span().start;
             if !is_identity_id(identity) && !is_identity_name(identity) {
                 self.at(
                     "passkeys",
@@ -1854,8 +1899,8 @@ impl Loader<'_> {
                     format!("{identity:?} is neither an identity name nor an identity id (idn_ and 16 hex digits)"),
                 );
             }
-            self.list("passkeys", identity, fingerprints.get_ref());
-            if fingerprints.get_ref().is_empty() {
+            self.at_most_max_list("passkeys", identity, pins.get_ref());
+            if pins.get_ref().is_empty() {
                 self.at(
                     "passkeys",
                     identity,
@@ -1864,19 +1909,12 @@ impl Loader<'_> {
                 );
             }
             let mut pinned = BTreeSet::new();
-            for fingerprint in fingerprints.get_ref() {
-                if is_hex64(fingerprint.get_ref()) {
-                    pinned.insert(fingerprint.get_ref().clone());
-                } else {
-                    self.at(
-                        "passkeys",
-                        identity,
-                        fingerprint.span().start,
-                        format!(
-                            "{:?} is not a passkey fingerprint (64 lowercase hex digits: the SHA-256 of its public key)",
-                            fingerprint.get_ref()
-                        ),
-                    );
+            for pin in pins.get_ref() {
+                match Pin::parse(pin.get_ref()) {
+                    Ok(pin) => {
+                        pinned.insert(pin);
+                    }
+                    Err(problem) => self.at("passkeys", identity, pin.span().start, problem),
                 }
             }
             passkeys.insert(identity.clone(), pinned);
@@ -2071,8 +2109,8 @@ presence = "user_verified"
 maintainers = ["alice", "idn_8f3a0c2d91e4b675"]
 
 [passkeys]
-alice = ["3c9e0d5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f"]
-idn_8f3a0c2d91e4b675 = ["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"]
+alice = [{ fingerprint = "3c9e0d5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f", origin = "http://reef.localhost:17333" }]
+idn_8f3a0c2d91e4b675 = [{ fingerprint = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", origin = "https://reef.example" }]
 
 [attestors.ci]
 identities = ["ci-main"]
@@ -2177,10 +2215,15 @@ message = "every commit of the change has a signed, bound provenance record"
 
     const FINGERPRINT: &str = "3c9e0d5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f";
 
+    /// `fingerprint` pinned at the default origin, as a policy writes it.
+    fn pin(fingerprint: &str) -> String {
+        format!("{{ fingerprint = \"{fingerprint}\", origin = \"http://reef.localhost:17333\" }}")
+    }
+
     #[test]
     fn passkeys_are_checked_with_positions() {
         let short = one(
-            &with("[passkeys]\nalice = [\"3c9e\"]\n"),
+            &with(&format!("[passkeys]\nalice = [{}]\n", pin("3c9e"))),
             "\"3c9e\" is not a passkey fingerprint",
         );
         assert_eq!(
@@ -2191,19 +2234,50 @@ message = "every commit of the change has a signed, bound provenance record"
         let upper = FINGERPRINT.to_uppercase();
         let upper = one(
             &with(&format!(
-                "[passkeys]\nalice = [\"{FINGERPRINT}\", \"{upper}\"]\n"
+                "[passkeys]\nalice = [\n  {},\n  {},\n]\n",
+                pin(FINGERPRINT),
+                pin(&upper)
             )),
             "is not a passkey fingerprint",
         );
-        assert_eq!((upper.line, upper.column), (5, 78));
+        assert_eq!((upper.line, upper.column), (7, 3));
         let not_a_list = one(
             &with(&format!("[passkeys]\nalice = \"{FINGERPRINT}\"\n")),
             "expected a sequence",
         );
         assert_eq!((not_a_list.line, not_a_list.column), (5, 9));
-        one(&with("[passkeys]\nalice = [1]\n"), "expected a string");
+        // A bare fingerprint, as before #346, would count at any origin.
+        for not_a_pin in [
+            "1".to_owned(),
+            format!("\"{FINGERPRINT}\""),
+            format!("{{ fingerprint = \"{FINGERPRINT}\" }}"),
+            "{ origin = \"http://reef.localhost:17333\" }".to_owned(),
+            format!("{{ fingerprint = \"{FINGERPRINT}\", origin = 17333 }}"),
+        ] {
+            let found = one(
+                &with(&format!("[passkeys]\nalice = [{not_a_pin}]\n")),
+                "a pin names a fingerprint and an origin: { fingerprint = \"3c9e…\", origin = \"http://reef.localhost:17333\" }",
+            );
+            assert_eq!((found.line, found.column), (5, 10), "{not_a_pin}");
+        }
+        one(
+            &with(&format!(
+                "[passkeys]\nalice = [{{ fingerprint = \"{FINGERPRINT}\", origin = \"http://reef.localhost:17333\", label = \"mac\" }}]\n"
+            )),
+            "unknown key \"label\"",
+        );
+        let origin = one(
+            &with(&format!(
+                "[passkeys]\nalice = [{{ fingerprint = \"{FINGERPRINT}\", origin = \"http://127.0.0.1:17333\" }}]\n"
+            )),
+            "\"http://127.0.0.1:17333\" is not a web origin: its host is not a lowercase DNS name",
+        );
+        assert_eq!((origin.line, origin.column), (5, 10));
         let who = one(
-            &with(&format!("[passkeys]\n\"Bad Name\" = [\"{FINGERPRINT}\"]\n")),
+            &with(&format!(
+                "[passkeys]\n\"Bad Name\" = [{}]\n",
+                pin(FINGERPRINT)
+            )),
             "neither an identity name nor an identity id",
         );
         assert_eq!(who.line, 5);
@@ -2213,13 +2287,15 @@ message = "every commit of the change has a signed, bound provenance record"
         );
         let policy = Policy::load(
             with(&format!(
-                "[passkeys]\nalice = [\"{FINGERPRINT}\", \"{FINGERPRINT}\"]\nidn_0000000000000001 = [\"{}\"]\n",
-                "0".repeat(64)
+                "[passkeys]\nalice = [{0}, {0}, {{ fingerprint = \"{FINGERPRINT}\", origin = \"https://reef.example:8443\" }}]\nidn_0000000000000001 = [{1}]\n",
+                pin(FINGERPRINT),
+                pin(&"0".repeat(64))
             ))
             .as_bytes(),
         )
         .unwrap();
-        assert_eq!(policy.passkeys["alice"].len(), 1);
+        // One passkey at two origins is two pins.
+        assert_eq!(policy.passkeys["alice"].len(), 2);
         assert_eq!(policy.passkeys.len(), 2);
     }
 
@@ -2265,7 +2341,7 @@ message = "every commit of the change has a signed, bound provenance record"
         assert_eq!(warnings(&area).len(), 1);
         // A pin for another identity does not help; one for a member does,
         // and so does one in the other form, which only the daemon can map.
-        let pin = |who: &str| format!("[passkeys]\n{who} = [\"{FINGERPRINT}\"]\n");
+        let pin = |who: &str| format!("[passkeys]\n{who} = [{}]\n", pin(FINGERPRINT));
         assert_eq!(warnings(&format!("{area}{}", pin("carol"))).len(), 1);
         assert_eq!(
             warnings(&format!("{area}{}", pin("alice"))),
@@ -2289,7 +2365,7 @@ message = "every commit of the change has a signed, bound provenance record"
 
     #[test]
     fn pins_the_owners_need_no_touch_to_change_are_a_warning() {
-        let pin = format!("[passkeys]\nalice = [\"{FINGERPRINT}\"]\n");
+        let pin = format!("[passkeys]\nalice = [{}]\n", pin(FINGERPRINT));
         let unguarded = [
             "2:1: owners.presence: [owners] does not ask for presence user_verified, so anyone who can sign off as an owner, an agent running as one included, can change [passkeys] and the presence rules; add presence = \"user_verified\" to [owners]",
         ];

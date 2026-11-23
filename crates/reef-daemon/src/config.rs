@@ -1297,12 +1297,23 @@ pub struct UiSection {
     /// `reef ui` works. False: `CreateWebSession` fails with
     /// `WEB_UI_DISABLED` and nothing is ever bound. Default true.
     pub enabled: bool,
-    /// Where the listener binds at the first `reef ui`: `127.0.0.1:<port>`
+    /// Where the listener binds, at the first `reef ui`, or with a port that
+    /// is not 0 and a passkey registered, at start (#346): `127.0.0.1:<port>`
     /// or `[::1]:<port>`, either meaning both loopback families on that
-    /// port, served as `http://localhost:<port>`; port 0 for one the kernel
-    /// picks at every start. Default `127.0.0.1:0`.
+    /// port, served as `http://<a name of this run>.reef.localhost:<port>`;
+    /// port 0 for one the kernel picks at every start, whose origin a policy
+    /// cannot pin. Default
+    /// `127.0.0.1:17333` ([`DEFAULT_UI_PORT`]) in the default state
+    /// directory, `127.0.0.1:0` in any other.
     pub listen: String,
 }
+
+/// The web UI's port for a daemon in the default state directory (#346,
+/// ADR 0094): outside the ephemeral ranges, so that the web UI's origin,
+/// which a policy's `[passkeys]` pins, survives a restart. Any other state
+/// directory's daemon (a test's, a scratch one) leaves the port to the
+/// kernel, so that two daemons never contend for it.
+pub const DEFAULT_UI_PORT: u16 = 17333;
 
 impl Default for UiSection {
     fn default() -> Self {
@@ -1840,6 +1851,9 @@ impl Config {
                 }
                 Some(base)
             });
+        if layered.state_dir_source == Source::Default && !file_keys.contains("ui.listen") {
+            file.ui.listen = format!("127.0.0.1:{DEFAULT_UI_PORT}");
+        }
         let origin = Origin {
             state_dir: layered.state_dir_source,
             config_file: layered.config_file_source,

@@ -20,6 +20,7 @@ import {
   PolicyRuleStatus,
   type PolicyEvaluation,
   type PolicyRuleResult,
+  type PolicyVerifiedSigner,
 } from "../gen/reef/api/v1/policy_pb";
 import type { FrameScheduler } from "../live/frame";
 import type { Live } from "../live/share";
@@ -59,7 +60,7 @@ import {
 } from "./proposal-words";
 import { ProposalComments, type RunAction } from "./ProposalComments";
 import { ProposalDiff, type LineAnchor } from "./ProposalDiff";
-import { presenceWords, useSigner } from "./SignOff";
+import { pinWords, presenceWords, useSigner } from "./SignOff";
 
 /** The commit and tree the person is reviewing. */
 interface Reviewed {
@@ -223,7 +224,13 @@ function Rule({ rule }: { rule: PolicyRuleResult }) {
   );
 }
 
-function EvidenceRow({ evidence, pinned }: { evidence: Evidence; pinned: boolean | undefined }) {
+function EvidenceRow({
+  evidence,
+  signer,
+}: {
+  evidence: Evidence;
+  signer: PolicyVerifiedSigner | undefined;
+}) {
   const dev = useDevMode();
   const key = evidence.identity?.key;
   const who = key?.identity || `key ${shortId(evidence.keyId)}`;
@@ -234,10 +241,7 @@ function EvidenceRow({ evidence, pinned }: { evidence: Evidence; pinned: boolean
       <span className="mono">{evidence.kind}</span>
       {evidence.target && <span className="mono"> {evidence.target}</span>} ·{" "}
       {RESULT_WORDS[evidence.result] ?? "unknown result"} · {who} · {presenceWords(evidence)}
-      {pinned !== undefined &&
-        (pinned
-          ? ", pinned by this repository's policy"
-          : ", not pinned by this repository's policy")}
+      {signer && `, ${pinWords(signer)}`}
       {status !== undefined && STATUS_WORDS[status] && ` · ${STATUS_WORDS[status]}`}
       <span className="secondary">
         {" · "}
@@ -258,7 +262,7 @@ function EvidenceSection({ read }: { read: ProposalRead }) {
   // the change that stops it is what the person needs to see.
   const stopped = read.evaluation ? undefined : read.members.find((member) => !member.passes);
   const evaluation: PolicyEvaluation | undefined = read.evaluation ?? stopped?.evaluation;
-  const pins = new Map((evaluation?.verified ?? []).map((v) => [v.evidenceId, v.pinned]));
+  const pins = new Map((evaluation?.verified ?? []).map((v) => [v.evidenceId, v]));
   const current = read.evidence.filter((e) => e.current);
   const earlier = read.evidence.filter((e) => !e.current);
   const rules = (evaluation?.rules ?? []).filter(
@@ -290,7 +294,7 @@ function EvidenceSection({ read }: { read: ProposalRead }) {
             <EvidenceRow
               key={evidence.evidenceId}
               evidence={evidence}
-              pinned={pins.get(evidence.evidenceId)}
+              signer={pins.get(evidence.evidenceId)}
             />
           ))}
         </ul>
@@ -300,7 +304,7 @@ function EvidenceSection({ read }: { read: ProposalRead }) {
           <summary>{plural(earlier.length, "object")} on earlier trees</summary>
           <ul className="activity">
             {earlier.map((evidence) => (
-              <EvidenceRow key={evidence.evidenceId} evidence={evidence} pinned={undefined} />
+              <EvidenceRow key={evidence.evidenceId} evidence={evidence} signer={undefined} />
             ))}
           </ul>
         </details>

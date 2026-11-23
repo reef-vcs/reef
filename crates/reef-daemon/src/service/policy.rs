@@ -505,6 +505,7 @@ fn key_of(identity: Option<&v1::KeyIdentity>, key_id: &str) -> input::Key {
             .as_ref()
             .map(|passkey| passkey.fingerprint.clone())
             .unwrap_or_default(),
+        passkey_origin: key.passkey_origin,
         custody: word(
             v1::KeyCustody::try_from(key.custody)
                 .unwrap_or_default()
@@ -957,6 +958,8 @@ pub(crate) fn evaluation_message(evaluation: &Evaluation) -> v1::PolicyEvaluatio
                 identity: signer.identity.clone(),
                 passkey: signer.passkey.clone(),
                 pinned: signer.pinned,
+                origin: signer.origin.clone(),
+                unpinned: signer.unpinned.clone(),
             })
             .collect(),
         ..v1::PolicyEvaluation::default()

@@ -751,5 +751,5 @@ export function Fleet({
 
 function isLoopback(): boolean {
   const host = window.location.hostname;
-  return host === "127.0.0.1" || host === "localhost" || host === "[::1]" || host === "::1";
+  return host.endsWith(".localhost") || ["127.0.0.1", "localhost", "[::1]", "::1"].includes(host);
 }

@@ -6,8 +6,9 @@
 //!
 //! 1. `clientDataJSON` is a JSON object whose `type` is `webauthn.get`,
 //!    whose `challenge` is the expected one in unpadded base64url, and whose
-//!    `origin` has the RP ID as its host, over `https`, or `http` for
-//!    `localhost` only, and is not a cross-origin frame's.
+//!    `origin` has the RP ID, or a name under it, as its host, over `https`,
+//!    or `http` for `localhost` and names under it only, and is not a
+//!    cross-origin frame's.
 //! 2. `authenticatorData` starts with SHA-256 of the RP ID, and its flags
 //!    say the user was present (UP) and verified (UV).
 //! 3. The signature verifies over `authenticatorData ‖
@@ -18,7 +19,10 @@
 //! from the certificate's own fields, so any verifier checks it with nothing
 //! but the certificate. What a stateless reader cannot know (that the
 //! passkey is registered and not removed, the listener's port, the sign
-//! count) is the daemon's to check at approval.
+//! count) is the daemon's to check at approval. The port stays in the
+//! certificate ([`PresenceEvidence::origin`]), and whoever holds the
+//! authority's key can certify a touch at another one, so a policy pins the
+//! whole origin (#346, ADR 0094).
 //!
 //! Public keys travel as DER `SubjectPublicKeyInfo`, as a browser's
 //! `getPublicKey()` returns them, so nothing here reads CBOR. A passkey's
@@ -535,7 +539,7 @@ pub struct PresenceEvidence {
     /// The passkey's credential id, for display and lookup; the assertion
     /// does not sign it.
     pub credential_id: Vec<u8>,
-    /// The RP ID: `localhost` for the web listener's.
+    /// The RP ID: `reef.localhost` for the web listener's.
     pub rp_id: String,
     /// What the assertion approves.
     pub approves: Approves,
@@ -562,6 +566,20 @@ impl PresenceEvidence {
             approves: &self.approves,
         });
         check_assertion(&self.passkey, &self.rp_id, &challenge, &self.assertion)
+    }
+
+    /// The web origin the assertion ran at, as the browser wrote it in
+    /// `clientDataJSON`; empty when it names none. It means something only
+    /// once [`PresenceEvidence::check`] passes, as it has for a certificate's
+    /// binding.
+    pub fn origin(&self) -> String {
+        match serde_json::from_slice(&self.assertion.client_data_json) {
+            Ok(Value::Object(mut data)) => match data.remove("origin") {
+                Some(Value::String(origin)) => origin,
+                _ => String::new(),
+            },
+            _ => String::new(),
+        }
     }
 }
 
@@ -621,8 +639,9 @@ fn client_data(
 }
 
 /// Why `origin` is not one of `rp_id`'s, if it is not: its host must be
-/// the RP ID, with an optional port, over `https`, or `http` for
-/// `localhost`, which browsers treat as a secure context.
+/// the RP ID or a name under it, with an optional port, over `https`, or
+/// `http` for `localhost` and the names under it, which browsers treat as
+/// secure contexts.
 fn origin_problem(origin: &str, rp_id: &str) -> Option<String> {
     let Some((scheme, authority)) = origin.split_once("://") else {
         return Some("not scheme://host".into());
@@ -638,12 +657,18 @@ fn origin_problem(origin: &str, rp_id: &str) -> Option<String> {
         Some(_) => return Some("its port is not 1 to 65535".into()),
         None => authority,
     };
-    if host != rp_id {
-        return Some(format!("its host is not the RP ID {rp_id:?}"));
+    let under = |domain: &str| {
+        host.strip_suffix(domain)
+            .is_some_and(|rest| rest.is_empty() || rest.ends_with('.'))
+    };
+    if !is_rp_id(host) || !under(rp_id) {
+        return Some(format!(
+            "its host is neither the RP ID {rp_id:?} nor a name under it"
+        ));
     }
     match scheme {
         "https" => None,
-        "http" if host == "localhost" => None,
+        "http" if under("localhost") => None,
         _ => Some("a scheme other than https, or http for localhost".into()),
     }
 }

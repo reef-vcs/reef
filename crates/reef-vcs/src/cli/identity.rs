@@ -26,7 +26,7 @@ use reef_api::v1::{
 use reef_client::evidence::session::Actor;
 use reef_client::json::{
     self, Authority, AuthorityRotated, Identity, OidcMatch, OidcMatchRevoked, Passkey,
-    PasskeysReset, SessionKey, SessionKeyIssued, WebSession,
+    PasskeysReset, SessionKey, SessionKeyIssued, WebSession, WebUiStatus,
 };
 use reef_client::keyless::{KeylessError, KeylessOptions};
 use reef_client::{IssueError, brief};
@@ -415,11 +415,16 @@ pub(crate) async fn keyless_key(
     }
 }
 
+/// Whether a policy pins a key's passkey at the origin its touch ran at, or
+/// why not (R3.43, #346).
+pub(crate) type Pinned = Result<(), reef_policy::Unpinned>;
+
 /// A key's presence as text: `none (not verified)`, or for a passkey's
-/// approval `user_verified (passkey "<label>", pinned here)`, `(..., not
-/// pinned by this repository's policy)`, or without `pinned` known, the
-/// passkey alone.
-pub(crate) fn presence_text(key: &SessionKey, pinned: Option<bool>) -> String {
+/// approval `user_verified (passkey "<label>" at <origin>, pinned here)`,
+/// `(..., not pinned by this repository's policy)`, `(..., an origin this
+/// repository's policy does not pin)`, or without `pinned` known, the
+/// passkey and the origin alone.
+pub(crate) fn presence_text(key: &SessionKey, pinned: Option<Pinned>) -> String {
     let presence = key.presence.as_deref().unwrap_or("-");
     if presence != "user_verified" {
         return format!("{presence} (not verified)");
@@ -431,9 +436,18 @@ pub(crate) fn presence_text(key: &SessionKey, pinned: Option<bool>) -> String {
             format!("passkey {:?}", passkey.label)
         }
     });
+    let passkey = match &key.passkey_origin {
+        Some(origin) => format!("{passkey} at {origin}"),
+        None => passkey,
+    };
     match pinned {
-        Some(true) => format!("{presence} ({passkey}, pinned here)"),
-        Some(false) => format!("{presence} ({passkey}, not pinned by this repository's policy)"),
+        Some(Ok(())) => format!("{presence} ({passkey}, pinned here)"),
+        Some(Err(reef_policy::Unpinned::Passkey)) => {
+            format!("{presence} ({passkey}, not pinned by this repository's policy)")
+        }
+        Some(Err(reef_policy::Unpinned::Origin)) => {
+            format!("{presence} ({passkey}, an origin this repository's policy does not pin)")
+        }
         None => format!("{presence} ({passkey})"),
     }
 }
@@ -532,7 +546,11 @@ async fn passkey(ctx: &Ctx, command: PasskeyCommand, advice: &AdviceCtx) -> Resu
                 request.page_token = page.next_page_token;
             }
             if ctx.out.mode() == Output::Text {
-                ctx.out.object(&Passkeys(listed))
+                let web_ui = ctx.call(ctx.client.daemon_status(true)).await?.web_ui;
+                ctx.out.object(&Passkeys {
+                    items: listed,
+                    web_ui: web_ui.as_ref().map(WebUiStatus::from),
+                })
             } else {
                 ctx.out.list(&listed)
             }
@@ -1205,33 +1223,67 @@ impl TextRow for Passkey {
 }
 
 /// `passkey list` in text: the table, then the `[passkeys]` lines that
-/// pin every live passkey, by identity name.
+/// pin every live passkey, by identity name, at the web UI's origin.
 #[derive(Serialize)]
 #[serde(transparent)]
-struct Passkeys(Vec<Passkey>);
+struct Passkeys {
+    items: Vec<Passkey>,
+    /// Where the web UI is, when the daemon says (#346).
+    #[serde(skip)]
+    web_ui: Option<WebUiStatus>,
+}
 
 impl TextRender for Passkeys {
     fn render(&self, w: &mut dyn Write) -> io::Result<()> {
-        let rows: Vec<Vec<String>> = self.0.iter().map(TextRow::row).collect();
+        let rows: Vec<Vec<String>> = self.items.iter().map(TextRow::row).collect();
         let mut table = Vec::new();
         super::out::table(&mut table, Passkey::HEADER, &rows);
         w.write_all(&table)?;
-        let snippet = passkeys_snippet(&self.0);
-        if !snippet.is_empty() {
-            writeln!(w)?;
-            writeln!(
-                w,
-                "To pin them, add to the destination's reef-policy.toml, after checking each is yours: anyone who can use the web UI can add a passkey, an agent included (the Passkeys page's snippet asks for a touch first):"
-            )?;
-            write!(w, "{snippet}")?;
+        if self
+            .items
+            .iter()
+            .all(|passkey| passkey.removed_at.is_some())
+        {
+            return Ok(());
         }
-        Ok(())
+        writeln!(w)?;
+        let origin = match self.web_ui.as_ref().map(origin_to_pin) {
+            Some(Ok(origin)) => origin,
+            Some(Err(why)) => return writeln!(w, "No line to pin them: {why}"),
+            None => {
+                return writeln!(
+                    w,
+                    "No line to pin them: this daemon is older than this `reef` and does not say where its web UI is. Restart it."
+                );
+            }
+        };
+        writeln!(
+            w,
+            "To pin them, add to the destination's reef-policy.toml, after checking each is yours: anyone who can use the web UI can add a passkey, an agent included (the Passkeys page's snippet asks for a touch first):"
+        )?;
+        write!(w, "{}", passkeys_snippet(&self.items, origin))
     }
 }
 
-/// The `[passkeys]` table pinning every live passkey of `passkeys`, by
-/// identity name; empty when none is live.
-fn passkeys_snippet(passkeys: &[Passkey]) -> String {
+/// The origin a pin names, or why there is none: a kernel-chosen port ends
+/// with the daemon's run, and one another process holds is not the daemon's.
+fn origin_to_pin(web_ui: &WebUiStatus) -> Result<&str, String> {
+    match (web_ui.state.as_str(), web_ui.site.as_deref()) {
+        ("disabled", _) => Err("the web UI is off (`[ui] enabled = false`).".to_owned()),
+        ("not_built", _) => Err("this daemon was built without the web UI.".to_owned()),
+        ("unavailable", site) => Err(format!(
+            "the web UI's address, {}, is not this daemon's now ({}). Do not touch a passkey on a page there.",
+            site.unwrap_or("-"),
+            web_ui.problem.as_deref().unwrap_or("unknown")
+        )),
+        (_, Some(site)) => Ok(site),
+        _ => Err("a pin names the web UI's address, and this daemon's port changes at every start. Set `[ui] listen = \"127.0.0.1:<port>\"` in its config.toml, restart it, and list again.".to_owned()),
+    }
+}
+
+/// The `[passkeys]` table pinning every live passkey of `passkeys` at
+/// `origin`, by identity name; empty when none is live.
+fn passkeys_snippet(passkeys: &[Passkey], origin: &str) -> String {
     use std::fmt::Write as _;
     let mut pinned: std::collections::BTreeMap<&str, Vec<&str>> = std::collections::BTreeMap::new();
     for passkey in passkeys.iter().filter(|p| p.removed_at.is_none()) {
@@ -1253,8 +1305,14 @@ fn passkeys_snippet(passkeys: &[Passkey]) -> String {
         } else {
             format!("{identity:?}")
         };
-        let list: Vec<String> = fingerprints.iter().map(|f| format!("{f:?}")).collect();
-        let _ = writeln!(snippet, "{key} = [{}]", list.join(", "));
+        let _ = writeln!(snippet, "{key} = [");
+        for fingerprint in fingerprints {
+            let _ = writeln!(
+                snippet,
+                "  {{ fingerprint = {fingerprint:?}, origin = {origin:?} }},"
+            );
+        }
+        let _ = writeln!(snippet, "]");
     }
     snippet
 }
@@ -1350,25 +1408,102 @@ mod passkey_tests {
     }
 
     #[test]
+    fn presence_says_where_the_touch_ran_and_whether_it_is_pinned() {
+        use reef_policy::Unpinned;
+        let key = |origin: &str| {
+            let mut key = v1::SessionKey {
+                passkey_origin: origin.to_owned(),
+                passkey: Some(v1::PasskeyRef {
+                    label: "Touch ID".to_owned(),
+                    ..v1::PasskeyRef::default()
+                }),
+                ..v1::SessionKey::default()
+            };
+            key.set_presence(v1::SessionPresence::UserVerified);
+            SessionKey::from(&key)
+        };
+        let at = key("http://0123456789abcdef.reef.localhost:17333");
+        let text = |pinned| presence_text(&at, pinned);
+        let touch =
+            "user_verified (passkey \"Touch ID\" at http://0123456789abcdef.reef.localhost:17333";
+        assert_eq!(text(Some(Ok(()))), format!("{touch}, pinned here)"));
+        assert_eq!(
+            text(Some(Err(Unpinned::Passkey))),
+            format!("{touch}, not pinned by this repository's policy)")
+        );
+        assert_eq!(
+            text(Some(Err(Unpinned::Origin))),
+            format!("{touch}, an origin this repository's policy does not pin)")
+        );
+        assert_eq!(text(None), format!("{touch})"));
+        // A daemon too old to say where it ran.
+        assert_eq!(
+            presence_text(&key(""), None),
+            "user_verified (passkey \"Touch ID\")"
+        );
+    }
+
+    #[test]
     fn the_snippet_pins_live_passkeys_by_name() {
         let a = "a".repeat(64);
         let b = "b".repeat(64);
-        let snippet = passkeys_snippet(&[
+        let origin = "http://reef.localhost:17333";
+        let live = [
             passkey("alice", &a, false),
             passkey("alice", &b, false),
             passkey("bob", &b, true),
             passkey("ci.main", &a, false),
-        ]);
+        ];
+        let snippet = passkeys_snippet(&live, origin);
+        let pin = |f: &str| format!("  {{ fingerprint = \"{f}\", origin = \"{origin}\" }},\n");
         assert_eq!(
             snippet,
-            format!("[passkeys]\nalice = [\"{a}\", \"{b}\"]\n\"ci.main\" = [\"{a}\"]\n")
+            format!(
+                "[passkeys]\nalice = [\n{}{}]\n\"ci.main\" = [\n{}]\n",
+                pin(&a),
+                pin(&b),
+                pin(&a)
+            )
         );
         let policy = format!("version = 1\n[owners]\nidentities = [\"alice\"]\n{snippet}");
         assert!(
             reef_policy::Policy::load(policy.as_bytes()).is_ok(),
             "the snippet loads as policy"
         );
-        assert_eq!(passkeys_snippet(&[passkey("bob", &b, true)]), "");
+        assert_eq!(passkeys_snippet(&[passkey("bob", &b, true)], origin), "");
+
+        // The text prints it only for a port that outlives the daemon's run.
+        let text = |items: &[Passkey], web_ui: Option<WebUiStatus>| {
+            let mut out = Vec::new();
+            let items = items.to_vec();
+            Passkeys { items, web_ui }.render(&mut out).unwrap();
+            String::from_utf8(out).unwrap()
+        };
+        let at = |state: &str, fixed: bool| WebUiStatus {
+            state: state.to_owned(),
+            origin: None,
+            site: fixed.then(|| origin.to_owned()),
+            problem: Some("another process answers there".to_owned()),
+        };
+        for state in ["bound", "unbound"] {
+            assert!(text(&live, Some(at(state, true))).ends_with(&snippet));
+        }
+        for (web_ui, why) in [
+            (Some(at("bound", false)), "[ui] listen"),
+            (
+                Some(at("unavailable", true)),
+                "another process answers there",
+            ),
+            (Some(at("disabled", true)), "[ui] enabled"),
+            (Some(at("not_built", true)), "built without"),
+            (None, "older"),
+        ] {
+            let text = text(&live, web_ui);
+            assert!(text.contains(why), "{why}: {text}");
+            assert!(!text.contains("[passkeys]"), "{text}");
+        }
+        let removed = text(&[passkey("bob", &b, true)], Some(at("bound", true)));
+        assert!(!removed.contains("[passkeys]"), "{removed}");
     }
 
     #[test]

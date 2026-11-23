@@ -45,9 +45,10 @@
 //!    later; after the bind, so a failed start leaves no loop running.
 //! 9. Start the GC timer (#95) unless `gc.interval` is `0s`; its first run
 //!    is 10 minutes later at the earliest.
-//! 10. Nothing is bound for the web UI until the first `CreateWebSession`
-//!     (R2.18), which binds `[ui] listen` and registers a shutdown hook
-//!     joining its server. Launch files an earlier run left in `<state>/ui`
+//! 10. Hold the web UI's port when `[ui] listen` fixes it and a passkey is
+//!     registered (#346). Otherwise nothing is bound for the web UI until
+//!     the first `CreateWebSession` (R2.18). Either binds `[ui] listen` and
+//!     registers a shutdown hook joining its server. Launch files an earlier run left in `<state>/ui`
 //!     are deleted in step 1, after the lock.
 //! 11. Start the remote listener if `[remote] enabled` or `--remote`
 //!     (R2.08): load or generate its certificate and bind, in the
@@ -763,13 +764,17 @@ fn start_loops(state: &Arc<AppState>, gc_timer: &GcTimer) {
         })
     });
 
-    // 10. The GC timer.
+    // 9. The GC timer.
     gc_timer.start(
         state.config.file.gc.interval,
         state.config.gc_timer,
         DaemonRunner(Arc::downgrade(state)),
         state.shutdown.clone(),
     );
+
+    // 10. The web UI's port.
+    let held = Arc::clone(state);
+    tokio::spawn(async move { crate::web::WebUi::hold(&held).await });
 }
 
 /// The end of step 5: [`crate::workspace::Manager::sweep_abandoned_creates`]

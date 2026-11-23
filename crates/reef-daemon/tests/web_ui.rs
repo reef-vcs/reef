@@ -21,7 +21,6 @@ use std::time::{Duration, Instant};
 
 use http_body_util::{BodyExt as _, Full};
 use hyper_util::client::legacy::Client as HttpClient;
-use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
 use reef_api::v1::daemon_service_client::DaemonServiceClient;
 use reef_api::v1::operation_service_client::OperationServiceClient;
@@ -34,6 +33,7 @@ use reef_api::v1::{
 use reef_daemon::client::{Client, ClientError};
 use reef_daemon::config::Config;
 use reef_daemon::testing::{SyntheticRepo, TestDaemon, no_automatic_snapshots};
+use reef_daemon::testing::{WebConnector, web_connector};
 use reef_testing::synth::Preset;
 use tonic::body::Body;
 use tonic::codegen::Bytes;
@@ -70,7 +70,7 @@ fn token_of(session: &CreateWebSessionResponse) -> String {
         .to_owned()
 }
 
-/// `localhost:<port>` of a session's URL.
+/// `<run>.reef.localhost:<port>` of a session's URL.
 fn authority_of(session: &CreateWebSessionResponse) -> String {
     session
         .url
@@ -81,11 +81,19 @@ fn authority_of(session: &CreateWebSessionResponse) -> String {
 
 /// The port of a session's URL.
 fn port_of(session: &CreateWebSessionResponse) -> u16 {
-    authority_of(session)
-        .strip_prefix("localhost:")
-        .unwrap()
-        .parse()
-        .unwrap()
+    let authority = authority_of(session);
+    let (host, port) = authority.split_once(':').unwrap();
+    assert_run_name(host);
+    port.parse().unwrap()
+}
+
+/// Asserts that `host` is a run's: `<16 hex>.reef.localhost`.
+fn assert_run_name(host: &str) {
+    let run = host.strip_suffix(".reef.localhost").unwrap();
+    assert!(
+        run.len() == 16 && run.bytes().all(|b| b.is_ascii_hexdigit()),
+        "{host}"
+    );
 }
 
 /// Whether this host has an IPv6 loopback; without one, the listener binds
@@ -132,8 +140,8 @@ fn status_of(error: &ClientError) -> &Status {
 
 // ---- a raw HTTP/1.1 client, for the gate's plain-HTTP rules ----
 
-fn http() -> HttpClient<HttpConnector, Full<Bytes>> {
-    HttpClient::builder(TokioExecutor::new()).build_http()
+fn http() -> HttpClient<WebConnector, Full<Bytes>> {
+    HttpClient::builder(TokioExecutor::new()).build(web_connector())
 }
 
 /// A request to `authority` (its `Host`, unless `headers` sets one).
@@ -245,12 +253,12 @@ impl Interceptor for Bearer {
 }
 
 type Web = InterceptedService<
-    GrpcWebClientService<HttpClient<HttpConnector, tonic_web::GrpcWebCall<Body>>>,
+    GrpcWebClientService<HttpClient<WebConnector, tonic_web::GrpcWebCall<Body>>>,
     Bearer,
 >;
 
 fn web(session: &CreateWebSessionResponse, token: Option<&str>) -> (Web, Uri) {
-    let client = HttpClient::builder(TokioExecutor::new()).build_http();
+    let client = HttpClient::builder(TokioExecutor::new()).build(web_connector());
     let service = GrpcWebClientLayer::new().layer(client);
     (
         InterceptedService::new(service, Bearer(token.map(str::to_owned))),
@@ -286,7 +294,6 @@ async fn session_binds_lazily() {
     assert!(!daemon.handle.state().web.is_bound());
     let first = session(&daemon.client, true).await;
     assert!(daemon.handle.state().web.is_bound());
-    assert!(first.url.starts_with("http://localhost:"), "{}", first.url);
     assert_ne!(port_of(&first), 0);
     let token = token_of(&first);
     assert_eq!(first.session_url, format!("{}#session={token}", first.url));
@@ -384,7 +391,8 @@ async fn host_must_match() {
     let web = session(&daemon.client, false).await;
     let at = authority_of(&web);
     let port = port_of(&web);
-    // R3.43 11: `localhost` is the one origin, whichever family carries it.
+    // R3.43 11: this run's name is the one origin, whichever family carries
+    // it (#346): an earlier run's is refused.
     for family in families(port) {
         let response = send(&family, Method::GET, "/", &[("host", &at)], Vec::new()).await;
         assert_eq!(response.status(), StatusCode::OK, "{family}");
@@ -392,7 +400,11 @@ async fn host_must_match() {
     for host in [
         format!("127.0.0.1:{port}"),
         format!("[::1]:{port}"),
-        format!("localhost:{}", port.wrapping_add(1)),
+        format!("localhost:{port}"),
+        format!("reef.localhost:{port}"),
+        format!("evil.reef.localhost:{port}"),
+        format!("x.{at}"),
+        at.replace(&port.to_string(), &port.wrapping_add(1).to_string()),
         format!("attacker.example:{port}"),
     ] {
         for path in ["/", "/reef.api.v1.DaemonService/GetDaemonStatus"] {
@@ -611,12 +623,13 @@ async fn browser_origins_are_refused() {
     let at = authority_of(&web);
     let bearer = format!("Bearer {}", token_of(&web));
     let own = format!("http://{at}");
-    assert!(own.starts_with("http://localhost:"), "{own}");
     let port = port_of(&web);
     let v4 = format!("http://127.0.0.1:{port}");
     let v6 = format!("http://[::1]:{port}");
+    let earlier = format!("http://0123456789abcdef.reef.localhost:{port}");
     for (name, value) in [
         ("origin", "http://attacker.example"),
+        ("origin", earlier.as_str()),
         ("origin", "null"),
         ("origin", v4.as_str()),
         ("origin", v6.as_str()),
@@ -1019,7 +1032,138 @@ async fn bind_failure_is_reported() {
     drop(held);
     let web = session(&daemon.client, false).await;
     let port = address.rsplit(':').next().unwrap();
-    assert_eq!(web.url, format!("http://localhost:{port}/"));
+    assert_eq!(
+        authority_of(&web).rsplit(':').next(),
+        Some(port.to_string().as_str())
+    );
+}
+
+/// A port nothing holds now, below the ephemeral ranges, where no other
+/// test's `:0` bind lands in between.
+fn free_port() -> u16 {
+    loop {
+        let port = 20_000 + u16::from_le_bytes(rand::random()) % 12_000;
+        if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
+            && std::net::TcpStream::connect(("::1", port)).is_err()
+        {
+            return port;
+        }
+    }
+}
+
+// #346: at one port, each run of the daemon has a name of its own, so
+// nothing a process left in a browser at an earlier name is at this one;
+// `reef.localhost` at the port is what a policy pins.
+#[tokio::test(flavor = "multi_thread")]
+async fn each_run_has_a_name_of_its_own_at_one_port() {
+    let port = free_port();
+    let daemon = TestDaemon::start_with(|config| {
+        config.file.ui.listen = format!("127.0.0.1:{port}");
+    })
+    .await;
+    let status = async |client: &Client| client.daemon_status(true).await.unwrap().web_ui.unwrap();
+    // The name is told to no one before the port is the daemon's: a process
+    // that knew it could take the port first and leave a worker there.
+    let before = status(&daemon.client).await;
+    assert_eq!(before.site, format!("http://reef.localhost:{port}"));
+    assert_eq!(before.origin, "");
+    let squatter = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
+    daemon
+        .client
+        .create_web_session(false, "")
+        .await
+        .unwrap_err();
+    let refused = status(&daemon.client).await;
+    assert_eq!(refused.state(), v1::WebUiState::Unavailable);
+    assert_eq!(refused.origin, "");
+    drop(squatter);
+    let first = session(&daemon.client, false).await;
+    assert_eq!(port_of(&first), port);
+    let bound = status(&daemon.client).await;
+    assert_eq!(format!("{}/", bound.origin), first.url);
+    assert_eq!(session(&daemon.client, false).await.url, first.url);
+    let daemon = daemon.restart().await;
+    let second = session(&daemon.client, false).await;
+    assert_eq!(port_of(&second), port);
+    assert_ne!(second.url, first.url);
+    let old = get_at(&authority_of(&second), &authority_of(&first), "/").await;
+    assert_eq!(old.status(), StatusCode::MISDIRECTED_REQUEST);
+    // A tab of the earlier run learns that its session ended, and no token
+    // opens anything at its name, this run's included.
+    for token in [token_of(&first), token_of(&second)] {
+        let call = raw_status_call(
+            &authority_of(&second),
+            &[
+                ("host", &authority_of(&first)),
+                ("authorization", &format!("Bearer {token}")),
+            ],
+        )
+        .await;
+        assert_eq!(call.status(), StatusCode::OK);
+        assert_eq!(refused_reason(&call), "WEB_SESSION_INVALID");
+    }
+    let evil = format!("evil.reef.localhost:{port}");
+    let call = raw_status_call(&authority_of(&second), &[("host", &evil)]).await;
+    assert_eq!(call.status(), StatusCode::MISDIRECTED_REQUEST);
+    assert_eq!(status(&daemon.client).await.site, before.site);
+    daemon.stop().await;
+
+    let daemon = TestDaemon::start().await;
+    session(&daemon.client, false).await;
+    assert_eq!(
+        status(&daemon.client).await.site,
+        "",
+        "port 0 is not pinned"
+    );
+    daemon.stop().await;
+}
+
+/// The reason of a gRPC-web refusal, which its headers carry whole.
+fn refused_reason(response: &http::Response<Bytes>) -> String {
+    use base64::Engine as _;
+    let details = response.headers().get("grpc-status-details-bin").unwrap();
+    let bytes = base64::engine::general_purpose::STANDARD_NO_PAD
+        .decode(details.as_bytes())
+        .unwrap();
+    let status = Status::with_details(Code::Unknown, "", bytes.into());
+    reef_daemon::error::detail_of(&status).unwrap().reason
+}
+
+/// `GET path` at `authority` with `host` as its `Host`.
+async fn get_at(authority: &str, host: &str, path: &str) -> http::Response<Bytes> {
+    send(authority, Method::GET, path, &[("host", host)], Vec::new()).await
+}
+
+// #346: a process that listens on every address at the port is seen before
+// the bind, which on macOS succeeds under it on both loopback families.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fixed_port_answered_on_every_address_is_refused() {
+    let mut wildcards = vec!["0.0.0.0"];
+    if has_ipv6_loopback() {
+        wildcards.push("[::]");
+    }
+    for wildcard in wildcards {
+        let port = free_port();
+        let held = std::net::TcpListener::bind(format!("{wildcard}:{port}")).unwrap();
+        let daemon = TestDaemon::start_with(|config| {
+            config.file.ui.listen = format!("127.0.0.1:{port}");
+        })
+        .await;
+        let error = daemon
+            .client
+            .create_web_session(false, "")
+            .await
+            .unwrap_err();
+        assert_eq!(
+            reason(status_of(&error)),
+            "WEB_UI_UNAVAILABLE",
+            "{wildcard}:{port}"
+        );
+        assert!(!daemon.handle.state().web.is_bound());
+        drop(held);
+        assert_eq!(port_of(&session(&daemon.client, false).await), port);
+        daemon.stop().await;
+    }
 }
 
 // R3.43 11: a fixed port someone holds on `::1` fails the start: serving
@@ -1048,7 +1192,10 @@ async fn a_fixed_port_held_on_ipv6_fails() {
     // Nothing is left bound on IPv4 either: the next try succeeds.
     drop(held);
     let web = session(&daemon.client, false).await;
-    assert_eq!(web.url, format!("http://localhost:{port}/"));
+    assert_eq!(
+        authority_of(&web).rsplit(':').next(),
+        Some(port.to_string().as_str())
+    );
 }
 
 // R3.43 11: both loopback families on one port, whichever `[ui] listen`
@@ -1061,7 +1208,6 @@ async fn both_families_serve_one_port() {
         })
         .await;
         let web = session(&daemon.client, false).await;
-        assert!(web.url.starts_with("http://localhost:"), "{}", web.url);
         let at = authority_of(&web);
         let bearer = format!("Bearer {}", token_of(&web));
         for family in families(port_of(&web)) {

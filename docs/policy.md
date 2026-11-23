@@ -41,7 +41,9 @@ presence = "user_verified"                 # none | user_verified (a pinned pass
 maintainers = ["alice", "idn_8f3a0c2d91e4b675"]
 
 [passkeys]                                 # pinned passkeys, by identity name or id
-alice = ["3c9e0d5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f"]   # fingerprints: SHA-256 of each public key
+alice = [                                  # each passkey's fingerprint (SHA-256 of its public key) and the origin its touch must run at
+  { fingerprint = "3c9e0d5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f", origin = "http://reef.localhost:17333" },
+]
 
 [attestors.ci]                             # a named set of signers whose evidence counts
 identities = ["ci-main"]                   # names or ids; with `groups`, at least one entry
@@ -130,7 +132,7 @@ An `[attestors.<name>]` set decides whose evidence counts, per evidence object, 
 1. The key is `bound`: certified by an authority this daemon verifies, witnessed within the key's window and before every revocation that applies ([identity.md](identity.md)). Unbound, expired, revoked and invalid keys never count.
 2. The key's identity is one of `identities`, or a member of one of `groups`: matched by id for `idn_...` entries and by the certificate's name otherwise.
 3. `identity_kinds`, `actors` (default `["executor"]`), `authorities` (64-hex authority key ids, a daemon's or a Fulcio CA's; empty for any authority this daemon verifies) and `issuer_kinds` (`reef-daemon`, or `sigstore` for keyless keys), when given.
-4. The key's effective presence is at least the set's (`none` < `user_verified`). A key's presence is `user_verified` only when its certificate says so and `[passkeys]` pins its passkey for its identity ([Pinned passkeys](#pinned-passkeys)); otherwise it is `none`.
+4. The key's effective presence is at least the set's (`none` < `user_verified`). A key's presence is `user_verified` only when its certificate says so and `[passkeys]` pins its passkey, at the origin its touch ran at, for its identity ([Pinned passkeys](#pinned-passkeys)); otherwise it is `none`.
 5. Unless `self = "allow"`, the object did not come from the change itself (below).
 6. `when`, a CEL expression over `e` (the object) and `groups`, holds. One that errors on an object (or costs too much) leaves that object out and makes `builtin:input` an error, which blocks: the object could be the newest verdict, and leaving it out must not let an older one decide. The diagnostics name the set and the object.
 
@@ -144,23 +146,30 @@ The names of the sets an object satisfies are `e.attestors`, which free rules ca
 
 ## Pinned passkeys
 
-A person's sign-off can carry a passkey's approval: one touch, with a fingerprint, a face or a PIN, that approved exactly that sign-off ([identity.md](identity.md#passkeys-and-verified-presence)). Its key's certificate says `presence: user_verified` and names the passkey. A policy counts it only for the passkeys it pins, since an agent running as the person can register a software passkey of its own:
+A person's sign-off can carry a passkey's approval: one touch, with a fingerprint, a face or a PIN, that approved exactly that sign-off ([identity.md](identity.md#passkeys-and-verified-presence)). Its key's certificate says `presence: user_verified` and names the passkey. A policy counts it only for the passkeys it pins, since an agent running as the person can register a software passkey of its own, and only for a touch on the page each pin names, since an agent can show a look-alike page on another port:
 
 ```toml
 [passkeys]
-alice = ["3c9e0d5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f"]
-idn_41c9e07ab2d35f18 = ["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"]
+alice = [
+  { fingerprint = "3c9e0d5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f", origin = "http://reef.localhost:17333" },
+]
+idn_41c9e07ab2d35f18 = [
+  { fingerprint = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", origin = "http://reef.localhost:17333" },
+  { fingerprint = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210", origin = "http://reef.localhost:17333" },
+]
 ```
 
-- **Keys** are identities, by name or by id (`idn_` and 16 hex digits); a key matches a key's certificate by either. **Values** are passkey fingerprints: the SHA-256 of the passkey's DER public key, 64 lowercase hex digits. A malformed fingerprint, a key that is neither a name nor an id, and an empty list are load errors with their line and column.
-- **The effective presence.** A key's presence is `user_verified` only when its certificate says `user_verified` and its passkey's fingerprint is listed under its identity's id or name. Otherwise, for this policy, it is `none`: a passkey nobody pinned, one pinned for another identity, and every `presence: none` key. Every rule that compares presence uses it: attestor sets, `[[signoff]]` and `[owners]`. CEL reads it too: `e.key.presence` is the effective presence, and `e.key.passkey` is the fingerprint.
+- **Keys** are identities, by name or by id (`idn_` and 16 hex digits); a key matches a key's certificate by either. **Values** are lists of pins, each with both a `fingerprint` (the SHA-256 of the passkey's DER public key, 64 lowercase hex digits) and an `origin`. A malformed fingerprint or origin, a bare fingerprint, an unknown key in a pin, a key that is neither a name nor an id, and an empty list are load errors with their line and column.
+- **The origin** is where the touch must run: `http://reef.localhost:<port>` for the local web UI, or `https://<dns name>[:<port>]`. It has no path and no trailing slash, and leaves out the scheme's own port. Each run of the daemon serves at a name of its own, such as `http://5f3a9c0e1b7d2468.reef.localhost:17333`, and the local form covers every run's name at its port and nothing else; an `https` one is that address alone. The port is 17333 unless `[ui] listen` moves it. One passkey used at two origins has two pins. The browser signs the origin into every touch, so a certificate carries it.
+- **The effective presence.** A key's presence is `user_verified` only when its certificate says `user_verified` and one pin under its identity's id or name has its passkey's fingerprint and covers the origin its touch ran at. Otherwise, for this policy, it is `none`: a passkey nobody pinned, one pinned for another identity or at another origin, and every `presence: none` key. Every rule that compares presence uses it: attestor sets, `[[signoff]]` and `[owners]`. CEL reads it too: `e.key.presence` is the effective presence, `e.key.passkey` is the fingerprint, and `e.key.passkey_origin` is the origin.
 - **A warning for a requirement no pin can meet.** When `presence = "user_verified"` appears in an attestor set, a `[[signoff]]` or `[owners]` and `[passkeys]` pins none of its identities, the policy loads with a warning ("no passkey pinned for alice: no key of theirs will meet presence user_verified; pin one in [passkeys]"), which `reef policy check` prints, and every evaluation reports among its diagnostics. A pin under an identity's id counts for a requirement that names it by name, and the other way round, since only the daemon maps one to the other.
 - **Pins change only with the owners.** `[passkeys]` is in `reef-policy.toml`, so changing it needs `[owners]`' sign-off (`builtin:owners`). Pins are only as strong as what may change them. With `presence = "user_verified"` in `[owners]`, a change to the policy file needs an owner's pinned passkey, so an agent cannot pin a passkey of its own. Without it, any owner's sign-off changes the pins, an agent's `--actor human` included, and the policy loads with a warning that says so. The change that first adds the pins and the owners' presence is judged by the policy before it, so a person checks that one change, as they check the first policy.
-- **Getting the line.** Anyone who can use the web UI can add a passkey, an agent included, so pin only a passkey you hold. On the web UI's Passkeys page, **Confirm a passkey to pin** asks your authenticator for a touch, and the snippet it shows (**Copy policy snippet**) names only the passkeys it confirmed. This holds only on the daemon's own page: open it yourself, with `reef ui` or `reef identity passkey add` from your own terminal. A page on another `localhost` port can look the same and show an agent's fingerprint, and with the default `[ui] listen` port 0 the port changes at every start, so the address bar gives no cue (S-255). `reef identity passkey list` prints each identity's line with every live passkey: check each is yours.
+- **Getting the line.** Anyone who can use the web UI can add a passkey, an agent included, so pin only a passkey you hold. On the web UI's Passkeys page, **Confirm a passkey to pin** asks your authenticator for a touch, and the snippet it shows (**Copy policy snippet**) names only the passkeys it confirmed. This holds only on the daemon's own page: open it yourself, with `reef ui` or `reef identity passkey add` from your own terminal, and check that the address bar ends in `.reef.localhost` and the port you pin. A page on another port can look the same, name the right origin in its snippet and show an agent's fingerprint. Nothing exists before the first pin that could judge it, so compare the fingerprint with `reef identity passkey list`, which prints each identity's line with every live passkey, and check each is yours (S-250).
+- **What the origin stops.** Code that runs as you can read the authority's key and make a certificate from a touch at any address. With the origin pinned, a touch at any other address counts as `none`. It does not stop code that takes the pinned port while the daemon is down, or that controls your browser or replaces the daemon: on one uid nothing does ([threat model](threat-model.md), S-274). If `reef ui` or `reef daemon status` says that another process holds the port, do not touch a passkey on any page there, and close the pages it opened.
 - **Landing from the web UI needs a pin.** Through the web UI, a landing counts only a sign-off approved by a live passkey the destination's `[passkeys]` pins for its signer, whatever else the policy asks, since the web UI lets a leaked session add an identity's first passkey ([proposals](proposals.md#reviewing-in-the-web-ui)). To land from the web UI, pin your passkey on the destination: add the line, land that change from a terminal, and Accept lands from then on. On a destination with no policy, or one that does not load, commit the policy with the line by hand, as the first policy is. A passkey removed or reset is never registered again, key and credential, so its pin counts for nothing after: pin the new passkey's line in its place.
 - **Pin more than one.** A lost passkey stops counting until a new one is pinned, and pinning it is a policy change that needs the owners' sign-off. Pin each person's passkeys on two authenticators, or name more than one owner, so a lost passkey does not leave nobody able to approve the change that pins its replacement.
 
-`EvaluatePolicy` reports presence and pinning per signer.
+`EvaluatePolicy` reports presence, origin and pinning per signer, and for one that is not pinned whether the passkey or the origin is why (`unpinned`: `passkey` or `origin`).
 
 ## Required evidence, limits, forbidden paths and sign-offs
 
@@ -195,7 +204,7 @@ What a policy sees about one change, built by the daemon. `reef schema policy in
 | `groups` | the policy's `[groups]`, from name to members as written |
 | `batch` | at landing only (R3.14): `{id, size, position, tree, commit}`, the batch the change lands in, its position from 1, and the tested tree and the trial commit carrying it (empty when none was needed); empty at the gate, in `reef policy eval` and in simulation |
 
-A `key` is `{id, status, identity, identity_id, identity_kind, actor, agent, session, presence, passkey, custody, authority, issuer_kind, oidc_issuer, oidc_subject}`: `status` one of `unbound`, `bound`, `expired`, `revoked`, `invalid`, judged at the object's witness time; `identity_kind` `person` or `ci`; `actor` `human`, `agent` or `executor`; `presence` the key's effective presence under this policy, `none` or `user_verified` ([Pinned passkeys](#pinned-passkeys)), set before any rule or CEL expression reads it; `passkey` the fingerprint of the passkey that verified a `user_verified` key, empty otherwise; `issuer_kind` `reef-daemon`, or `sigstore` for a keyless key, whose `oidc_issuer` and `oidc_subject` are its Fulcio certificate's (empty otherwise).
+A `key` is `{id, status, identity, identity_id, identity_kind, actor, agent, session, presence, passkey, passkey_origin, custody, authority, issuer_kind, oidc_issuer, oidc_subject}`: `status` one of `unbound`, `bound`, `expired`, `revoked`, `invalid`, judged at the object's witness time; `identity_kind` `person` or `ci`; `actor` `human`, `agent` or `executor`; `presence` the key's effective presence under this policy, `none` or `user_verified` ([Pinned passkeys](#pinned-passkeys)), set before any rule or CEL expression reads it; `passkey` the fingerprint of the passkey that verified a `user_verified` key and `passkey_origin` the origin its touch ran at, both empty otherwise; `issuer_kind` `reef-daemon`, or `sigstore` for a keyless key, whose `oidc_issuer` and `oidc_subject` are its Fulcio certificate's (empty otherwise).
 
 - **Evidence is filtered before CEL, not trusted by it.** Objects whose signature does not verify are counted, not shown (`evidence_ignored`). Every object some attestor set or sign-off rule accepts is kept, up to 10,000 (more is `builtin:input`'s error, which blocks); the rest are kept newest first up to 1,000, so junk on a tree cannot push trusted evidence out of view (S-94). The daemon reads at most the newest 20,000 objects of a tree, and an object's annotations only when they are at most 16 KiB as JSON (otherwise `{}`, so a condition over them fails and blocks).
 - **Provenance**: every record of the change, up to 10,000; more is `builtin:input`'s error.
@@ -375,8 +384,14 @@ presence = "user_verified"
 maintainers = ["alice", "bob"]
 
 [passkeys]
-alice = ["3c9e0d5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f", "8091a2b3c4d5e6f708192a3b4c5d6e7f3c9e0d5f6a7b8c9d0e1f2a3b4c5d6e7f"]
-bob = ["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"]
+alice = [
+  { fingerprint = "3c9e0d5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f", origin = "http://reef.localhost:17333" },
+  { fingerprint = "8091a2b3c4d5e6f708192a3b4c5d6e7f3c9e0d5f6a7b8c9d0e1f2a3b4c5d6e7f", origin = "http://reef.localhost:17333" },
+]
+bob = [
+  { fingerprint = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", origin = "http://reef.localhost:17333" },
+  { fingerprint = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210", origin = "http://reef.localhost:17333" },
+]
 
 [[signoff]]
 name = "release"

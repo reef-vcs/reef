@@ -33,7 +33,8 @@ const BROWSER_WORDS: Record<string, string> = {
   AbortError: "Cancelled.",
   InvalidStateError: "This authenticator already holds a passkey for this identity.",
   NotSupportedError: "This authenticator supports none of the passkey algorithms Reef accepts.",
-  SecurityError: "This address cannot use passkeys. Open the web UI at its localhost URL.",
+  SecurityError:
+    "This address cannot use passkeys. Open the web UI with reef ui; for a passkey added before this address, run reef identity passkey reset.",
 };
 
 export function failure(thrown: unknown): Failure {

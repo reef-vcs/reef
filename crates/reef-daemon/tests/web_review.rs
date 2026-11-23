@@ -9,7 +9,6 @@
 )]
 
 use hyper_util::client::legacy::Client as HttpClient;
-use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
 use reef_api::v1::change_service_client::ChangeServiceClient;
 use reef_api::v1::comment_service_client::CommentServiceClient;
@@ -21,6 +20,7 @@ use reef_api::v1::{
 };
 use reef_daemon::client::Client;
 use reef_daemon::testing::{SyntheticRepo, TestDaemon, no_automatic_snapshots, test_settings};
+use reef_daemon::testing::{WebConnector, web_connector};
 use reef_testing::synth::Preset;
 use tonic::body::Body;
 use tonic::codegen::http::Uri;
@@ -50,7 +50,7 @@ impl Interceptor for Bearer {
 }
 
 type Web = InterceptedService<
-    GrpcWebClientService<HttpClient<HttpConnector, tonic_web::GrpcWebCall<Body>>>,
+    GrpcWebClientService<HttpClient<WebConnector, tonic_web::GrpcWebCall<Body>>>,
     Bearer,
 >;
 
@@ -75,7 +75,7 @@ impl Page {
     }
 
     fn service(&self) -> Web {
-        let client = HttpClient::builder(TokioExecutor::new()).build_http();
+        let client = HttpClient::builder(TokioExecutor::new()).build(web_connector());
         InterceptedService::new(
             GrpcWebClientLayer::new().layer(client),
             Bearer(self.token.clone(), self.agent.clone()),

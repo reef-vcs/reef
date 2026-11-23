@@ -112,7 +112,7 @@ describe("the Passkeys page", () => {
     // The fake authenticator holds the first passkey only, pinned by the
     // fingerprint of the key its touch verified with.
     const fingerprint = hex(await sha256(held.row.publicKey));
-    const snippet = `[passkeys]\narsood = ["${fingerprint}"]\n`;
+    const snippet = `[passkeys]\narsood = [\n  { fingerprint = "${fingerprint}", origin = "${daemon.site}" },\n]\n`;
     expect(card("arsood").querySelector("pre")?.textContent).toBe(snippet);
     expect(within(card("arsood")).getByText(/^Confirmed by a touch:/).textContent).toContain(
       `“MacBook Touch ID” (${fingerprint.slice(0, 12)})`,
@@ -124,6 +124,25 @@ describe("the Passkeys page", () => {
       within(card("arsood")).getByRole("button", { name: "Copy policy snippet" }).click();
     });
     expect(writeText).toHaveBeenCalledWith(snippet);
+  });
+
+  // #346: a pin names the origin, which a kernel-chosen port ends.
+  it("gives no line to pin when the daemon's port changes at every start", async () => {
+    const daemon = new IdentityDaemon();
+    daemon.site = "";
+    const held = await heldKey();
+    daemon.passkeys = [{ ...passkey(daemon.arsood, "MacBook Touch ID", 1), ...held.row }];
+    installAuthenticator().key = held.key;
+    await setup(daemon);
+    await act(() => {
+      within(card("arsood")).getByRole("button", { name: "Confirm a passkey to pin" }).click();
+    });
+    await waitFor(() => {
+      expect(within(card("arsood")).getByText(/changes at every start/).textContent).toContain(
+        "[ui] listen",
+      );
+    });
+    expect(card("arsood").querySelector("pre")).toBeNull();
   });
 
   it("adds a first passkey with no other touch", async () => {
@@ -215,8 +234,9 @@ describe("the Passkeys page", () => {
 describe("policySnippet", () => {
   it("quotes a name TOML cannot leave bare", () => {
     const alice = person("alice.smith");
-    expect(policySnippet({ identity: alice, passkeys: [passkey(alice, "a", 3)] })).toBe(
-      `[passkeys]\n"alice.smith" = ["${"3".repeat(64)}"]\n`,
+    const origin = "http://reef.localhost:17333";
+    expect(policySnippet({ identity: alice, passkeys: [passkey(alice, "a", 3)] }, origin)).toBe(
+      `[passkeys]\n"alice.smith" = [\n  { fingerprint = "${"3".repeat(64)}", origin = "${origin}" },\n]\n`,
     );
   });
 });

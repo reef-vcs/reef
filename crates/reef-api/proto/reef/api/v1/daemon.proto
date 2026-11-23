@@ -51,7 +51,8 @@ message CreateWebSessionRequest {
 
 // A web UI session.
 message CreateWebSessionResponse {
-  // The web UI's address, such as `http://localhost:52817/`. No token.
+  // The web UI's address, `http://<16 hex>.reef.localhost:<port>/`. No
+  // token.
   string url = 1;
   // `url`, then the request's `path` without its leading `/`, with the
   // session's token in its fragment (`#session=<token>`).
@@ -106,6 +107,39 @@ message GetDaemonStatusResponse {
   // needs a person: DIVERGED, REFUSED, or RETRYING for over an hour
   // (R3.17; `reef landing pushes`). Field 14 is #272's.
   uint32 pushes_attention = 15;
+  // The web UI's listener (#346).
+  WebUiStatus web_ui = 16;
+}
+
+// The web UI's loopback listener (R2.18, #346).
+message WebUiStatus {
+  // Whether it is bound.
+  WebUiState state = 1;
+  // `http://<16 hex>.reef.localhost:<port>`, with a name drawn when the port
+  // is bound; empty before.
+  string origin = 2;
+  // `http://reef.localhost:<port>`, what a policy's `[passkeys]` pins: it
+  // covers every run's origin. Empty when `[ui] listen` names no port, since
+  // the port then ends with the run.
+  string site = 3;
+  // Why it is UNAVAILABLE; empty otherwise.
+  string problem = 4;
+}
+
+// Whether the web UI's listener is bound.
+enum WebUiState {
+  // Not reported.
+  WEB_UI_STATE_UNSPECIFIED = 0;
+  // `[ui] enabled = false`.
+  WEB_UI_STATE_DISABLED = 1;
+  // The daemon was built without the web UI.
+  WEB_UI_STATE_NOT_BUILT = 2;
+  // Nothing has asked for it yet; `CreateWebSession` binds it.
+  WEB_UI_STATE_UNBOUND = 3;
+  // Bound and serving.
+  WEB_UI_STATE_BOUND = 4;
+  // The last bind failed; the next `CreateWebSession` tries again.
+  WEB_UI_STATE_UNAVAILABLE = 5;
 }
 
 // The machine-wide build limit (#271, ADR 0074).

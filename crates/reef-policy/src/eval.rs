@@ -113,7 +113,8 @@ pub struct Rejected {
 }
 
 /// An evidence object signed by a key whose certificate says
-/// `user_verified`, and whether this policy pins its passkey (R3.43).
+/// `user_verified`, and whether this policy pins its passkey at the origin
+/// the touch ran at (R3.43, #346).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 #[schemars(rename = "policy.VerifiedSigner")]
@@ -124,9 +125,33 @@ pub struct VerifiedSigner {
     pub identity: String,
     /// The passkey's fingerprint.
     pub passkey: String,
-    /// `[passkeys]` pins the passkey for the identity, so the key counts as
-    /// `user_verified`; otherwise it counts as `none`.
+    /// The web origin its touch ran at (#346).
+    pub origin: String,
+    /// `[passkeys]` pins the passkey at the origin for the identity, so the
+    /// key counts as `user_verified`; otherwise it counts as `none`.
     pub pinned: bool,
+    /// Why it is not pinned: `passkey` or `origin` ([`Unpinned`]); empty
+    /// when it is.
+    pub unpinned: String,
+}
+
+/// Why a policy pins no touch of a key's passkey (#346).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unpinned {
+    /// `[passkeys]` does not pin the passkey for the key's identity.
+    Passkey,
+    /// It pins the passkey, at other origins than the one the touch ran at.
+    Origin,
+}
+
+impl Unpinned {
+    /// As evaluations and the API name it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Passkey => "passkey",
+            Self::Origin => "origin",
+        }
+    }
 }
 
 /// A sign-off a rule needs, and what it has.
@@ -471,25 +496,42 @@ fn mark_self(input: &mut Input) {
 
 impl Policy {
     /// The presence `key` counts as under this policy (R3.43, ADR 0085):
-    /// `user_verified` only when its certificate says so and its passkey is
-    /// pinned in `[passkeys]` for its identity, by id or by name; otherwise
-    /// `none`. `None` for a presence this Reef does not know, which meets no
-    /// requirement. Evaluation sets every key's `presence` to this before
-    /// any rule reads it, and it is the same for a key so set.
+    /// `user_verified` only when its certificate says so and one pin of its
+    /// identity, by id or by name, names both its passkey and the origin
+    /// the touch ran at ([`Policy::unpinned`]); otherwise `none`. `None` for
+    /// a presence this Reef does not know, which meets no requirement.
+    /// Evaluation sets every key's `presence` to this before any rule reads
+    /// it, and it is the same for a key so set.
     pub fn presence(&self, key: &Key) -> Option<Presence> {
-        let pinned = |identity: &str| {
-            !identity.is_empty()
-                && self
-                    .passkeys
-                    .get(identity)
-                    .is_some_and(|fingerprints| fingerprints.contains(&key.passkey))
-        };
         match Presence::of_key(&key.presence)? {
-            Presence::UserVerified if pinned(&key.identity_id) || pinned(&key.identity) => {
-                Some(Presence::UserVerified)
-            }
+            Presence::UserVerified if self.unpinned(key).is_none() => Some(Presence::UserVerified),
             _ => Some(Presence::None),
         }
+    }
+
+    /// Why `[passkeys]` does not pin `key`'s passkey at its origin for its
+    /// identity; `None` when it does. It reads no presence: a key that
+    /// claims none is for [`Policy::presence`].
+    pub fn unpinned(&self, key: &Key) -> Option<Unpinned> {
+        let mut unpinned = Unpinned::Passkey;
+        for pin in self.pins_of(key) {
+            if pin.origin.covers(&key.passkey_origin) {
+                return None;
+            }
+            unpinned = Unpinned::Origin;
+        }
+        Some(unpinned)
+    }
+
+    /// The pins of `key`'s passkey for its identity, by id or by name: the
+    /// origins its touches count at.
+    pub fn pins_of<'p>(&'p self, key: &Key) -> impl Iterator<Item = &'p crate::Pin> {
+        [&key.identity_id, &key.identity]
+            .into_iter()
+            .filter(|identity| !identity.is_empty())
+            .filter_map(|identity| self.passkeys.get(identity))
+            .flatten()
+            .filter(|pin| pin.fingerprint == key.passkey)
     }
 
     /// The SHA-256 of the bytes this policy was loaded from.
@@ -675,15 +717,20 @@ impl Policy {
             .evidence
             .iter()
             .filter(|e| Presence::of_key(&e.key.presence) == Some(Presence::UserVerified))
-            .map(|e| VerifiedSigner {
-                evidence_id: e.id.clone(),
-                identity: if e.key.identity.is_empty() {
-                    e.key.identity_id.clone()
-                } else {
-                    e.key.identity.clone()
-                },
-                passkey: e.key.passkey.clone(),
-                pinned: self.presence(&e.key) == Some(Presence::UserVerified),
+            .map(|e| {
+                let unpinned = self.unpinned(&e.key);
+                VerifiedSigner {
+                    evidence_id: e.id.clone(),
+                    identity: if e.key.identity.is_empty() {
+                        e.key.identity_id.clone()
+                    } else {
+                        e.key.identity.clone()
+                    },
+                    passkey: e.key.passkey.clone(),
+                    origin: e.key.passkey_origin.clone(),
+                    pinned: unpinned.is_none(),
+                    unpinned: unpinned.map_or("", Unpinned::as_str).to_owned(),
+                }
             })
             .collect()
     }

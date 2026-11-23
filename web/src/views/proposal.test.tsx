@@ -287,6 +287,12 @@ describe("the proposal page", () => {
       true,
     ],
     [
+      "pinned_origin",
+      "",
+      /Signed off, but your touch ran at this address, and main's reef-policy\.toml pins that passkey at another.*reef identity passkey list.*reef land /,
+      true,
+    ],
+    [
       "pin",
       "no_policy",
       /Signed off, but main has no reef-policy\.toml, so nothing lands on it, from here or from a terminal\. Commit a first one to main by hand \(reef policy init writes a starter\) with the \[passkeys\] line that reef identity passkey list prints, then Accept again\./,
