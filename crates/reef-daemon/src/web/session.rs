@@ -26,8 +26,14 @@ struct Session {
     open: usize,
     /// The launch file still on disk, deleted at the first request.
     launch_file: Option<PathBuf>,
-    /// Cancelled when every session ends, which ends its open responses.
+    /// Cancelled when the session ends, which ends its open responses.
     ended: CancellationToken,
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        self.ended.cancel();
+    }
 }
 
 /// The live sessions.
@@ -47,7 +53,7 @@ pub(crate) struct InUse {
 }
 
 impl InUse {
-    /// Cancelled when the session is ended with every other.
+    /// Cancelled when the session ends.
     pub(crate) fn ended(&self) -> CancellationToken {
         self.ended.clone()
     }
@@ -137,16 +143,12 @@ impl Sessions {
     /// Ends every session and the responses open in it. Returns how many,
     /// and their launch files for the caller to delete.
     pub(crate) fn end_all(&self) -> (usize, Vec<PathBuf>) {
-        let ended: Vec<Session> = self.lock().drain().map(|(_, session)| session).collect();
-        let count = ended.len();
+        let mut ended: Vec<Session> = self.lock().drain().map(|(_, session)| session).collect();
         let files = ended
-            .into_iter()
-            .filter_map(|session| {
-                session.ended.cancel();
-                session.launch_file
-            })
+            .iter_mut()
+            .filter_map(|session| session.launch_file.take())
             .collect();
-        (count, files)
+        (ended.len(), files)
     }
 
     /// The session `token` names, if it is live: marks it in use until the
@@ -207,6 +209,18 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    #[test]
+    fn a_session_ended_at_the_cap_ends_its_streams() {
+        let sessions = sessions(1, Duration::from_hours(1));
+        let (token, _) = sessions.mint();
+        let (in_use, _) = sessions.use_token(&token).unwrap();
+        let ended = in_use.ended();
+        assert!(!ended.is_cancelled());
+        sessions.mint();
+        assert!(ended.is_cancelled());
+        assert!(sessions.use_token(&token).is_none());
+    }
 
     fn sessions(max: usize, idle: Duration) -> Arc<Sessions> {
         Arc::new(Sessions::new(Limits {

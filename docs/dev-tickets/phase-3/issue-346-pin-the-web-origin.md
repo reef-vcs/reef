@@ -184,7 +184,7 @@ R3.40 also changes what the pin is worth. At `https://<dns name>` the browser ch
 
 ### Departures
 
-The review of the implementation broke "What a squatter leaves in the browser" in Chromium, and the implementation departs from it: a launch clears the pinned address from a page on a second, kernel-chosen loopback port (ADR 0094 decision 5), Reef's page removes every worker and cache, a failed hold is tried again, streams end with their sessions, and a token stays in its tab until it is accepted. Test 7 (a daemon moved to another port) is covered by the attack test's end, which pins the other origin and lands; test 17's restart by `a_passkey_makes_the_daemon_hold_its_fixed_port`. S-275's "certifies nothing" was wrong: a script at the pinned origin with a session gets one misled touch certified by the daemon.
+The review of the implementation broke "What a squatter leaves in the browser" in Chromium, and the implementation departs from it: a launch file has the browser clear the pinned address and opens it only if that succeeds (ADR 0094 decision 5; a first form on a second listener was broken by the second review), Reef's page removes every worker and cache, a failed hold is tried again, streams end with their sessions, and a token stays in its tab until it is accepted. Test 7 (a daemon moved to another port) is covered by the attack test's end, which pins the other origin and lands; test 17's restart by `a_passkey_makes_the_daemon_hold_its_fixed_port`. S-275's "certifies nothing" was wrong: a script at the pinned origin with a session gets one misled touch certified by the daemon.
 
 ## What the pin stops, and what it does not
 
@@ -400,7 +400,7 @@ By hand, with a real authenticator, on a daemon from this branch that serves `ju
 
 ## What later tickets inherit
 
-- **R3.40**: a pin may name `https://<dns name>[:port]`; the RP ID is the origin's host; the remote channel supplies its own origin where the web channel supplies `WebUi::origin`.
+- **R3.40**: a pin may name `https://<dns name>[:port]`; the RP ID is the origin's host; the remote channel supplies its own origin where the web channel supplies `WebUi::origin`. The gates share `SECURITY_HEADERS`, whose `worker-src 'none'` the remote listener must relax for its own worker, and the app removes foreign workers on `localhost` only (`dropForeignWorkers`).
 - **R4.13** (the hosted web UI): the same pin, one origin.
 - **The release notes**: policies written against an unreleased `main` must add origins.
 

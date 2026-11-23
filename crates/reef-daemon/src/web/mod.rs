@@ -210,8 +210,6 @@ impl Advise for WebError {
 struct Bound {
     /// `http://<authority>/`.
     url: String,
-    /// The launch listener's URL, with a fixed port (`clear`).
-    launches: Option<String>,
 }
 
 /// Who called through the web listener (R3.43): the gate puts it in every
@@ -260,21 +258,19 @@ impl WebUi {
         Arc::clone(&self.assets)
     }
 
-    /// The bound listener's URL and its launch listener's, binding them if
-    /// needed.
-    async fn ensure_bound(state: &Arc<AppState>) -> Result<(String, Option<String>), WebError> {
+    /// The bound listener's URL, binding it if needed.
+    async fn ensure_bound(state: &Arc<AppState>) -> Result<String, WebError> {
         let web = &state.web;
         let mut bound = web.bound.lock().await;
         if let Some(bound) = &*bound {
-            return Ok((bound.url.clone(), bound.launches.clone()));
+            return Ok(bound.url.clone());
         }
         let attempt = bind(state).await;
         *web.problem.lock().unwrap_or_else(PoisonError::into_inner) = attempt
             .as_ref()
             .err()
             .map(|error| ErrorChain(error).to_string());
-        let bound = bound.insert(attempt?);
-        Ok((bound.url.clone(), bound.launches.clone()))
+        Ok(bound.insert(attempt?).url.clone())
     }
 
     /// Binds the listener at the daemon's start, when its port is fixed and
@@ -289,19 +285,19 @@ impl WebUi {
         {
             return;
         }
-        match state.db.passkeys(None, false) {
-            Ok(passkeys) if passkeys.is_empty() => return,
-            Ok(_) => {}
-            Err(error) => {
-                tracing::warn!(%error, "cannot read the passkeys; the web UI's port is not held");
-                return;
-            }
-        }
         let mut wait = HOLD_RETRY_FIRST;
-        while let Err(error) = WebUi::ensure_bound(state).await {
+        loop {
+            let failed = match state.db.passkeys(None, false) {
+                Ok(passkeys) if passkeys.is_empty() => return,
+                Ok(_) => match WebUi::ensure_bound(state).await {
+                    Ok(_) => return,
+                    Err(error) => ErrorChain(&error).to_string(),
+                },
+                Err(error) => ErrorChain(&error).to_string(),
+            };
             if wait == HOLD_RETRY_FIRST {
                 tracing::warn!(
-                    error = %ErrorChain(&error),
+                    error = %failed,
                     "the web UI's port is not this daemon's: do not touch a passkey on a page at its address; trying until it is"
                 );
             }
@@ -372,7 +368,7 @@ impl WebUi {
             return Err(WebError::NotBuilt);
         }
         let web = &state.web;
-        let (url, launches) = WebUi::ensure_bound(state).await?;
+        let url = WebUi::ensure_bound(state).await?;
         let launch_dir = &state.config.paths.ui;
         let (token, ended) = web.sessions.mint();
         for path in ended {
@@ -381,24 +377,23 @@ impl WebUi {
         let page = path.strip_prefix('/').unwrap_or_default();
         // A URL few caches hold: at a port that does not change, another
         // process that held it may have had the browser cache its own page.
-        // Chromium's cache can be told to ignore the query, which a launch
-        // file's reset clears (`clear`).
+        // Chromium's cache can be told to ignore the query, so a launch file
+        // has it cleared first (`clear`).
         let launch = rand::rng().random::<u64>();
-        let session_path = format!("{page}?launch={launch:016x}#session={token}");
-        let session_url = format!("{url}{session_path}");
+        let session_url = format!("{url}{page}?launch={launch:016x}#session={token}");
         let launch_path = if launch_file {
             let dir = launch_dir.clone();
-            let page = match launches {
-                Some(launches) => {
-                    let id = web.resets.mint();
-                    format!(
-                        "{launches}{}",
-                        clear::fragment(&id, &format!("/{session_path}"))
-                    )
-                }
-                None => session_url.clone(),
+            let opens = launch::Opens {
+                session_url: session_url.clone(),
+                reset: ui
+                    .listen_port()
+                    .is_ok_and(|port| port != 0)
+                    .then(|| launch::Reset {
+                        origin: url.trim_end_matches('/').to_owned(),
+                        id: web.resets.mint(),
+                    }),
             };
-            let path = tokio::task::spawn_blocking(move || launch::write(&dir, &page))
+            let path = tokio::task::spawn_blocking(move || launch::write(&dir, &opens))
                 .await
                 .map_err(io::Error::other)
                 .and_then(|written| written)
@@ -464,34 +459,15 @@ async fn bind(state: &Arc<AppState>) -> Result<Bound, WebError> {
         refuse_answering(port).await?;
     }
     let loopback = Loopback::bind(port).await?;
-    // Both before either serves, so a failed launch listener binds nothing.
-    let launches = match port {
-        0 => None,
-        _ => Some(Loopback::bind(0).await?),
-    };
-    let url = format!("http://localhost:{}/", loopback.port);
-    let origin = url.trim_end_matches('/').to_owned();
-    let _ = state.web.origin.set(origin.clone());
-    serve(state, loopback, None, "web listener");
-    let launches = launches.map(|loopback| {
-        let url = format!("http://localhost:{}/", loopback.port);
-        serve(state, loopback, Some(origin), "web launch listener");
-        url
-    });
-    Ok(Bound { url, launches })
-}
-
-/// Serves `loopback` until the daemon stops: the web UI, or launch pages for
-/// the web UI at `launches`.
-fn serve(state: &Arc<AppState>, loopback: Loopback, launches: Option<String>, name: &'static str) {
     let authority = format!("localhost:{}", loopback.port);
+    let origin = format!("http://{authority}");
+    let _ = state.web.origin.set(origin.clone());
     let gate = Arc::new(gate::Gate {
-        origin: format!("http://{authority}"),
+        origin,
         authority: authority.clone(),
         sessions: Arc::clone(&state.web.sessions),
         assets: state.web.assets(),
         resets: Arc::clone(&state.web.resets),
-        launches,
     });
     let ipv6 = loopback.v6.is_some();
     let accepting: SelectAll<_> = std::iter::once(loopback.v4)
@@ -503,18 +479,21 @@ fn serve(state: &Arc<AppState>, loopback: Loopback, launches: Option<String>, na
         crate::server::web_router(state, gate)
             .serve_with_incoming_shutdown(incoming, state.shutdown.clone().cancelled_owned()),
     );
-    state.hooks.add(name, move || {
+    state.hooks.add("web listener", move || {
         Box::pin(async move {
             let mut server = server;
             match tokio::time::timeout(SHUTDOWN_GRACE, &mut server).await {
                 Ok(Ok(Ok(()))) => {}
-                Ok(Ok(Err(error))) => tracing::warn!(%error, "the {name} failed"),
-                Ok(Err(error)) => tracing::warn!(%error, "the {name} panicked"),
+                Ok(Ok(Err(error))) => tracing::warn!(%error, "the web listener failed"),
+                Ok(Err(error)) => tracing::warn!(%error, "the web listener panicked"),
                 Err(_) => server.abort(),
             }
         })
     });
-    tracing::info!(address = %authority, ipv6, listener = name, "web UI listening");
+    tracing::info!(address = %authority, ipv6, "web UI listening");
+    Ok(Bound {
+        url: format!("http://{authority}/"),
+    })
 }
 
 /// How long [`refuse_answering`] waits for an answer on each family.

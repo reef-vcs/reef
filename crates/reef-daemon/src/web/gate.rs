@@ -12,8 +12,7 @@
 //!    every cross-origin preflight fails. No response carries CORS headers.
 //! 3. `GET` and `HEAD` on any path but an API path serve the assets, except
 //!    that `GET /reset/<id>` clears the address's data in the browser, once
-//!    for each launch file (`clear`). The launch listener's gate stops here
-//!    and serves only the launch page.
+//!    for each launch file (`clear`).
 //! 4. An API path (`/reef.<package>.<Service>/<Rpc>`) is `POST` (`405`);
 //!    any other path is `404` on `POST` and `405` otherwise.
 //! 5. `Origin`, if sent, is the listener's own, and `Sec-Fetch-Site`, if
@@ -80,9 +79,6 @@ pub(crate) struct Gate {
     pub(crate) sessions: Arc<Sessions>,
     pub(crate) assets: Arc<Assets>,
     pub(crate) resets: Arc<Resets>,
-    /// The launch listener's gate: it serves the launch page, for the web
-    /// UI at this origin, and nothing else.
-    pub(crate) launches: Option<String>,
 }
 
 /// A service worker that removes itself: what the gate answers for one's
@@ -185,9 +181,6 @@ impl Gate {
             return Some(self.evict_worker());
         }
         let method = request.method();
-        if let Some(origin) = &self.launches {
-            return Some(clear::launch_page(method, request.uri().path(), origin));
-        }
         if request.headers().contains_key(header::UPGRADE) {
             return Some(plain(StatusCode::BAD_REQUEST));
         }

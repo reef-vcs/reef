@@ -44,7 +44,7 @@ impl http_body::Body for Full {
 
 /// `inner`, holding its session in use until the body ends or is dropped,
 /// so a session with a stream open never goes idle, and ending early when
-/// the session is ended with every other.
+/// the session ends.
 #[derive(Debug)]
 pub(crate) struct Held {
     inner: Body,

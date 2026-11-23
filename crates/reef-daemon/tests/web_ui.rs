@@ -1075,15 +1075,26 @@ async fn a_fixed_port_answered_on_every_address_is_refused() {
     }
 }
 
-// #346: with a fixed port, a launch file opens a page on a listener whose
-// port the kernel picked, which asks for the one reset the file names and
-// then goes to the session. Nothing else is served there, and a reset is
-// answered once, and to no one who was not given its id.
+/// A port nothing holds now, below the ephemeral ranges, where no other
+/// test's `:0` bind lands in between.
+fn free_port() -> u16 {
+    loop {
+        let port = 20_000 + u16::from_le_bytes(rand::random()) % 12_000;
+        if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
+            && std::net::TcpStream::connect(("::1", port)).is_err()
+        {
+            return port;
+        }
+    }
+}
+
+// #346: with a fixed port, a launch file asks for the one reset it names, as
+// an image of another origin, before it goes to the session. A reset is
+// answered once, and to no one who was not given its id. With the kernel's
+// port a launch file goes there at once.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_launch_clears_the_address_first() {
-    let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = held.local_addr().unwrap().port();
-    drop(held);
+    let port = free_port();
     let daemon = TestDaemon::start_with(|config| {
         config.file.ui.listen = format!("127.0.0.1:{port}");
     })
@@ -1091,67 +1102,43 @@ async fn a_launch_clears_the_address_first() {
     let web = session(&daemon.client, true).await;
     let at = authority_of(&web);
     let file = std::fs::read_to_string(&web.launch_path).unwrap();
-    let url = file
-        .split("url=")
-        .nth(1)
-        .and_then(|rest| rest.split('"').next())
-        .unwrap()
-        .replace("&amp;", "&");
-    let (launches, fragment) = url.split_once("/#reset=").unwrap();
-    let (id, to) = fragment.split_once("&to=").unwrap();
-    assert_eq!(
-        format!("http://{at}{to}"),
-        web.session_url,
-        "it goes on to the session"
-    );
-    let launches = launches.strip_prefix("http://").unwrap();
-    assert_ne!(launches, at);
-
-    let page = get(launches, "/").await;
-    assert_eq!(page.status(), StatusCode::OK);
-    let html = std::str::from_utf8(page.body()).unwrap();
-    assert!(html.contains(&format!("content=\"http://{at}\"")), "{html}");
-    let csp = page.headers()["content-security-policy"].to_str().unwrap();
-    assert!(csp.contains(&format!("connect-src http://{at};")), "{csp}");
-    for name in HEADERS {
-        assert!(page.headers().contains_key(*name), "{name}");
-    }
-    assert_eq!(get(launches, "/launch.js").await.status(), StatusCode::OK);
-    for path in ["/repos/abc", "/assets/x.js", "/reset/x"] {
-        let response = get(launches, path).await;
-        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
-    }
-    let api = "/reef.api.v1.DaemonService/GetDaemonStatus";
-    let bearer = format!("Bearer {}", token_of(&web));
-    let refused = send(
-        launches,
-        Method::POST,
-        api,
-        &[
-            ("content-type", "application/grpc-web+proto"),
-            ("authorization", &bearer),
-        ],
-        vec![0, 0, 0, 0, 0],
-    )
-    .await;
-    assert_eq!(refused.status(), StatusCode::METHOD_NOT_ALLOWED);
+    let attribute = |name: &str| {
+        file.split(&format!("{name}=\""))
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .unwrap_or_else(|| panic!("no {name}: {file}"))
+            .replace("&amp;", "&")
+    };
+    assert_eq!(attribute("data-url"), web.session_url);
+    let reset = attribute("data-reset");
+    let reset = reset.strip_prefix(&format!("http://{at}")).unwrap();
+    assert!(reset.starts_with("/reset/"), "{reset}");
 
     let unknown = get(&at, &format!("/reset/{}", "0".repeat(32))).await;
     assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
     assert!(!unknown.headers().contains_key("clear-site-data"));
-    let cleared = get(&at, &format!("/reset/{id}")).await;
-    assert_eq!(cleared.status(), StatusCode::NO_CONTENT);
+    let cleared = get(&at, reset).await;
+    assert_eq!(cleared.status(), StatusCode::OK);
     assert_eq!(
         cleared.headers()["clear-site-data"],
         "\"cache\", \"storage\""
     );
+    assert_eq!(cleared.headers()[header::CONTENT_TYPE], "image/svg+xml");
     assert_eq!(
         cleared.headers()["cross-origin-resource-policy"],
-        "same-site"
+        "cross-origin"
     );
     assert_eq!(cleared.headers()[header::CACHE_CONTROL], "no-store");
-    let again = get(&at, &format!("/reset/{id}")).await;
-    assert_eq!(again.status(), StatusCode::NOT_FOUND);
+    for name in HEADERS {
+        assert!(cleared.headers().contains_key(*name), "{name}");
+    }
+    assert_eq!(get(&at, reset).await.status(), StatusCode::NOT_FOUND);
+    daemon.stop().await;
+
+    let daemon = TestDaemon::start().await;
+    let web = session(&daemon.client, true).await;
+    let file = std::fs::read_to_string(&web.launch_path).unwrap();
+    assert!(file.contains("http-equiv=\"refresh\"") && !file.contains("/reset/"));
     daemon.stop().await;
 }
 

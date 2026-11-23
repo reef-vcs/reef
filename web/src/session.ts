@@ -114,11 +114,13 @@ export function endSession(
 }
 
 /**
- * Removes every service worker and cache of this origin. Reef makes none, so
- * another process that held the port left them (#346). A browser that clears
- * the address at launch has none left.
+ * Removes every service worker and cache of a local web UI's origin. Reef
+ * makes none there, so another process that held the port left them (#346).
+ * The remote listener's origin is left alone: the phone's app has a worker of
+ * its own (R3.40).
  */
-export async function dropForeignWorkers() {
+export async function dropForeignWorkers(hostname: string = window.location.hostname) {
+  if (hostname !== "localhost") return;
   try {
     const workers = await navigator.serviceWorker.getRegistrations();
     await Promise.all(workers.map((worker) => worker.unregister()));

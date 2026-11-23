@@ -1,13 +1,15 @@
 // What a process that held the web UI's port leaves in the browser (#346):
 // service workers and cached pages and scripts, all at the origin a policy
-// pins. A launch from `reef ui` clears the address first, from a page at a
-// port no one could have prepared. Chromium removes everything then. WebKit
+// pins. A launch file from `reef ui` has the daemon clear the address first,
+// and goes nowhere unless it did. Chromium removes everything then. WebKit
 // does not honour the header for another origin: there the daemon ends a
 // worker when the browser asks for its script, and Reef's page removes the
 // rest, so a squatter with many workers outlives some launches (S-276).
 import { readdirSync } from "node:fs";
+import { copyFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import type { Page } from "@playwright/test";
 import { expect, freePort, test, WEB_DIR, type Reef } from "./reef";
 
@@ -121,11 +123,43 @@ test.describe("a determined squatter", () => {
     test(`${name} is gone at the first launch`, async ({ page, reef }) => {
       const origin = await poisoned(page, reef, [...scopes], updateViaCache);
       await page.goto(await reef.launch());
-      await page.waitForURL(`${origin}/**`);
       await reefs(page);
-      // A bookmark, and the launch URL of another session, are Reef's too.
+      // A bookmark is Reef's too.
       await page.goto(`${origin}/`);
       await reefs(page);
     });
   }
+
+  // Cookies ignore ports, and enough of them make the daemon refuse the
+  // request before it can answer.
+  test("a clear that cannot be asked for opens nothing", async ({ page, reef }) => {
+    await poisoned(page, reef, ["/"], "all");
+    await page.evaluate(() => {
+      for (let i = 0; i < 170; i++)
+        document.cookie = `c${String(i)}=${"x".repeat(3_900)}; path=/reset; max-age=86400`;
+      for (let i = 0; i < 170; i++)
+        document.cookie = `s${String(i)}=${"x".repeat(3_900)}; path=/reset; max-age=86400; SameSite=None; Secure`;
+    });
+    const launch = await reef.launch();
+    await page.goto(launch);
+    // Either the browser left the cookies off a request from another site,
+    // and the address was cleared, or nothing opened.
+    await expect(
+      page.getByRole("heading", { name: "Repositories" }).or(page.getByText("Reef was not opened")),
+    ).toBeVisible();
+    expect(await page.title()).not.toBe("Squatter");
+    if (page.url() === launch) return;
+    await reefs(page);
+  });
+
+  test("a daemon that does not answer opens nothing", async ({ page, reef }) => {
+    await poisoned(page, reef, ["/"], "all");
+    const kept = join(reef.root, "launch.html");
+    await copyFile(fileURLToPath(await reef.launch()), kept);
+    const launch = pathToFileURL(kept).href;
+    await reef.stop();
+    await page.goto(launch);
+    await expect(page.getByText("Reef was not opened")).toBeVisible();
+    expect(page.url()).toBe(launch);
+  });
 });

@@ -17,7 +17,7 @@ import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promis
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { test as base, expect } from "@playwright/test";
 
@@ -324,13 +324,11 @@ export class Reef {
     return { url: printed.url, sessionUrl, token };
   }
 
-  /** The URL `reef ui` opens in a browser, from the launch file it writes. */
+  /** The launch file `reef ui` opens in a browser, as a URL. */
   async launch(): Promise<string> {
     const { launch_path } = (await this.reef(["ui"])) as { launch_path: string };
-    const page = await readFile(launch_path, "utf8");
-    const url = /url=([^"]+)"/.exec(page)?.[1]?.replaceAll("&amp;", "&") ?? "";
-    expect(url, "the launch file opens a URL").toMatch(/^http:/);
-    return url;
+    expect(launch_path, "reef ui wrote a launch file").not.toBe("");
+    return pathToFileURL(launch_path).href;
   }
 
   /** `reef --no-autostart <args>`, parsed as JSON; throws with its output on failure. */
