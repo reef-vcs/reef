@@ -188,7 +188,7 @@ sigstore-trust-root = { version = "=0.15.1", default-features = false }
 sigstore-crypto = { version = "=0.15.1", default-features = false }
 sigstore-types = { version = "=0.15.1", default-features = false }
 x509-cert = { version = "0.2", default-features = false }   # a Fulcio leaf's issuer and key, the CA it chains to (R3.42)
-der = "0.7"
+der = "0.8"
 
 # Dev and bench
 criterion = { version = "0.8", features = ["html_reports"] }
