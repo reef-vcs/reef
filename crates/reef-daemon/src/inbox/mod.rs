@@ -13,7 +13,7 @@ pub(crate) mod rules;
 mod tests;
 mod words;
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use reef_api::v1::{self, OperationKind, PresenceKind};
 
@@ -243,6 +243,8 @@ pub(crate) struct Buckets {
     pub needs_you_now_total: usize,
     pub watching: Vec<Item>,
     pub watching_total: usize,
+    /// Every placed item's key, the ones past the cap included.
+    pub keys: BTreeSet<String>,
     pub now: Timestamp,
 }
 
@@ -296,6 +298,7 @@ pub(crate) fn classify(sources: Sources) -> Buckets {
         needs_you_now_total: 0,
         watching: Vec::new(),
         watching_total: 0,
+        keys: items.iter().map(|item| item.key.clone()).collect(),
         now,
     };
     for item in items {

@@ -3,6 +3,8 @@
 
 use reef_client::web::WebPath;
 
+use crate::login::Shown;
+
 /// How many needs-you-now items the menu lists.
 pub const LISTED: usize = 5;
 
@@ -61,8 +63,8 @@ pub struct View {
     pub needs: Vec<Listed>,
     /// The person turned notifications off for the app.
     pub notifications_off: bool,
-    /// The app opens at login.
-    pub open_at_login: bool,
+    /// Whether the app opens at login.
+    pub open_at_login: Shown,
 }
 
 /// What a menu item does.
@@ -240,10 +242,14 @@ pub fn menu(view: &View) -> MenuSpec {
     }
     items.push(MenuItem::Separator);
     items.push(action("Open Reef", MenuAction::Open(WebPath::start())));
-    items.push(MenuItem::Check {
-        label: "Open at login".to_owned(),
-        on: view.open_at_login,
-        action: MenuAction::OpenAtLogin(!view.open_at_login),
+    let login = view.open_at_login == Shown::On;
+    items.push(match view.open_at_login {
+        Shown::Elsewhere => MenuItem::Label("Open at login: move Reef to Applications".to_owned()),
+        Shown::On | Shown::Off => MenuItem::Check {
+            label: "Open at login".to_owned(),
+            on: login,
+            action: MenuAction::OpenAtLogin(!login),
+        },
     });
     items.push(action("Quit Reef (agents keep running)", MenuAction::Quit));
     MenuSpec {
@@ -284,7 +290,7 @@ mod tests {
                 })
                 .collect(),
             notifications_off: false,
-            open_at_login: true,
+            open_at_login: Shown::On,
         }
     }
 
@@ -336,6 +342,34 @@ mod tests {
         }
         assert_eq!(MenuAction::from_id("open:http://evil.example"), None);
         assert_eq!(MenuAction::from_id("3"), None);
+    }
+
+    #[test]
+    fn open_at_login_toggles_what_it_shows_and_a_passing_copy_offers_none() {
+        let login = |shown| {
+            let mut view = view(Conn::Up(daemon(1)), 0, 0);
+            view.open_at_login = shown;
+            menu(&view).items.into_iter().find(|item| {
+                matches!(item, MenuItem::Check { label, .. } | MenuItem::Label(label)
+                    if label.starts_with("Open at login"))
+            })
+        };
+        for (shown, on) in [(Shown::On, true), (Shown::Off, false)] {
+            assert_eq!(
+                login(shown),
+                Some(MenuItem::Check {
+                    label: "Open at login".to_owned(),
+                    on,
+                    action: MenuAction::OpenAtLogin(!on),
+                })
+            );
+        }
+        assert_eq!(
+            login(Shown::Elsewhere),
+            Some(MenuItem::Label(
+                "Open at login: move Reef to Applications".to_owned()
+            ))
+        );
     }
 
     #[test]

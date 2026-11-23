@@ -292,7 +292,7 @@ impl Session {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use tokio::sync::watch;
 
@@ -309,9 +309,10 @@ mod tests {
         };
         let repo_board = RepoBoard {
             rev: n + 1,
-            items: BTreeMap::from([(key, item)]),
+            items: BTreeMap::from([(key.clone(), item)]),
             needs_you_now_total: 1,
             watching_total: 0,
+            keys: BTreeSet::from([key]),
             error: None,
             subjects: Arc::default(),
             restale_at: None,

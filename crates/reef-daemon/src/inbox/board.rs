@@ -7,7 +7,7 @@
 //! it last sent and sends [`diff`] against the newest, so a slow stream
 //! skips intermediate states and nothing queues.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use prost::Message as _;
@@ -31,6 +31,9 @@ pub(crate) struct RepoBoard {
     pub items: BTreeMap<String, v1::InboxItem>,
     pub needs_you_now_total: u32,
     pub watching_total: u32,
+    /// Every key in either bucket, the ones past the cap included: the
+    /// raise ledger keeps a row while its key is here. No stream sees it.
+    pub keys: BTreeSet<String>,
     /// Set while the repository fails to read; `items` are the last good
     /// read's.
     pub error: Option<v1::InboxError>,
@@ -74,6 +77,7 @@ impl RepoBoard {
             items,
             needs_you_now_total: total(buckets.needs_you_now_total),
             watching_total: total(buckets.watching_total),
+            keys: buckets.keys,
             error: None,
             subjects,
             restale_at,
@@ -89,6 +93,7 @@ impl RepoBoard {
             items: BTreeMap::new(),
             needs_you_now_total: 0,
             watching_total: 0,
+            keys: BTreeSet::new(),
             error: None,
             subjects: Arc::default(),
             restale_at: None,
@@ -246,6 +251,7 @@ mod tests {
                 .collect(),
             needs_you_now_total: 0,
             watching_total: 0,
+            keys: items.iter().map(|item| item.key.clone()).collect(),
             error: None,
             subjects: Arc::default(),
             restale_at: None,

@@ -13,6 +13,7 @@
 //! run, go to the person's browser through a launch file, as `reef ui` does.
 
 pub mod link;
+pub mod login;
 pub mod menu;
 pub mod notice;
 
@@ -73,7 +74,7 @@ pub enum Command {
     /// Whether the person allows notifications.
     Notifications(bool),
     /// Whether the app opens at login.
-    OpenAtLogin(bool),
+    OpenAtLogin(login::Shown),
 }
 
 /// A session URL. A credential: it prints as its origin only.
@@ -282,7 +283,7 @@ struct State<P> {
     window: Option<Window>,
     visited: WebPath,
     notifications_off: bool,
-    open_at_login: bool,
+    open_at_login: login::Shown,
     menu: Option<MenuSpec>,
     asked: Option<Ask>,
 }
@@ -424,6 +425,9 @@ impl<P: Platform> State<P> {
             }
             Command::OpenAtLogin(on) => {
                 self.open_at_login = on;
+                // The toolkit flips a check item when clicked, so a change
+                // that failed must draw the menu again.
+                self.menu = None;
                 self.redraw();
             }
         }
@@ -508,7 +512,7 @@ async fn run<P: Platform>(
         window: None,
         visited: WebPath::start(),
         notifications_off: false,
-        open_at_login: false,
+        open_at_login: login::Shown::Off,
         menu: None,
         asked: Some(Ask::Start),
     };
@@ -643,6 +647,7 @@ async fn follow<P: Platform>(
                 state.held.fold(&frame);
                 let step = state.notifier.frame(&frame, &state.names, Instant::now());
                 state.run_step(&step);
+                state.notifier.commit();
                 let keepalive = frame.sections.is_empty();
                 if keepalive || status_at.elapsed() >= STATUS_EVERY {
                     status_at = Instant::now();

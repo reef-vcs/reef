@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use reef_client::paths::{ClientConfig, PathOverrides};
+use reef_shell::login::{self, Act, Choice, Shown};
 use reef_shell::menu::{MenuAction, MenuItem, MenuSpec};
 use reef_shell::notice::Note;
 use reef_shell::{Command, Page, Platform, Shell, ShellConfig, ShellHandle, link};
@@ -120,16 +121,11 @@ impl App {
                 open(format!("x-apple.systempreferences:com.apple.Notifications-Settings.extension?id={identifier}").as_ref());
             }
             MenuAction::OpenAtLogin(on) => {
-                let launcher = self.handle.autolaunch();
-                let set = if on {
-                    launcher.enable()
-                } else {
-                    launcher.disable()
-                };
-                if let Err(error) = set {
-                    tracing::warn!(%error, "open at login did not change");
-                }
-                shell.send(Command::OpenAtLogin(launcher.is_enabled().unwrap_or(false)));
+                let choice = if on { Choice::On } else { Choice::Off };
+                shell.send(Command::OpenAtLogin(open_at_login(
+                    &self.handle,
+                    Some(choice),
+                )));
             }
             MenuAction::Quit => self.handle.exit(0),
         }
@@ -143,6 +139,49 @@ fn open(what: &std::ffi::OsStr) {
     {
         tracing::warn!(%error, "open failed");
     }
+}
+
+/// Saves the person's `chosen` choice, if they made one, applies the saved
+/// choice to the login item, and says what the menu shows for it.
+fn open_at_login(handle: &AppHandle, chosen: Option<Choice>) -> Shown {
+    let Ok(data_dir) = handle.path().app_data_dir() else {
+        return Shown::Elsewhere;
+    };
+    let file = data_dir.join(login::CHOICE_FILE);
+    let choice = match chosen {
+        Some(choice) => {
+            if let Err(error) = choice.save(&file) {
+                tracing::warn!(%error, "the open at login choice was not saved");
+            }
+            choice
+        }
+        None => Choice::load(&file),
+    };
+    // The autostart plugin writes the canonical path, and its `is_enabled`
+    // says only that its plist exists, wherever it points.
+    let exe = std::env::current_exe()
+        .and_then(|exe| exe.canonicalize())
+        .ok();
+    let plist = handle.path().home_dir().ok().map(|home| {
+        home.join("Library/LaunchAgents")
+            .join(format!("{}.plist", handle.package_info().name))
+    });
+    let agent = || {
+        plist
+            .as_ref()
+            .and_then(|plist| std::fs::read_to_string(plist).ok())
+    };
+    let development = cfg!(debug_assertions);
+    let launcher = handle.autolaunch();
+    let set = match login::act(choice, exe.as_deref(), development, agent().as_deref()) {
+        Act::Enable => launcher.enable(),
+        Act::Disable => launcher.disable(),
+        Act::Leave => Ok(()),
+    };
+    if let Err(error) = set {
+        tracing::warn!(%error, "open at login did not change");
+    }
+    login::shown(exe.as_deref(), development, agent().as_deref())
 }
 
 fn bundled() -> Option<PathBuf> {
@@ -182,7 +221,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .build(app)?;
     let config = ShellConfig {
         socket: paths.socket,
-        data_dir: data_dir.clone(),
+        data_dir,
         installed: link::installed_dirs(&home),
         bundled: bundled(),
     };
@@ -192,13 +231,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(target_os = "macos")]
     notify::init(shell.clone());
 
-    let launcher = app.autolaunch();
-    let first_run = data_dir.join("first-run");
-    if !first_run.exists() {
-        let _ = launcher.enable();
-        let _ = std::fs::write(&first_run, b"");
-    }
-    shell.send(Command::OpenAtLogin(launcher.is_enabled().unwrap_or(false)));
+    shell.send(Command::OpenAtLogin(open_at_login(&handle, None)));
 
     let links = shell.clone();
     app.deep_link().on_open_url(move |event| {

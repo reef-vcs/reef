@@ -4,8 +4,9 @@
 //! Which items are news is [`reef_client::inbox::News`], the rule `reef
 //! inbox watch` uses too, kept on disk so neither an app nor a daemon
 //! restart announces anything twice. A banner's identifier is the item's
-//! key, so posting again replaces it: the cursor is saved after posting,
-//! and a crash between the two can repeat a banner but never lose one.
+//! key, so posting again replaces it: the cursor is saved after posting
+//! ([`Notifier::commit`]), and a crash between the two can repeat a banner
+//! but never lose one.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -52,6 +53,8 @@ pub struct Step {
 pub struct Notifier {
     news: News,
     file: PathBuf,
+    /// Whether `news` moved since it was last saved.
+    unsaved: bool,
     /// Banners posted this run: each key, with its repository.
     posted: BTreeMap<String, String>,
     leaving: BTreeMap<String, Instant>,
@@ -81,6 +84,7 @@ impl Notifier {
         Notifier {
             news,
             file: file.to_owned(),
+            unsaved: false,
             posted: BTreeMap::new(),
             leaving: BTreeMap::new(),
             summary: BTreeSet::new(),
@@ -94,7 +98,8 @@ impl Notifier {
     }
 
     /// The banners `frame` asks for, `names` naming repositories by id.
-    /// Saves the cursor when it moved.
+    /// The cursor moves here and is saved by [`Notifier::commit`], once the
+    /// banners are posted.
     pub fn frame(
         &mut self,
         frame: &v1::WatchInboxResponse,
@@ -146,10 +151,17 @@ impl Notifier {
             self.posted.insert(item.key.clone(), repo.to_owned());
             self.leaving.remove(&item.key);
         }
-        if self.news != before {
-            self.save();
-        }
+        self.unsaved |= self.news != before;
         step
+    }
+
+    /// Saves the cursor, if it moved; call it after posting what
+    /// [`Notifier::frame`] asked for.
+    pub fn commit(&mut self) {
+        if self.unsaved {
+            self.save();
+            self.unsaved = false;
+        }
     }
 
     fn leave(&mut self, section: &v1::InboxSectionChange, now: Instant) {
@@ -307,6 +319,7 @@ mod tests {
         assert_eq!(notifier.frame(&listed, &names(), now), Step::default());
         let asked = frame(vec![section(Unspecified, vec![help("new", 2)], vec![], 2)]);
         let step = notifier.frame(&asked, &names(), now);
+        notifier.commit();
         assert_eq!(step.post.len(), 1);
         let note = &step.post[0];
         assert_eq!(note.id, format!("help:{REPO}:new"));
@@ -327,6 +340,7 @@ mod tests {
             2,
         )]);
         assert_eq!(again.frame(&relisted, &names(), now), Step::default());
+        again.commit();
         let mut later = Notifier::load(&file);
         let away = frame(vec![section(End, vec![help("away", 3)], vec![], 3)]);
         assert_eq!(later.frame(&away, &names(), now).post.len(), 1);
@@ -465,6 +479,34 @@ mod tests {
                 .tick(now + RETRACT_AFTER)
                 .retract
                 .contains(&SUMMARY_ID.to_owned())
+        );
+    }
+
+    // R3.39 main-session review F1: a crash or a quit after the cursor moves
+    // and before the banner is posted must not lose the banner.
+    #[test]
+    fn the_cursor_is_saved_only_after_the_banner_is_posted() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("notices.json");
+        let mut notifier = Notifier::load(&file);
+        let now = Instant::now();
+        notifier.frame(&frame(vec![section(End, vec![], vec![], 1)]), &names(), now);
+        notifier.commit();
+        let asked = frame(vec![section(Unspecified, vec![help("new", 2)], vec![], 2)]);
+        assert_eq!(notifier.frame(&asked, &names(), now).post.len(), 1);
+        let relisted = frame(vec![section(End, vec![help("new", 2)], vec![], 2)]);
+        let mut crashed = Notifier::load(&file);
+        assert_eq!(
+            crashed.frame(&relisted, &names(), now).post.len(),
+            1,
+            "a banner never posted is posted after the restart"
+        );
+        notifier.commit();
+        let mut posted = Notifier::load(&file);
+        assert_eq!(
+            posted.frame(&relisted, &names(), now).post,
+            [],
+            "a posted banner is not posted again"
         );
     }
 }

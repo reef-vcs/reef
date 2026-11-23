@@ -5,10 +5,10 @@
 //! or `Pending`) reads its reason from its lifecycle, which can differ from
 //! its last judgment; that reading is provisional and keeps the number its
 //! commit holds, so a restart announces nothing; with no number for its
-//! commit it reads 0 and writes nothing, and its first judgment numbers it. Only the
-//! board task writes the ledger (`settle`); `GetInbox` reads it (`lookup`).
-
-use std::collections::BTreeSet;
+//! commit it reads 0 and writes nothing, and its first judgment numbers it. A
+//! row lives while its key is in either bucket, past the cap included. Only
+//! the board task writes the ledger (`settle`); `GetInbox` reads it
+//! (`lookup`).
 
 use reef_api::v1;
 
@@ -45,20 +45,6 @@ fn episodes(board: &RepoBoard) -> Vec<Episode> {
     board.items.values().filter_map(episode).collect()
 }
 
-fn whole(board: &RepoBoard) -> bool {
-    let listed = |bucket| {
-        board
-            .items
-            .values()
-            .filter(|item| item.bucket() == bucket)
-            .count()
-    };
-    usize::try_from(board.needs_you_now_total)
-        .is_ok_and(|total| total == listed(v1::InboxBucket::NeedsYouNow))
-        && usize::try_from(board.watching_total)
-            .is_ok_and(|total| total == listed(v1::InboxBucket::Watching))
-}
-
 pub(crate) fn settle(
     db: &Db,
     repo: RepoId,
@@ -66,12 +52,10 @@ pub(crate) fn settle(
     last: Option<&RepoBoard>,
 ) -> Result<(), DbError> {
     let episodes = episodes(board);
-    // The same read as the last takes its numbers, unless it can prune what
-    // the last, cut at a bucket's cap, could not.
+    // The same read as the last takes its numbers: nothing to number or prune.
     if let Some(last) = last.filter(|last| last.read && last.error.is_none())
-        && last.items.keys().eq(board.items.keys())
+        && last.keys == board.keys
         && self::episodes(last) == episodes
-        && (whole(last) || !whole(board))
     {
         for (key, item) in &mut board.items {
             item.raised = last.items.get(key).map_or(0, |last| last.raised);
@@ -79,9 +63,7 @@ pub(crate) fn settle(
         board.raised_through = last.raised_through;
         return Ok(());
     }
-    let listed: Option<BTreeSet<String>> =
-        whole(board).then(|| board.items.keys().cloned().collect());
-    let (raises, through) = db.settle_inbox_raises(repo, &episodes, listed.as_ref())?;
+    let (raises, through) = db.settle_inbox_raises(repo, &episodes, &board.keys)?;
     number(board, &episodes, &raises);
     board.raised_through = through.max(last.map_or(0, |last| last.raised_through));
     Ok(())
@@ -180,6 +162,7 @@ mod tests {
                 .collect::<BTreeMap<_, _>>(),
             needs_you_now_total: count(v1::InboxBucket::NeedsYouNow),
             watching_total: count(v1::InboxBucket::Watching),
+            keys: items.iter().map(|item| item.key.clone()).collect(),
             error: None,
             subjects: Arc::default(),
             restale_at: None,
@@ -312,7 +295,8 @@ mod tests {
         let repo: RepoId = REPO.parse().unwrap();
         let (first, _) = settle_items(&db, &[signoff("a", "c1")]);
         let mut cut = board(&[]);
-        cut.watching_total = 201;
+        cut.needs_you_now_total = 201;
+        cut.keys.insert(format!("proposal:{REPO}:a"));
         settle(&db, repo, &mut cut, None).unwrap();
         let (later, _) = settle_items(&db, &[signoff("a", "c1")]);
         assert_eq!(
@@ -339,9 +323,9 @@ mod tests {
     }
 
     // R3.39 review R1.F3: a key that fell past the cap and was answered there
-    // is pruned once a whole read shows it gone, so asked again it is news.
+    // is pruned once a read shows it gone, so asked again it is news.
     #[test]
-    fn a_whole_read_after_a_cut_one_prunes() {
+    fn a_key_past_the_cap_is_pruned_once_it_leaves() {
         let db = Db::open_in_memory().unwrap();
         let repo: RepoId = REPO.parse().unwrap();
         let mut first = board(&[signoff("a", "c1"), signoff("x", "c1")]);
@@ -349,6 +333,7 @@ mod tests {
         let x = first.items[&format!("proposal:{REPO}:x")].raised;
         let mut cut = board(&[signoff("a", "c1")]);
         cut.needs_you_now_total = 2;
+        cut.keys.insert(format!("proposal:{REPO}:x"));
         settle(&db, repo, &mut cut, Some(&first)).unwrap();
         let mut whole = board(&[signoff("a", "c1")]);
         settle(&db, repo, &mut whole, Some(&cut)).unwrap();
@@ -369,5 +354,42 @@ mod tests {
         settle(&db, repo, &mut next, Some(&last)).unwrap();
         assert_eq!(next.items, last.items);
         assert_eq!(next.raised_through, last.raised_through);
+    }
+
+    // R3.39 main-session review F3: with another bucket cut at its cap, a
+    // key that leaves the inbox still loses its row, so the same ask on the
+    // same commit coming back (an undone landing) is news.
+    #[test]
+    fn back_after_leaving_while_watching_is_cut_is_news() {
+        let db = Db::open_in_memory().unwrap();
+        let repo: RepoId = REPO.parse().unwrap();
+        let key = format!("proposal:{REPO}:a");
+        let watching: Vec<v1::InboxItem> = (0..201)
+            .map(|n| in_review(&format!("w{n:03}"), "c1"))
+            .collect();
+        let cut = |items: &[v1::InboxItem]| {
+            let mut board = board(
+                &items
+                    .iter()
+                    .chain(&watching[..200])
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            );
+            board.watching_total = 201;
+            board.keys.insert(watching[200].key.clone());
+            board
+        };
+        let mut first = cut(&[signoff("a", "c1")]);
+        settle(&db, repo, &mut first, None).unwrap();
+        let announced = first.items[&key].raised;
+        let mut gone = cut(&[]);
+        settle(&db, repo, &mut gone, Some(&first)).unwrap();
+        let mut back = cut(&[signoff("a", "c1")]);
+        settle(&db, repo, &mut back, Some(&gone)).unwrap();
+        assert!(
+            back.items[&key].raised > announced,
+            "left and came back, but raised {} again (announced {announced})",
+            back.items[&key].raised
+        );
     }
 }

@@ -274,15 +274,15 @@ impl Db {
     /// key whose row has the same cause and the same reason (any, for a
     /// provisional episode) keeps its number, and a new episode, or one
     /// whose reason or cause moved, takes the next. A provisional episode
-    /// with no row for its cause writes nothing and reads 0. With `listed`, the keys a read
-    /// listed in either bucket, rows of `repo` whose key is not among them
+    /// with no row for its cause writes nothing and reads 0. Rows of `repo`
+    /// whose key is not in `keys`, every key a read placed in either bucket,
     /// go. Returns the raises in order, and the newest raise `repo` holds.
     /// The same call twice changes nothing.
     pub fn settle_inbox_raises(
         &self,
         repo: RepoId,
         episodes: &[Episode],
-        listed: Option<&BTreeSet<String>>,
+        keys: &BTreeSet<String>,
     ) -> Result<(Vec<u64>, u64), DbError> {
         self.in_transaction(|tx| {
             let mut raises = Vec::with_capacity(episodes.len());
@@ -320,14 +320,12 @@ impl Db {
                 };
                 raises.push(u64::try_from(seq).unwrap_or(0));
             }
-            if let Some(listed) = listed {
-                let keys: Vec<String> = tx
-                    .prepare("SELECT key FROM inbox_raises WHERE repo_id = ?1")?
-                    .query_map(params![repo], |row| row.get(0))?
-                    .collect::<Result<_, _>>()?;
-                for key in keys.iter().filter(|key| !listed.contains(*key)) {
-                    tx.execute("DELETE FROM inbox_raises WHERE key = ?1", params![key])?;
-                }
+            let held: Vec<String> = tx
+                .prepare("SELECT key FROM inbox_raises WHERE repo_id = ?1")?
+                .query_map(params![repo], |row| row.get(0))?
+                .collect::<Result<_, _>>()?;
+            for key in held.iter().filter(|key| !keys.contains(*key)) {
+                tx.execute("DELETE FROM inbox_raises WHERE key = ?1", params![key])?;
             }
             let newest: i64 = tx.query_row(
                 "SELECT coalesce(max(seq), 0) FROM inbox_raises WHERE repo_id = ?1",

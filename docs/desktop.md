@@ -17,7 +17,13 @@ A release build (`scripts/shell-build.sh release <bin-dir>`) carries `reef` and 
 
 ## The menu bar
 
-The menu bar item shows how many things need you, and its menu lists the newest five, each opening its page. Below them: how many workspaces are active in how many repositories, landing pushes to a git remote that need a person, and the daemon's version. **Open Reef** opens the window; **Open at login** is on from the first launch, since a notifier that is not running notifies nothing; **Quit Reef** leaves the daemon and every agent running.
+The menu bar item shows how many things need you, and its menu lists the newest five, each opening its page. Below them: how many workspaces are active in how many repositories, landing pushes to a git remote that need a person, and the daemon's version. **Open Reef** opens the window; **Open at login** is described below; **Quit Reef** leaves the daemon and every agent running.
+
+## Open at login
+
+Reef.app adds itself as a login item by default, since a notifier that is not running notifies nothing. It is a launch agent, `~/Library/LaunchAgents/Reef.plist`, which System Settings lists under General > Login Items > Allow in the Background. To turn it off, choose **Open at login** in the menu of the copy in Applications: the app removes the launch agent and remembers the choice, and does not add it again until you choose it again. The switch in System Settings stops the launch agent without removing it, and the menu does not show that switch.
+
+While the choice is on, a launch points the launch agent at the app's current path, so after you move Reef.app, opening it once keeps open at login working. A copy that will not be at its path at the next login adds nothing and its menu reads **Open at login: move Reef to Applications**: one run from the mounted `.dmg`, one macOS runs from a temporary copy because it is quarantined (move it to Applications first), and a debug build (`just shell-run`). The checkmark shows only when the launch agent opens this copy of the app.
 
 ## Banners
 
