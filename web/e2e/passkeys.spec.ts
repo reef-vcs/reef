@@ -129,7 +129,9 @@ test("a person signs off with a pinned passkey, and only pinned passkeys count",
 }) => {
   const session = await reef.session();
   const { url } = session;
-  expect(new URL(url).hostname, "a ceremony needs the localhost origin").toBe("localhost");
+  expect(new URL(url).hostname, "a ceremony needs a reef.localhost origin").toMatch(
+    /^[0-9a-f]{16}\.reef\.localhost$/,
+  );
   const identity = reef.identity;
   const cdp = await webAuthn(page);
   const first = await Authenticator.add(cdp);
@@ -143,10 +145,10 @@ test("a person signs off with a pinned passkey, and only pinned passkeys count",
     expect(await first.credentials()).toBe(1);
     await card.getByRole("button", { name: "Confirm a passkey to pin" }).click();
     const text = (await card.locator("pre").textContent()) ?? "";
-    const origin = new URL(url).origin;
+    const site = `http://reef.localhost:${new URL(url).port}`;
     expect(text).toMatch(
       new RegExp(
-        `^\\[passkeys\\]\\n${identity} = \\[\\n  \\{ fingerprint = "[0-9a-f]{64}", origin = "${origin}" \\},\\n\\]\\n$`,
+        `^\\[passkeys\\]\\n${identity} = \\[\\n  \\{ fingerprint = "[0-9a-f]{64}", origin = "${site}" \\},\\n\\]\\n$`,
       ),
     );
     return text;
@@ -262,13 +264,23 @@ test("a person signs off with a pinned passkey, and only pinned passkeys count",
     await new Promise<void>((resolve) => lookAlike.listen(0, "localhost", resolve));
     const address = lookAlike.address();
     const port = typeof address === "object" && address ? address.port : 0;
-    const elsewhere = `http://localhost:${String(port)}`;
+    // A page at another name cannot ask for the passkey at all.
+    await page.goto(`http://localhost:${String(port)}`);
+    const refused = await page.evaluate(async () => {
+      const publicKey = { challenge: new Uint8Array(32), rpId: "reef.localhost" };
+      return navigator.credentials.get({ publicKey }).then(
+        () => "asserted",
+        (error: unknown) => (error as DOMException).name,
+      );
+    });
+    expect(refused).toBe("SecurityError");
+    const elsewhere = `http://0123456789abcdef.reef.localhost:${String(port)}`;
     await page.goto(elsewhere);
     const asserted = await page.evaluate(async (challenge) => {
       const credential = (await navigator.credentials.get({
         publicKey: {
           challenge: new Uint8Array(challenge),
-          rpId: "localhost",
+          rpId: "reef.localhost",
           userVerification: "required",
         },
       })) as PublicKeyCredential;

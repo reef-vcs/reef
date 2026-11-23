@@ -1,18 +1,15 @@
 //! What the web listener accepts (R2.18, ADR 0047): [`WebGateLayer`] sits
 //! outside `tonic_web::GrpcWebLayer` and checks every request, in order:
 //!
-//! 1. `Host` (or HTTP/2's `:authority`) is exactly `localhost:<port>`, or
-//!    `421`: DNS rebinding, and one origin (a `127.0.0.1` or `[::1]` host
-//!    too is `421`).
-//!    Then a service worker's script (`Service-Worker: script`), which Reef
-//!    never registers, is answered with one that unregisters itself, and
-//!    every session ends (#346): a process that held the port while the
-//!    daemon was down left it, and it may have read a session's token.
+//! 1. `Host` (or HTTP/2's `:authority`) is exactly this run's
+//!    `<16 hex>.reef.localhost:<port>`, or `421`: DNS rebinding, and one
+//!    origin (`localhost`, `reef.localhost`, `127.0.0.1` and an earlier
+//!    run's name too are `421`). An API call at an earlier run's name is
+//!    `WEB_SESSION_INVALID`, whatever token it has: a tab of that run then
+//!    says that its session ended (#346).
 //! 2. No `Upgrade` (`400`) and no `OPTIONS` (`405`): no WebSocket, and
 //!    every cross-origin preflight fails. No response carries CORS headers.
-//! 3. `GET` and `HEAD` on any path but an API path serve the assets, except
-//!    that `GET /reset/<id>` clears the address's data in the browser, once
-//!    for each launch file (`clear`).
+//! 3. `GET` and `HEAD` on any path but an API path serve the assets.
 //! 4. An API path (`/reef.<package>.<Service>/<Rpc>`) is `POST` (`405`);
 //!    any other path is `404` on `POST` and `405` otherwise.
 //! 5. `Origin`, if sent, is the listener's own, and `Sec-Fetch-Site`, if
@@ -43,9 +40,8 @@ use tonic::codegen::http::{self, HeaderValue, Method, StatusCode, header};
 use tower::{Layer, Service};
 
 use super::WebError;
-use super::assets::Assets;
-use super::body::{Full, Held};
-use super::clear::{self, Resets};
+use super::assets;
+use super::body::Held;
 use super::session::Sessions;
 use crate::error::status;
 
@@ -53,7 +49,7 @@ use crate::error::status;
 pub(crate) const SECURITY_HEADERS: &[(&str, &str)] = &[
     (
         "content-security-policy",
-        "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; manifest-src 'self'; worker-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
     ),
     ("x-content-type-options", "nosniff"),
     ("referrer-policy", "no-referrer"),
@@ -72,18 +68,12 @@ pub(crate) const GRPC_WEB: [&str; 2] = ["application/grpc-web", "application/grp
 /// What the gate checks against.
 #[derive(Debug)]
 pub(crate) struct Gate {
-    /// The bound authority, `localhost:<port>`.
+    /// The bound authority, `<16 hex>.reef.localhost:<port>`.
     pub(crate) authority: String,
     /// `http://<authority>`.
     pub(crate) origin: String,
     pub(crate) sessions: Arc<Sessions>,
-    pub(crate) assets: Arc<Assets>,
-    pub(crate) resets: Arc<Resets>,
 }
-
-/// A service worker that removes itself: what the gate answers for one's
-/// script.
-const UNREGISTER: &str = "self.addEventListener(\"install\", () => self.skipWaiting());\nself.addEventListener(\"activate\", (event) => event.waitUntil(self.registration.unregister()));\n";
 
 /// The gate as a tower layer; see the module documentation.
 #[derive(Clone, Debug)]
@@ -148,37 +138,29 @@ pub(crate) fn bearer(headers: &http::HeaderMap) -> Option<&str> {
 }
 
 impl Gate {
-    /// A browser is looking for a service worker of this origin: the worker
-    /// that unregisters itself, and every session ended.
-    fn evict_worker(&self) -> http::Response<Body> {
-        let (ended, launch_files) = self.sessions.end_all();
-        for path in launch_files {
-            super::launch::remove(&path);
-        }
-        // At most one line for each session minted: any local process can
-        // send the header.
-        if ended > 0 {
-            tracing::warn!(
-                session_count = ended,
-                "a browser holds a service worker Reef did not register at the web UI's address, from another process that held its port; removing it and ending every web UI session: clear the browser's data for that address and run `reef ui` again"
-            );
-        }
-        let mut response = http::Response::new(Full::body(UNREGISTER));
-        response.headers_mut().insert(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static("text/javascript; charset=utf-8"),
-        );
-        response
+    /// Whether `host` is a run's name at this port, though not this run's.
+    fn is_another_run(&self, host: &str) -> bool {
+        let under = |host: &str| host.split_once('.').map(|(_, under)| under.to_owned());
+        under(host) == under(&self.authority)
+            && host.find('.') == self.authority.find('.')
+            && host
+                .bytes()
+                .take_while(|b| *b != b'.')
+                .all(|b| b.is_ascii_hexdigit())
     }
 
     /// Steps 1 to 6: a refusal, the assets' answer, or `None` for a request
     /// that goes on to the session check.
     fn screen(&self, request: &http::Request<Body>) -> Option<http::Response<Body>> {
         if authority(request) != Some(self.authority.as_str()) {
-            return Some(plain(StatusCode::MISDIRECTED_REQUEST));
-        }
-        if request.headers().contains_key("service-worker") {
-            return Some(self.evict_worker());
+            let earlier = request.method() == Method::POST
+                && is_api_path(request.uri().path())
+                && authority(request).is_some_and(|host| self.is_another_run(host));
+            return Some(if earlier {
+                refusal(WebError::SessionInvalid)
+            } else {
+                plain(StatusCode::MISDIRECTED_REQUEST)
+            });
         }
         let method = request.method();
         if request.headers().contains_key(header::UPGRADE) {
@@ -189,14 +171,9 @@ impl Gate {
         }
         let path = request.uri().path();
         let api = is_api_path(path);
-        if method == Method::GET
-            && let Some(id) = path.strip_prefix(clear::PATH)
-        {
-            return Some(self.resets.answer(id));
-        }
         if !api {
             return Some(if method == Method::GET || method == Method::HEAD {
-                self.assets.serve(path, method == Method::HEAD)
+                assets::serve(path, method == Method::HEAD)
             } else if method == Method::POST {
                 plain(StatusCode::NOT_FOUND)
             } else {
@@ -227,14 +204,12 @@ impl Gate {
     }
 }
 
-/// Adds [`SECURITY_HEADERS`] and `Cache-Control: no-store`, each unless the
+/// Adds [`SECURITY_HEADERS`], and `Cache-Control: no-store` unless the
 /// response set its own.
 pub(crate) fn secure(mut response: http::Response<Body>) -> http::Response<Body> {
     let headers = response.headers_mut();
     for (name, value) in SECURITY_HEADERS {
-        headers
-            .entry(*name)
-            .or_insert(HeaderValue::from_static(value));
+        headers.insert(*name, HeaderValue::from_static(value));
     }
     headers
         .entry(header::CACHE_CONTROL)

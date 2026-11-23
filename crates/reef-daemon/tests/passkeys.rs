@@ -19,7 +19,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use hyper_util::client::legacy::Client as HttpClient;
-use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
 use reef_api::v1::evidence_service_client::EvidenceServiceClient;
 use reef_api::v1::identity_service_client::IdentityServiceClient;
@@ -37,6 +36,7 @@ use reef_daemon::client::remote::{RemoteTarget, RemoteUrl, Token};
 use reef_daemon::client::{Client, ClientError};
 use reef_daemon::config::Config;
 use reef_daemon::testing::{SyntheticRepo, TestDaemon, no_automatic_snapshots, test_settings};
+use reef_daemon::testing::{WebConnector, web_connector};
 use reef_evidence::session::{
     Actor, Authority, IssuerKind, Presence, ProofFor, check_certificate, sign_proof,
 };
@@ -53,7 +53,7 @@ use tonic::{Code, Request, Status};
 use tonic_web::{GrpcWebClientLayer, GrpcWebClientService};
 use tower::Layer as _;
 
-const RP: &str = "localhost";
+const RP: &str = "reef.localhost";
 
 fn remote_on(config: &mut Config) {
     config.file.remote.enabled = true;
@@ -93,7 +93,7 @@ impl Interceptor for Bearer {
 }
 
 type Web = InterceptedService<
-    GrpcWebClientService<HttpClient<HttpConnector, tonic_web::GrpcWebCall<Body>>>,
+    GrpcWebClientService<HttpClient<WebConnector, tonic_web::GrpcWebCall<Body>>>,
     Bearer,
 >;
 
@@ -101,7 +101,7 @@ type Web = InterceptedService<
 struct Ui {
     session: CreateWebSessionResponse,
     token: String,
-    /// `http://localhost:<port>`, the page's origin.
+    /// `http://<run>.reef.localhost:<port>`, the page's origin.
     origin: String,
 }
 
@@ -122,8 +122,14 @@ async fn ui(client: &Client) -> Ui {
 }
 
 impl Ui {
+    /// `http://reef.localhost:<port>`, what a policy pins for it.
+    fn site(&self) -> String {
+        let (_, under) = self.origin.split_once('.').unwrap();
+        format!("http://{under}")
+    }
+
     fn service(&self) -> (Web, Uri) {
-        let client = HttpClient::builder(TokioExecutor::new()).build_http();
+        let client = HttpClient::builder(TokioExecutor::new()).build(web_connector());
         let service = GrpcWebClientLayer::new().layer(client);
         (
             InterceptedService::new(service, Bearer(self.token.clone())),
@@ -453,7 +459,7 @@ async fn registration_rules() {
     // The first passkey needs nothing but a web UI session.
     let mut first = Authenticator::new(Algorithm::EdDsa);
     let (started, request) = registration(&page, &mut first, "alice", &page.origin, None).await;
-    assert_eq!(started.rp_id, "localhost");
+    assert_eq!(started.rp_id, RP);
     assert_eq!(started.user_name, "Reef: alice");
     assert_eq!(started.identity_id, alice.id);
     assert_eq!(started.algorithms, [-8, -7, -257]);
@@ -526,13 +532,13 @@ async fn registration_rules() {
     // Left for its own session, which uses it.
     page.identities().register_passkey(request).await.unwrap();
 
-    // Another origin, the RP ID's but another port: a dev server's.
+    // Another origin of the RP ID, at another port: a look-alike's.
     let mut fourth = Authenticator::new(Algorithm::EdDsa);
     let (_, request) = registration(
         &page,
         &mut fourth,
         "alice",
-        "http://localhost:1",
+        "http://0123456789abcdef.reef.localhost:1",
         Some(&mut first),
     )
     .await;
@@ -1435,7 +1441,7 @@ async fn landing_counts_only_pinned_passkeys() {
         "root()",
         &[(
             "reef-policy.toml",
-            &verified_policy(&pinned_key.fingerprint, &page.origin),
+            &verified_policy(&pinned_key.fingerprint, &page.site()),
         )],
     )
     .await;
@@ -1996,7 +2002,7 @@ async fn web_evidence_records_no_page_agent() {
     let change = commit_on(client, &repo.id, "root()", &[("a.txt", "a\n")]).await;
     let (key, statement, _) =
         signed_off(client, &page, &repo.id, "alice", &change, &mut passkey).await;
-    let http = HttpClient::builder(TokioExecutor::new()).build_http();
+    let http = HttpClient::builder(TokioExecutor::new()).build(web_connector());
     let service = InterceptedService::new(
         GrpcWebClientLayer::new().layer(http),
         AgentBearer(page.token.clone()),
@@ -2259,7 +2265,7 @@ async fn a_web_landing_needs_a_touch() {
         "root()",
         &[(
             "reef-policy.toml",
-            &pinning(&registered.fingerprint, &page.origin),
+            &pinning(&registered.fingerprint, &page.site()),
         )],
     )
     .await;
@@ -2425,7 +2431,7 @@ async fn a_passkey_a_web_session_registers_lands_nothing() {
         client,
         &repo.id,
         "root()",
-        &[("reef-policy.toml", &pinning(&"ab".repeat(32), &page.origin))],
+        &[("reef-policy.toml", &pinning(&"ab".repeat(32), &page.site()))],
     )
     .await;
     set_main(&repo, &pinned.commit_id).await;
@@ -2491,18 +2497,18 @@ async fn a_passkey_makes_the_daemon_hold_its_fixed_port() {
     let port = free_port();
     let (daemon, _repo) =
         fixture_with(|config| config.file.ui.listen = format!("127.0.0.1:{port}")).await;
-    let origin = format!("http://localhost:{port}");
+    let site = format!("http://reef.localhost:{port}");
     let status = web_ui_status(&daemon.client).await;
     assert_eq!(
-        (status.state(), status.origin.as_str(), status.fixed),
-        (Unbound, origin.as_str(), true)
+        (status.state(), status.site.as_str()),
+        (Unbound, site.as_str())
     );
     let daemon = daemon.restart().await;
     create_identity(&daemon.client, "alice").await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(!daemon.handle.state().web.is_bound(), "no passkey, no port");
     let page = ui(&daemon.client).await;
-    assert_eq!(page.origin, origin);
+    assert_eq!(page.site(), site);
     let mut passkey = Authenticator::new(Algorithm::EdDsa);
     register(&page, &mut passkey, "alice", None).await.unwrap();
 
@@ -2519,11 +2525,8 @@ async fn a_passkey_makes_the_daemon_hold_its_fixed_port() {
     };
     let daemon = daemon.restart().await;
     let status = held(&daemon, Bound).await;
-    assert_eq!(
-        (status.origin, status.problem),
-        (origin.clone(), String::new())
-    );
-    assert_eq!(ui(&daemon.client).await.origin, origin);
+    assert_eq!((status.site, status.problem), (site.clone(), String::new()));
+    assert_eq!(ui(&daemon.client).await.origin, status.origin);
 
     // Another process takes the port while the daemon is down.
     let stopped = daemon.stop_keeping().await;
@@ -2532,7 +2535,7 @@ async fn a_passkey_makes_the_daemon_hold_its_fixed_port() {
         .unwrap();
     let daemon = stopped.start().await;
     let status = held(&daemon, Unavailable).await;
-    assert_eq!(status.origin, origin);
+    assert_eq!(status.site, site);
     assert!(status.problem.contains(&port.to_string()), "{status:?}");
     let refused = daemon
         .client
@@ -2546,11 +2549,8 @@ async fn a_passkey_makes_the_daemon_hold_its_fixed_port() {
     // Once it lets go, the daemon takes it with no `reef ui`.
     drop(squatter);
     let status = held(&daemon, Bound).await;
-    assert_eq!(
-        (status.origin, status.problem),
-        (origin.clone(), String::new())
-    );
-    assert_eq!(ui(&daemon.client).await.origin, origin);
+    assert_eq!((status.site, status.problem), (site.clone(), String::new()));
+    assert_eq!(ui(&daemon.client).await.origin, status.origin);
 
     // A removed passkey is no reason to hold it.
     daemon
@@ -2580,7 +2580,8 @@ async fn a_passkey_makes_the_daemon_hold_its_fixed_port() {
 async fn a_ceremony_on_another_port_counts_for_nothing() {
     use reef_daemon::identity::approvals::Resolution;
     use reef_daemon::identity::issue::Channel;
-    const ELSEWHERE: &str = "http://localhost:49953";
+    const ELSEWHERE: &str = "http://0123456789abcdef.reef.localhost:49953";
+    const ELSEWHERE_SITE: &str = "http://reef.localhost:49953";
     let (daemon, repo) = fixture().await;
     let client = &daemon.client;
     create_identity(client, "alice").await;
@@ -2593,7 +2594,7 @@ async fn a_ceremony_on_another_port_counts_for_nothing() {
         "root()",
         &[(
             "reef-policy.toml",
-            &verified_policy(&registered.fingerprint, &page.origin),
+            &verified_policy(&registered.fingerprint, &page.site()),
         )],
     )
     .await;
@@ -2686,7 +2687,7 @@ async fn a_ceremony_on_another_port_counts_for_nothing() {
     let refused = land_from_page(&page, &repo.id, &change).await.unwrap_err();
     assert_untouched(&refused, &change, "pinned_origin");
     assert_eq!(refusal(&refused).2["origin"], ELSEWHERE);
-    for origin in [ELSEWHERE, page.origin.as_str()] {
+    for origin in [ELSEWHERE, page.site().as_str()] {
         assert!(refused.message().contains(origin), "{}", refused.message());
     }
     let land = async || {
@@ -2707,10 +2708,10 @@ async fn a_ceremony_on_another_port_counts_for_nothing() {
     assert_eq!(blocked.reason(), LandingReason::Policy, "{blocked:#?}");
 
     // The person pins that origin too.
-    let policy = verified_policy(&registered.fingerprint, &page.origin).replace(
+    let policy = verified_policy(&registered.fingerprint, &page.site()).replace(
         "alice = [",
         &format!(
-            "alice = [{{ fingerprint = \"{}\", origin = \"{ELSEWHERE}\" }}, ",
+            "alice = [{{ fingerprint = \"{}\", origin = \"{ELSEWHERE_SITE}\" }}, ",
             registered.fingerprint
         ),
     );
@@ -2750,7 +2751,7 @@ async fn a_touch_counts_only_while_its_passkey_is_live() {
             "root()",
             &[(
                 "reef-policy.toml",
-                &pinning(&registered.fingerprint, &page.origin),
+                &pinning(&registered.fingerprint, &page.site()),
             )],
         )
         .await;
@@ -2814,7 +2815,7 @@ async fn a_touch_by_a_revoked_key_does_not_count() {
         "root()",
         &[(
             "reef-policy.toml",
-            &pinning(&registered.fingerprint, &page.origin),
+            &pinning(&registered.fingerprint, &page.site()),
         )],
     )
     .await;
@@ -2904,7 +2905,7 @@ async fn a_reset_passkeys_public_key_never_comes_back() {
         "root()",
         &[(
             "reef-policy.toml",
-            &pinning(&registered.fingerprint, &page.origin),
+            &pinning(&registered.fingerprint, &page.site()),
         )],
     )
     .await;
@@ -2950,7 +2951,7 @@ async fn a_stolen_pinned_key_lands_nothing_after_a_reset() {
         "root()",
         &[(
             "reef-policy.toml",
-            &pinning(&registered.fingerprint, &page.origin),
+            &pinning(&registered.fingerprint, &page.site()),
         )],
     )
     .await;
@@ -3038,7 +3039,7 @@ async fn a_change_that_pins_its_own_passkey_lands_nothing_from_the_web() {
         &[
             (
                 "reef-policy.toml",
-                &pinning(&registered.fingerprint, &page.origin),
+                &pinning(&registered.fingerprint, &page.site()),
             ),
             ("evil.txt", "x\n"),
         ],
@@ -3064,7 +3065,7 @@ async fn a_policy_that_does_not_load_pins_nothing() {
     let registered = register(&page, &mut passkey, "alice", None).await.unwrap();
     let broken = format!(
         "{}\n[[[ not toml",
-        pinning(&registered.fingerprint, &page.origin)
+        pinning(&registered.fingerprint, &page.site())
     );
     let main = commit_on(client, &repo.id, "root()", &[("reef-policy.toml", &broken)]).await;
     set_main(&repo, &main.commit_id).await;

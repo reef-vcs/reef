@@ -112,7 +112,7 @@ describe("the Passkeys page", () => {
     // The fake authenticator holds the first passkey only, pinned by the
     // fingerprint of the key its touch verified with.
     const fingerprint = hex(await sha256(held.row.publicKey));
-    const snippet = `[passkeys]\narsood = [\n  { fingerprint = "${fingerprint}", origin = "${window.location.origin}" },\n]\n`;
+    const snippet = `[passkeys]\narsood = [\n  { fingerprint = "${fingerprint}", origin = "${daemon.site}" },\n]\n`;
     expect(card("arsood").querySelector("pre")?.textContent).toBe(snippet);
     expect(within(card("arsood")).getByText(/^Confirmed by a touch:/).textContent).toContain(
       `“MacBook Touch ID” (${fingerprint.slice(0, 12)})`,
@@ -129,7 +129,7 @@ describe("the Passkeys page", () => {
   // #346: a pin names the origin, which a kernel-chosen port ends.
   it("gives no line to pin when the daemon's port changes at every start", async () => {
     const daemon = new IdentityDaemon();
-    daemon.fixedPort = false;
+    daemon.site = "";
     const held = await heldKey();
     daemon.passkeys = [{ ...passkey(daemon.arsood, "MacBook Touch ID", 1), ...held.row }];
     installAuthenticator().key = held.key;
@@ -234,7 +234,7 @@ describe("the Passkeys page", () => {
 describe("policySnippet", () => {
   it("quotes a name TOML cannot leave bare", () => {
     const alice = person("alice.smith");
-    const origin = "http://localhost:17333";
+    const origin = "http://reef.localhost:17333";
     expect(policySnippet({ identity: alice, passkeys: [passkey(alice, "a", 3)] }, origin)).toBe(
       `[passkeys]\n"alice.smith" = [\n  { fingerprint = "${"3".repeat(64)}", origin = "${origin}" },\n]\n`,
     );

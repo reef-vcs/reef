@@ -667,7 +667,9 @@ fn changes_to_the_policy_files_need_the_owners() {
 }
 
 const PASSKEY: &str = "3c9e0d5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f";
-const ORIGIN: &str = "http://localhost:17333";
+/// What a pin names, and where a touch of it runs.
+const SITE: &str = "http://reef.localhost:17333";
+const ORIGIN: &str = "http://0123456789abcdef.reef.localhost:17333";
 const BOB_ID: &str = "idn_0000000000000002";
 
 /// `PASSKEY` pinned for `who` at `origin`, as a `[passkeys]` line.
@@ -742,19 +744,19 @@ fn verified_presence_counts_only_with_a_pinned_passkey() {
     use Status::{Satisfied, Unsatisfied};
     let alice = ("alice", ALICE_ID);
     let bob = ("bob", BOB_ID);
-    let by_name = verified_policy(&pin("alice", ORIGIN));
+    let by_name = verified_policy(&pin("alice", SITE));
     assert_eq!(by_name.warnings(), []);
     assert_eq!(
         presence_statuses(&by_name, alice, "user_verified", PASSKEY, ORIGIN),
         [Satisfied; 3]
     );
     // Pinned by id, for an identity a group lists by name, and the reverse.
-    let by_id = verified_policy(&pin(ALICE_ID, ORIGIN));
+    let by_id = verified_policy(&pin(ALICE_ID, SITE));
     assert_eq!(
         presence_statuses(&by_id, alice, "user_verified", PASSKEY, ORIGIN),
         [Satisfied; 3]
     );
-    let bob_by_name = verified_policy(&pin("bob", ORIGIN));
+    let bob_by_name = verified_policy(&pin("bob", SITE));
     assert_eq!(
         presence_statuses(&bob_by_name, bob, "user_verified", PASSKEY, ORIGIN),
         [Satisfied; 3]
@@ -809,13 +811,13 @@ fn verified_presence_counts_only_with_a_pinned_passkey() {
 fn verified_presence_counts_only_at_a_pinned_origin() {
     use Status::{Satisfied, Unsatisfied};
     let alice = ("alice", ALICE_ID);
-    let policy = verified_policy(&pin("alice", ORIGIN));
+    let policy = verified_policy(&pin("alice", SITE));
     for origin in [
-        "http://localhost:17334",
-        "http://localhost",
-        "http://localhost:17333/",
-        "https://localhost:17333",
-        "HTTP://LOCALHOST:17333",
+        "http://0123456789abcdef.reef.localhost:17334",
+        "http://reef.localhost:17333",
+        "http://localhost:17333",
+        "https://0123456789abcdef.reef.localhost:17333",
+        "http://0123456789abcdef.reef.localhost:17333/",
         "",
     ] {
         assert_eq!(
@@ -826,11 +828,7 @@ fn verified_presence_counts_only_at_a_pinned_origin() {
     }
     // One passkey pinned at two origins, by name and by id.
     let https = "https://reef.example:8443";
-    let both = verified_policy(&format!(
-        "{}\n{}",
-        pin("alice", ORIGIN),
-        pin(ALICE_ID, https)
-    ));
+    let both = verified_policy(&format!("{}\n{}", pin("alice", SITE), pin(ALICE_ID, https)));
     for origin in [ORIGIN, https] {
         assert_eq!(
             presence_statuses(&both, alice, "user_verified", PASSKEY, origin),
@@ -842,7 +840,7 @@ fn verified_presence_counts_only_at_a_pinned_origin() {
     // passkey's origin does not lend itself to this one.
     let other = "0".repeat(64);
     let crossed = verified_policy(&format!(
-        "alice = [{{ fingerprint = \"{PASSKEY}\", origin = \"{ORIGIN}\" }}, {{ fingerprint = \"{other}\", origin = \"{https}\" }}]"
+        "alice = [{{ fingerprint = \"{PASSKEY}\", origin = \"{SITE}\" }}, {{ fingerprint = \"{other}\", origin = \"{https}\" }}]"
     ));
     assert_eq!(
         presence_statuses(&crossed, alice, "user_verified", PASSKEY, https),
@@ -861,7 +859,11 @@ fn verified_presence_counts_only_at_a_pinned_origin() {
         &["a"],
         vec![
             signer("s1", PASSKEY, ORIGIN),
-            signer("s2", PASSKEY, "http://localhost:49953"),
+            signer(
+                "s2",
+                PASSKEY,
+                "http://0123456789abcdef.reef.localhost:49953",
+            ),
             signer("s3", &other, ORIGIN),
         ],
     ));
@@ -874,7 +876,11 @@ fn verified_presence_counts_only_at_a_pinned_origin() {
         said,
         [
             (ORIGIN, true, ""),
-            ("http://localhost:49953", false, "origin"),
+            (
+                "http://0123456789abcdef.reef.localhost:49953",
+                false,
+                "origin"
+            ),
             (ORIGIN, false, "passkey"),
         ]
     );
@@ -905,10 +911,7 @@ fn cel_reads_a_keys_passkey() {
 fn cel_reads_effective_presence() {
     let rule_text = "[[rule]]\nname = \"verified\"\nexpr = 'evidence.exists(e, e.key.presence == \"user_verified\")'\n";
     let unpinned = policy(rule_text);
-    let pinned = policy(&format!(
-        "{rule_text}[passkeys]\n{}\n",
-        pin("alice", ORIGIN)
-    ));
+    let pinned = policy(&format!("{rule_text}[passkeys]\n{}\n", pin("alice", SITE)));
     let mut e = signoff("s1", "alice", ALICE_ID, 1);
     e.key.presence = "user_verified".to_owned();
     e.key.passkey = PASSKEY.to_owned();

@@ -13,7 +13,6 @@
 use std::process::{Output, Stdio};
 
 use hyper_util::client::legacy::Client as HttpClient;
-use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
 use reef_api::v1::identity_service_client::IdentityServiceClient;
 use reef_api::v1::{
@@ -23,6 +22,7 @@ use reef_api::v1::{
 };
 use reef_daemon::client::Client;
 use reef_daemon::testing::{SyntheticRepo, TestDaemon};
+use reef_daemon::testing::{WebConnector, web_connector};
 use reef_evidence::webauthn::Algorithm;
 use reef_evidence::webauthn::testing::Authenticator;
 use reef_testing::synth::Preset;
@@ -38,7 +38,7 @@ use tower::Layer as _;
 
 mod common;
 
-const RP: &str = "localhost";
+const RP: &str = "reef.localhost";
 
 /// Adds `authorization: Bearer <token>`.
 #[derive(Clone)]
@@ -55,7 +55,7 @@ impl Interceptor for Bearer {
 }
 
 type Web = InterceptedService<
-    GrpcWebClientService<HttpClient<HttpConnector, tonic_web::GrpcWebCall<Body>>>,
+    GrpcWebClientService<HttpClient<WebConnector, tonic_web::GrpcWebCall<Body>>>,
     Bearer,
 >;
 
@@ -63,7 +63,7 @@ type Web = InterceptedService<
 struct Browser {
     url: Uri,
     token: String,
-    /// `http://localhost:<port>`.
+    /// `http://<run>.reef.localhost:<port>`.
     origin: String,
 }
 
@@ -71,7 +71,6 @@ impl Browser {
     /// A browser holding the session in `session_url`.
     fn at(session_url: &str) -> Browser {
         let (url, token) = session_url.split_once("#session=").unwrap();
-        let (url, _) = url.split_once("?launch=").unwrap_or((url, ""));
         let base = url
             .split_once("/approve/")
             .map_or(url, |(base, _)| base)
@@ -94,7 +93,7 @@ impl Browser {
     }
 
     fn identities(&self) -> IdentityServiceClient<Web> {
-        let client = HttpClient::builder(TokioExecutor::new()).build_http();
+        let client = HttpClient::builder(TokioExecutor::new()).build(web_connector());
         let service = InterceptedService::new(
             GrpcWebClientLayer::new().layer(client),
             Bearer(self.token.clone()),
@@ -292,9 +291,9 @@ fn approval_id(url: &str) -> &str {
     url.split_once("/approve/")
         .unwrap()
         .1
-        .split(['?', '#'])
-        .next()
+        .split_once('#')
         .unwrap()
+        .0
 }
 
 // The brief's reef-vcs test: a verified sign-off approved through the web
@@ -310,7 +309,7 @@ async fn verified_sign_offs() {
     let change = commit(client, &repo.id).await;
 
     let (url, args, child) = sign_off(&daemon, &repo.id, &change, &[]).await;
-    assert!(url.contains("http://localhost:"), "{url}");
+    assert!(url.contains(".reef.localhost:"), "{url}");
     Browser::at(&url)
         .resolve(approval_id(&url), Some(&mut passkey))
         .await;

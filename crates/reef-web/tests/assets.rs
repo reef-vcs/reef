@@ -48,17 +48,16 @@ fn placeholder_is_sound() {
     assert!(!page.immutable);
     let html = text(page.bytes);
     assert!(html.contains(PLACEHOLDER));
-    assert!(html.contains("./assets/placeholder-0.css"));
+    assert!(html.contains("/assets/placeholder-0.css"));
     assert!(!html.contains("<script"));
     let css = get("assets/placeholder-0.css").expect("the placeholder's stylesheet");
     assert!(css.immutable);
     assert!(css.content_type.starts_with("text/css"));
 }
 
-/// `src` or `href` values in `html` that point at `./assets/`: relative, so
-/// the daemon can serve them under its run's own prefix (#346).
+/// `src` or `href` values in `html` that point at `/assets/`.
 fn linked(html: &str, attribute: &str) -> Vec<String> {
-    let needle = format!("{attribute}=\"./assets/");
+    let needle = format!("{attribute}=\"/assets/");
     html.match_indices(&needle)
         .map(|(at, _)| {
             let start = at + needle.len() - "assets/".len();

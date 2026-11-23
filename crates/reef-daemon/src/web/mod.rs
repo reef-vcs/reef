@@ -2,17 +2,21 @@
 //!
 //! The first `CreateWebSession` binds `127.0.0.1` and `[::1]` on one port
 //! (`[ui] listen`'s) and serves the embedded app and the read side of the
-//! API over gRPC-web as `http://localhost:<port>`, behind
+//! API over gRPC-web as `http://<run>.reef.localhost:<port>`, behind
 //! `gate::WebGateLayer`. A daemon whose user never runs `reef ui` opens no
-//! TCP port. Once bound, the listener stays until the daemon stops: a tab's
-//! origin is its port.
+//! TCP port. Once bound, the listener stays until the daemon stops.
 //!
-//! A policy's `[passkeys]` pins that origin (#346, ADR 0094), so the port
-//! does not change between runs of a daemon in the default state directory,
-//! and once a passkey is registered the daemon holds it from its start
-//! (`WebUi::hold`): no other process serves the pinned origin while the
-//! daemon runs. A port another process holds is an error and never
-//! replaced by another, which would teach the person that it varies.
+//! `<run>` is a new random name at every start, which every browser resolves
+//! to loopback. A process that held the port while the daemon was down may
+//! have left service workers, caches and storage in the browser, all of them
+//! at names of its own choosing, and nothing at this run's (#346, ADR 0094).
+//!
+//! A policy's `[passkeys]` pins `http://reef.localhost:<port>`, which covers
+//! every run's name, so the port does not change between runs of a daemon in
+//! the default state directory, and once a passkey is registered the daemon
+//! holds it from its start (`WebUi::hold`). A port another process holds is
+//! an error and never replaced by another, which would teach the person that
+//! it varies.
 //!
 //! Sessions (`session`) are bearer tokens minted by `CreateWebSession`
 //! over the socket, kept as digests, never persisted, so a daemon restart
@@ -25,7 +29,6 @@
 
 pub(crate) mod assets;
 pub(crate) mod body;
-pub(crate) mod clear;
 pub(crate) mod gate;
 mod launch;
 pub(crate) mod rules;
@@ -54,6 +57,7 @@ use tonic::transport::server::{Connected, TcpConnectInfo};
 use crate::daemon::{AppState, SHUTDOWN_GRACE};
 use crate::error::{Advice, Advise};
 use crate::limits::Accepting;
+use reef_policy::origin::LOCAL_HOST;
 use session::Sessions;
 
 /// The web listener's limits. Not configuration-file keys: tests shrink
@@ -170,7 +174,7 @@ impl Advise for WebError {
                 "This reef-daemon was built without the web UI. Install a release (https://github.com/reef-vcs/reef/releases, `install.sh`, Homebrew), or run `just web-build` before `cargo build` in a checkout, then restart the daemon.",
             )),
             Self::Unavailable { address, .. } => Some(Advice::hint(format!(
-                "Another process holds `{address}`: `lsof -nP -iTCP:{} -sTCP:LISTEN` names it. If it is not a daemon of yours, do not touch a passkey on any page at that address. Stop it, run `reef ui` again and, since it may have left a page of its own in your browser, clear the browser's data for that address. Or move Reef: set another port in `[ui] listen`, restart the daemon, and pin the new address in `[passkeys]`.",
+                "Another process holds `{address}`: `lsof -nP -iTCP:{} -sTCP:LISTEN` names it. If it is not a daemon of yours, do not touch a passkey on any page at that address. Stop it and run `reef ui` again, or move Reef: set another port in `[ui] listen`, restart the daemon, and pin the new address in `[passkeys]`.",
                 address.rsplit(':').next().unwrap_or_default()
             ))),
             Self::SessionInvalid => Some(Advice::run(
@@ -225,13 +229,13 @@ pub struct Caller {
 pub struct WebUi {
     bound: tokio::sync::Mutex<Option<Bound>>,
     sessions: Arc<Sessions>,
-    /// `http://localhost:<port>`, once bound: the one origin a passkey
-    /// ceremony is accepted from.
+    /// This run's name: `<16 hex>.reef.localhost`.
+    host: String,
+    /// `http://<host>:<port>`, once bound: the one origin a passkey ceremony
+    /// is accepted from.
     origin: OnceLock<String>,
     /// Why the last bind failed, until one succeeds.
     problem: Mutex<Option<String>>,
-    assets: Arc<assets::Assets>,
-    resets: Arc<clear::Resets>,
 }
 
 /// How long [`WebUi::hold`] waits after its first failed bind, doubled after
@@ -246,16 +250,10 @@ impl WebUi {
         WebUi {
             bound: tokio::sync::Mutex::new(None),
             sessions: Arc::new(Sessions::new(limits)),
+            host: format!("{:016x}.{LOCAL_HOST}", rand::rng().random::<u64>()),
             origin: OnceLock::new(),
             problem: Mutex::new(None),
-            assets: Arc::new(assets::Assets::new()),
-            resets: Arc::default(),
         }
-    }
-
-    /// This run's assets.
-    pub(crate) fn assets(&self) -> Arc<assets::Assets> {
-        Arc::clone(&self.assets)
     }
 
     /// The bound listener's URL, binding it if needed.
@@ -332,18 +330,21 @@ impl WebUi {
         };
         let origin = match web.origin() {
             Some(origin) => origin.to_owned(),
-            None if port != 0 => format!("http://localhost:{port}"),
+            None if port != 0 => format!("http://{}:{port}", web.host),
             None => String::new(),
         };
         WebUiStatus {
             state: listener.into(),
             origin,
-            fixed: port != 0,
+            site: match port {
+                0 => String::new(),
+                _ => format!("http://{LOCAL_HOST}:{port}"),
+            },
             problem: problem.unwrap_or_default(),
         }
     }
 
-    /// `http://localhost:<port>` once the listener is bound.
+    /// `http://<run>.reef.localhost:<port>` once the listener is bound.
     pub fn origin(&self) -> Option<&str> {
         self.origin.get().map(String::as_str)
     }
@@ -375,25 +376,11 @@ impl WebUi {
             launch::remove(&path);
         }
         let page = path.strip_prefix('/').unwrap_or_default();
-        // A URL few caches hold: at a port that does not change, another
-        // process that held it may have had the browser cache its own page.
-        // Chromium's cache can be told to ignore the query, so a launch file
-        // has it cleared first (`clear`).
-        let launch = rand::rng().random::<u64>();
-        let session_url = format!("{url}{page}?launch={launch:016x}#session={token}");
+        let session_url = format!("{url}{page}#session={token}");
         let launch_path = if launch_file {
             let dir = launch_dir.clone();
-            let opens = launch::Opens {
-                session_url: session_url.clone(),
-                reset: ui
-                    .listen_port()
-                    .is_ok_and(|port| port != 0)
-                    .then(|| launch::Reset {
-                        origin: url.trim_end_matches('/').to_owned(),
-                        id: web.resets.mint(),
-                    }),
-            };
-            let path = tokio::task::spawn_blocking(move || launch::write(&dir, &opens))
+            let page = session_url.clone();
+            let path = tokio::task::spawn_blocking(move || launch::write(&dir, &page))
                 .await
                 .map_err(io::Error::other)
                 .and_then(|written| written)
@@ -459,15 +446,12 @@ async fn bind(state: &Arc<AppState>) -> Result<Bound, WebError> {
         refuse_answering(port).await?;
     }
     let loopback = Loopback::bind(port).await?;
-    let authority = format!("localhost:{}", loopback.port);
-    let origin = format!("http://{authority}");
-    let _ = state.web.origin.set(origin.clone());
+    let authority = format!("{}:{}", state.web.host, loopback.port);
+    let _ = state.web.origin.set(format!("http://{authority}"));
     let gate = Arc::new(gate::Gate {
-        origin,
+        origin: format!("http://{authority}"),
         authority: authority.clone(),
         sessions: Arc::clone(&state.web.sessions),
-        assets: state.web.assets(),
-        resets: Arc::clone(&state.web.resets),
     });
     let ipv6 = loopback.v6.is_some();
     let accepting: SelectAll<_> = std::iter::once(loopback.v4)
@@ -526,7 +510,7 @@ async fn refuse_answering(port: u16) -> Result<(), WebError> {
 const PORT_ATTEMPTS: usize = 16;
 
 /// The listener's sockets: both loopback families on one port, so that
-/// whichever `localhost` resolves to first is the daemon. A process holding
+/// whichever a name under `localhost` resolves to first is the daemon. A process holding
 /// the other family's address at that port would serve the daemon's exact
 /// origin (S-251). Never `SO_REUSEPORT`: without it, no other user's socket
 /// can bind either address while the daemon listens.

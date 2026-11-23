@@ -283,7 +283,7 @@ pub struct Pin {
 impl Pin {
     /// The pin `value` writes.
     fn parse(value: &toml::Value) -> Result<Self, String> {
-        const FORM: &str = "a pin names a fingerprint and an origin: { fingerprint = \"3c9e…\", origin = \"http://localhost:17333\" }";
+        const FORM: &str = "a pin names a fingerprint and an origin: { fingerprint = \"3c9e…\", origin = \"http://reef.localhost:17333\" }";
         let toml::Value::Table(table) = value else {
             return Err(FORM.to_owned());
         };
@@ -2109,7 +2109,7 @@ presence = "user_verified"
 maintainers = ["alice", "idn_8f3a0c2d91e4b675"]
 
 [passkeys]
-alice = [{ fingerprint = "3c9e0d5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f", origin = "http://localhost:17333" }]
+alice = [{ fingerprint = "3c9e0d5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f", origin = "http://reef.localhost:17333" }]
 idn_8f3a0c2d91e4b675 = [{ fingerprint = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", origin = "https://reef.example" }]
 
 [attestors.ci]
@@ -2217,7 +2217,7 @@ message = "every commit of the change has a signed, bound provenance record"
 
     /// `fingerprint` pinned at the default origin, as a policy writes it.
     fn pin(fingerprint: &str) -> String {
-        format!("{{ fingerprint = \"{fingerprint}\", origin = \"http://localhost:17333\" }}")
+        format!("{{ fingerprint = \"{fingerprint}\", origin = \"http://reef.localhost:17333\" }}")
     }
 
     #[test]
@@ -2251,18 +2251,18 @@ message = "every commit of the change has a signed, bound provenance record"
             "1".to_owned(),
             format!("\"{FINGERPRINT}\""),
             format!("{{ fingerprint = \"{FINGERPRINT}\" }}"),
-            "{ origin = \"http://localhost:17333\" }".to_owned(),
+            "{ origin = \"http://reef.localhost:17333\" }".to_owned(),
             format!("{{ fingerprint = \"{FINGERPRINT}\", origin = 17333 }}"),
         ] {
             let found = one(
                 &with(&format!("[passkeys]\nalice = [{not_a_pin}]\n")),
-                "a pin names a fingerprint and an origin: { fingerprint = \"3c9e…\", origin = \"http://localhost:17333\" }",
+                "a pin names a fingerprint and an origin: { fingerprint = \"3c9e…\", origin = \"http://reef.localhost:17333\" }",
             );
             assert_eq!((found.line, found.column), (5, 10), "{not_a_pin}");
         }
         one(
             &with(&format!(
-                "[passkeys]\nalice = [{{ fingerprint = \"{FINGERPRINT}\", origin = \"http://localhost:17333\", label = \"mac\" }}]\n"
+                "[passkeys]\nalice = [{{ fingerprint = \"{FINGERPRINT}\", origin = \"http://reef.localhost:17333\", label = \"mac\" }}]\n"
             )),
             "unknown key \"label\"",
         );

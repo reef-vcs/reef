@@ -97,8 +97,8 @@ type Method =
   | "getApproval";
 
 export class IdentityDaemon {
-  /** Whether `[ui] listen` names a port. */
-  fixedPort = true;
+  /** What a policy pins; empty when `[ui] listen` names no port. */
+  site = "http://reef.localhost:17333";
   readonly arsood = person("arsood", { isDefault: true });
   identities: Identity[] = [this.arsood, person("ci-bot", { kind: IdentityKind.CI })];
   passkeys: Passkey[] = [];
@@ -187,7 +187,7 @@ export class IdentityDaemon {
   ) {
     const service = router.service.bind(router);
     service(DaemonService, {
-      getDaemonStatus: () => ({ webUi: { fixed: this.fixedPort } }),
+      getDaemonStatus: () => ({ webUi: { site: this.site } }),
     });
     service(IdentityService, {
       getIdentity: () => ({ identity: this.identities.find((i) => i.isDefault) }),

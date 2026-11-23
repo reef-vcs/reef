@@ -1,8 +1,8 @@
 // `/passkeys` (R3.43): each person identity's passkeys, the `[passkeys]`
 // lines that pin them in a repository's policy, and the ceremonies that add
 // and remove them. A passkey verifies a person for a sign-off; a policy
-// counts it only where it pins the fingerprint, and the origin the touch runs
-// at (#346), which is this page's.
+// counts it only where it pins the fingerprint, and the local address the
+// touch runs under (#346), which this page's is.
 import { useEffect, useState, type SubmitEvent } from "react";
 import { client, type Connection } from "../api/connection";
 import { isSessionInvalid, reefError, type ReefError } from "../api/errors";
@@ -41,8 +41,8 @@ interface Person {
 type Load =
   | { kind: "loading" }
   | { kind: "failed"; error: ReefError }
-  /** `fixed`: the daemon's port, so this origin, outlives its run. */
-  | { kind: "loaded"; people: Person[]; fixed: boolean };
+  /** `site`: what a policy pins for this page, empty when its port ends with the run. */
+  | { kind: "loaded"; people: Person[]; site: string };
 
 /** What one identity's last add or remove is doing, or how it ended. */
 type Action =
@@ -81,7 +81,7 @@ function usePeople(connection: Connection, version: number, onSessionInvalid: ()
             passkeys: keys.passkeys.filter((passkey) => passkey.identityId === identity.id),
           }))
           .sort((a, b) => Number(b.identity.isDefault) - Number(a.identity.isDefault));
-        setLoad({ kind: "loaded", people, fixed: daemon.webUi?.fixed ?? false });
+        setLoad({ kind: "loaded", people, site: daemon.webUi?.site ?? "" });
       },
       (thrown: unknown) => {
         if (!current) return;
@@ -104,14 +104,14 @@ function When({ at }: { at: Parameters<typeof dateTime>[0] }) {
 
 function PersonCard({
   person,
-  fixed,
+  site,
   action,
   busy,
   onAdd,
   onRemove,
 }: {
   person: Person;
-  fixed: boolean;
+  site: string;
   action: Action | null;
   busy: boolean;
   onAdd: (label: string) => void;
@@ -130,14 +130,14 @@ function PersonCard({
     const fingerprint = held.get(passkey.id);
     return fingerprint === undefined ? [] : [{ ...passkey, fingerprint }];
   });
-  const snippet = policySnippet({ identity, passkeys: pinned }, window.location.origin);
+  const snippet = policySnippet({ identity, passkeys: pinned }, site);
   async function confirm() {
     setConfirming("busy");
     try {
       const challenge = crypto.getRandomValues(new Uint8Array(32));
       const asserted = await assert({
         challenge,
-        rpId: passkeys[0]?.rpId ?? "localhost",
+        rpId: passkeys[0]?.rpId ?? "reef.localhost",
         credentialIds: passkeys.map((passkey) => passkey.credentialId),
       });
       const used = asserted.credentialId ?? new Uint8Array();
@@ -251,7 +251,7 @@ function PersonCard({
                   .join(", ")}
                 . Pin only a passkey you recognize.
               </p>
-              {fixed ? (
+              {site ? (
                 <>
                   <pre className="snippet">{snippet}</pre>
                   <p>
@@ -386,7 +386,7 @@ export function Passkeys({
           <PersonCard
             key={person.identity.id}
             person={person}
-            fixed={load.fixed}
+            site={load.site}
             action={action?.identity === person.identity.id ? action : null}
             busy={busy}
             onAdd={(label) => {

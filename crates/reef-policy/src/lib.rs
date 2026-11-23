@@ -143,7 +143,7 @@ identities = ["{owner}"]
 # Its touch counts only at that origin, the address `reef ui` opens:
 # [passkeys]
 # {owner} = [
-#   { fingerprint = "<64 hex digits>", origin = "http://localhost:17333" },
+#   { fingerprint = "<64 hex digits>", origin = "http://reef.localhost:17333" },
 # ]
 
 # Whose evidence counts: this machine's executor, signing for {owner}, and never

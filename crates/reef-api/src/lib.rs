@@ -217,7 +217,7 @@ pub const API_DIGESTS: &[&str] = &[
     // #346: `SessionKey.passkey_origin`, `PolicyVerifiedSigner.origin` and
     // `unpinned`, `WebUiStatus`, `WebUiState` and
     // `GetDaemonStatusResponse.web_ui`.
-    "1fc8e95897a65d404e99b53402d8d70b9248f29bb66e43353504013c01605c9d",
+    "c0d877ace4c586d5c55809b87ef9e4b80e2528a421ad77198ceb88353853397f",
 ];
 
 /// blake3 of the v1 descriptors without comments, as of [`API_REVISION`]:

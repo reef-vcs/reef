@@ -538,7 +538,7 @@ impl Advise for IdentityError {
                     "Start the ceremony again from the web UI: a registration challenge is single use, lasts 5 minutes and belongs to the session that started it, and an approval's challenge is its own."
                 }
                 "origin" => {
-                    "Run the ceremony in the web UI that `reef ui` opens, at http://localhost:<its port>; a page at any other origin is refused."
+                    "Run the ceremony in the web UI that `reef ui` opens, at http://<its name>.reef.localhost:<its port>; a page at any other origin is refused."
                 }
                 "flags" => {
                     "The authenticator must verify you (a fingerprint, a face or a PIN), not only see a touch."

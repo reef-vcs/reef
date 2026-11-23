@@ -42,7 +42,7 @@ maintainers = ["alice", "idn_8f3a0c2d91e4b675"]
 
 [passkeys]                                 # pinned passkeys, by identity name or id
 alice = [                                  # each passkey's fingerprint (SHA-256 of its public key) and the origin its touch must run at
-  { fingerprint = "3c9e0d5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f", origin = "http://localhost:17333" },
+  { fingerprint = "3c9e0d5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f", origin = "http://reef.localhost:17333" },
 ]
 
 [attestors.ci]                             # a named set of signers whose evidence counts
@@ -151,21 +151,21 @@ A person's sign-off can carry a passkey's approval: one touch, with a fingerprin
 ```toml
 [passkeys]
 alice = [
-  { fingerprint = "3c9e0d5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f", origin = "http://localhost:17333" },
+  { fingerprint = "3c9e0d5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f", origin = "http://reef.localhost:17333" },
 ]
 idn_41c9e07ab2d35f18 = [
-  { fingerprint = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", origin = "http://localhost:17333" },
-  { fingerprint = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210", origin = "http://localhost:17333" },
+  { fingerprint = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", origin = "http://reef.localhost:17333" },
+  { fingerprint = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210", origin = "http://reef.localhost:17333" },
 ]
 ```
 
 - **Keys** are identities, by name or by id (`idn_` and 16 hex digits); a key matches a key's certificate by either. **Values** are lists of pins, each with both a `fingerprint` (the SHA-256 of the passkey's DER public key, 64 lowercase hex digits) and an `origin`. A malformed fingerprint or origin, a bare fingerprint, an unknown key in a pin, a key that is neither a name nor an id, and an empty list are load errors with their line and column.
-- **The origin** is the web address the touch must run at, as a browser writes it: `http://localhost:<port>`, or `https://<dns name>[:<port>]`. It has no path and no trailing slash, and leaves out the scheme's own port. Reef's web UI is at `http://localhost:17333` unless `[ui] listen` moves it. One passkey used at two origins has two pins. The browser signs the origin into every touch, so a certificate carries it.
-- **The effective presence.** A key's presence is `user_verified` only when its certificate says `user_verified` and one pin under its identity's id or name has both its passkey's fingerprint and the origin its touch ran at, byte for byte. Otherwise, for this policy, it is `none`: a passkey nobody pinned, one pinned for another identity or at another origin, and every `presence: none` key. Every rule that compares presence uses it: attestor sets, `[[signoff]]` and `[owners]`. CEL reads it too: `e.key.presence` is the effective presence, `e.key.passkey` is the fingerprint, and `e.key.passkey_origin` is the origin.
+- **The origin** is where the touch must run: `http://reef.localhost:<port>` for the local web UI, or `https://<dns name>[:<port>]`. It has no path and no trailing slash, and leaves out the scheme's own port. Each run of the daemon serves at a name of its own, such as `http://5f3a9c0e1b7d2468.reef.localhost:17333`, and the local form covers every run's name at its port and nothing else; an `https` one is that address alone. The port is 17333 unless `[ui] listen` moves it. One passkey used at two origins has two pins. The browser signs the origin into every touch, so a certificate carries it.
+- **The effective presence.** A key's presence is `user_verified` only when its certificate says `user_verified` and one pin under its identity's id or name has its passkey's fingerprint and covers the origin its touch ran at. Otherwise, for this policy, it is `none`: a passkey nobody pinned, one pinned for another identity or at another origin, and every `presence: none` key. Every rule that compares presence uses it: attestor sets, `[[signoff]]` and `[owners]`. CEL reads it too: `e.key.presence` is the effective presence, `e.key.passkey` is the fingerprint, and `e.key.passkey_origin` is the origin.
 - **A warning for a requirement no pin can meet.** When `presence = "user_verified"` appears in an attestor set, a `[[signoff]]` or `[owners]` and `[passkeys]` pins none of its identities, the policy loads with a warning ("no passkey pinned for alice: no key of theirs will meet presence user_verified; pin one in [passkeys]"), which `reef policy check` prints, and every evaluation reports among its diagnostics. A pin under an identity's id counts for a requirement that names it by name, and the other way round, since only the daemon maps one to the other.
 - **Pins change only with the owners.** `[passkeys]` is in `reef-policy.toml`, so changing it needs `[owners]`' sign-off (`builtin:owners`). Pins are only as strong as what may change them. With `presence = "user_verified"` in `[owners]`, a change to the policy file needs an owner's pinned passkey, so an agent cannot pin a passkey of its own. Without it, any owner's sign-off changes the pins, an agent's `--actor human` included, and the policy loads with a warning that says so. The change that first adds the pins and the owners' presence is judged by the policy before it, so a person checks that one change, as they check the first policy.
-- **Getting the line.** Anyone who can use the web UI can add a passkey, an agent included, so pin only a passkey you hold. On the web UI's Passkeys page, **Confirm a passkey to pin** asks your authenticator for a touch, and the snippet it shows (**Copy policy snippet**) names only the passkeys it confirmed. This holds only on the daemon's own page: open it yourself, with `reef ui` or `reef identity passkey add` from your own terminal, and check that the address bar says the origin you pin. A page on another `localhost` port can look the same, name the right origin in its snippet and show an agent's fingerprint. Nothing exists before the first pin that could judge it, so compare the fingerprint with `reef identity passkey list`, which prints each identity's line with every live passkey, and check each is yours (S-250).
-- **What the origin stops.** Code that runs as you can read the authority's key and make a certificate from a touch at any address. With the origin pinned, a touch at any other address counts as `none`. It does not stop code that takes the pinned port while the daemon is down, or that controls your browser or replaces the daemon: on one uid nothing does ([threat model](threat-model.md), S-274). If `reef ui` or `reef daemon status` says that another process holds the port, do not touch a passkey on any page at that address, and once it is gone clear your browser's data for the address (S-276).
+- **Getting the line.** Anyone who can use the web UI can add a passkey, an agent included, so pin only a passkey you hold. On the web UI's Passkeys page, **Confirm a passkey to pin** asks your authenticator for a touch, and the snippet it shows (**Copy policy snippet**) names only the passkeys it confirmed. This holds only on the daemon's own page: open it yourself, with `reef ui` or `reef identity passkey add` from your own terminal, and check that the address bar ends in `.reef.localhost` and the port you pin. A page on another port can look the same, name the right origin in its snippet and show an agent's fingerprint. Nothing exists before the first pin that could judge it, so compare the fingerprint with `reef identity passkey list`, which prints each identity's line with every live passkey, and check each is yours (S-250).
+- **What the origin stops.** Code that runs as you can read the authority's key and make a certificate from a touch at any address. With the origin pinned, a touch at any other address counts as `none`. It does not stop code that takes the pinned port while the daemon is down, or that controls your browser or replaces the daemon: on one uid nothing does ([threat model](threat-model.md), S-274). If `reef ui` or `reef daemon status` says that another process holds the port, do not touch a passkey on any page there, and close the pages it opened.
 - **Landing from the web UI needs a pin.** Through the web UI, a landing counts only a sign-off approved by a live passkey the destination's `[passkeys]` pins for its signer, whatever else the policy asks, since the web UI lets a leaked session add an identity's first passkey ([proposals](proposals.md#reviewing-in-the-web-ui)). To land from the web UI, pin your passkey on the destination: add the line, land that change from a terminal, and Accept lands from then on. On a destination with no policy, or one that does not load, commit the policy with the line by hand, as the first policy is. A passkey removed or reset is never registered again, key and credential, so its pin counts for nothing after: pin the new passkey's line in its place.
 - **Pin more than one.** A lost passkey stops counting until a new one is pinned, and pinning it is a policy change that needs the owners' sign-off. Pin each person's passkeys on two authenticators, or name more than one owner, so a lost passkey does not leave nobody able to approve the change that pins its replacement.
 
@@ -385,12 +385,12 @@ maintainers = ["alice", "bob"]
 
 [passkeys]
 alice = [
-  { fingerprint = "3c9e0d5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f", origin = "http://localhost:17333" },
-  { fingerprint = "8091a2b3c4d5e6f708192a3b4c5d6e7f3c9e0d5f6a7b8c9d0e1f2a3b4c5d6e7f", origin = "http://localhost:17333" },
+  { fingerprint = "3c9e0d5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f", origin = "http://reef.localhost:17333" },
+  { fingerprint = "8091a2b3c4d5e6f708192a3b4c5d6e7f3c9e0d5f6a7b8c9d0e1f2a3b4c5d6e7f", origin = "http://reef.localhost:17333" },
 ]
 bob = [
-  { fingerprint = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", origin = "http://localhost:17333" },
-  { fingerprint = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210", origin = "http://localhost:17333" },
+  { fingerprint = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", origin = "http://reef.localhost:17333" },
+  { fingerprint = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210", origin = "http://reef.localhost:17333" },
 ]
 
 [[signoff]]

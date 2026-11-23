@@ -6,8 +6,9 @@
 //!
 //! 1. `clientDataJSON` is a JSON object whose `type` is `webauthn.get`,
 //!    whose `challenge` is the expected one in unpadded base64url, and whose
-//!    `origin` has the RP ID as its host, over `https`, or `http` for
-//!    `localhost` only, and is not a cross-origin frame's.
+//!    `origin` has the RP ID, or a name under it, as its host, over `https`,
+//!    or `http` for `localhost` and names under it only, and is not a
+//!    cross-origin frame's.
 //! 2. `authenticatorData` starts with SHA-256 of the RP ID, and its flags
 //!    say the user was present (UP) and verified (UV).
 //! 3. The signature verifies over `authenticatorData ‖
@@ -538,7 +539,7 @@ pub struct PresenceEvidence {
     /// The passkey's credential id, for display and lookup; the assertion
     /// does not sign it.
     pub credential_id: Vec<u8>,
-    /// The RP ID: `localhost` for the web listener's.
+    /// The RP ID: `reef.localhost` for the web listener's.
     pub rp_id: String,
     /// What the assertion approves.
     pub approves: Approves,
@@ -638,8 +639,9 @@ fn client_data(
 }
 
 /// Why `origin` is not one of `rp_id`'s, if it is not: its host must be
-/// the RP ID, with an optional port, over `https`, or `http` for
-/// `localhost`, which browsers treat as a secure context.
+/// the RP ID or a name under it, with an optional port, over `https`, or
+/// `http` for `localhost` and the names under it, which browsers treat as
+/// secure contexts.
 fn origin_problem(origin: &str, rp_id: &str) -> Option<String> {
     let Some((scheme, authority)) = origin.split_once("://") else {
         return Some("not scheme://host".into());
@@ -655,12 +657,18 @@ fn origin_problem(origin: &str, rp_id: &str) -> Option<String> {
         Some(_) => return Some("its port is not 1 to 65535".into()),
         None => authority,
     };
-    if host != rp_id {
-        return Some(format!("its host is not the RP ID {rp_id:?}"));
+    let under = |domain: &str| {
+        host.strip_suffix(domain)
+            .is_some_and(|rest| rest.is_empty() || rest.ends_with('.'))
+    };
+    if !is_rp_id(host) || !under(rp_id) {
+        return Some(format!(
+            "its host is neither the RP ID {rp_id:?} nor a name under it"
+        ));
     }
     match scheme {
         "https" => None,
-        "http" if host == "localhost" => None,
+        "http" if under("localhost") => None,
         _ => Some("a scheme other than https, or http for localhost".into()),
     }
 }

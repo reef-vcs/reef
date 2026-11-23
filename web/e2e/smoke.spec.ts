@@ -95,9 +95,13 @@ test("smoke", async ({ reef, context, page }) => {
 
   const first = await test.step("the daemon serves this checkout's app", async () => {
     const session = await reef.session();
-    expect(new URL(session.url).hostname, "served as localhost").toBe("localhost");
+    expect(new URL(session.url).hostname, "a name of the run").toMatch(
+      /^[0-9a-f]{16}\.reef\.localhost$/,
+    );
     const script = /assets\/index-[^"]+\.js/;
-    const served = script.exec(await (await fetch(session.url)).text())?.[0];
+    const served = script.exec((await (await page.goto(session.url))?.text()) ?? "")?.[0];
+    // A load of its own: the session URL is not a fragment change on it.
+    await page.goto("about:blank");
     const built = script.exec(
       await readFile(join(WEB_DIR, "../crates/reef-web/assets/index.html"), "utf8"),
     )?.[0];
@@ -393,11 +397,13 @@ test("smoke", async ({ reef, context, page }) => {
         { tab: 0, open: false },
         { tab: 0, open: false },
       ]);
-    // Either family's address means both: the origin stays `localhost`.
+    // Either family's address means both. The port stays, and the run has a
+    // new name (#346).
     await reef.writeConfig(`[::1]:${port}`);
     await reef.start();
     const next = await reef.session();
-    expect(next.url, "the same origin as the tabs").toBe(url);
+    expect(new URL(next.url).port, "the same port as the tabs").toBe(port);
+    expect(next.url, "another name").not.toBe(url);
     for (const tab of tabs) {
       await expect(tab.getByText("This page has no session with the daemon.")).toBeVisible({
         timeout: 30_000,

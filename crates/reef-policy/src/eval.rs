@@ -515,7 +515,7 @@ impl Policy {
     pub fn unpinned(&self, key: &Key) -> Option<Unpinned> {
         let mut unpinned = Unpinned::Passkey;
         for pin in self.pins_of(key) {
-            if pin.origin.as_str() == key.passkey_origin {
+            if pin.origin.covers(&key.passkey_origin) {
                 return None;
             }
             unpinned = Unpinned::Origin;

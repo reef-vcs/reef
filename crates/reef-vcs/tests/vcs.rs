@@ -2734,7 +2734,7 @@ async fn ui_command() {
     );
     let value = json(&output);
     let url = value["url"].as_str().unwrap().to_owned();
-    assert!(url.starts_with("http://localhost:"), "{value}");
+    assert!(url.contains(".reef.localhost:"), "{value}");
     let launch_path = Path::new(value["launch_path"].as_str().unwrap());
     assert!(
         launch_path.starts_with(daemon.state_dir().join("ui")),
@@ -2754,7 +2754,7 @@ async fn ui_command() {
     let value = ok(&daemon, &dir, &["ui", "--print"]).await;
     let session_url = value["session_url"].as_str().unwrap();
     assert!(
-        session_url.starts_with(&format!("{url}?launch=")) && session_url.contains("#session="),
+        session_url.starts_with(&format!("{url}#session=")),
         "{value}"
     );
     assert_eq!(value["opened"], false, "{value}");

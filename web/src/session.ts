@@ -1,13 +1,10 @@
 // The session token (R2.18, ADR 0047). `reef ui` sends the browser to
-// `/?launch=<hex>#session=<token>`. The bootstrap strips both from the
-// address bar, so no bookmark, copy or screenshot of the URL carries them,
-// and keeps the token for the tab in `sessionStorage`. Once the daemon
-// accepts it, it moves to `localStorage` (per origin, so every tab of this
-// daemon's listener shares it). Not before: the port is known (#346), and any
-// page can link to it with a fragment of its own. A host that cannot run passkey ceremonies, such as the
+// `/#session=<token>`. The bootstrap stores the token in `localStorage`
+// (per origin, so every tab of this daemon's listener shares it) and strips
+// it from the address bar, so no bookmark, copy or screenshot of the URL
+// carries it. A host that cannot run passkey ceremonies, such as the
 // desktop app's webview (R3.39), adds `&embedded=1`; the tab keeps it in
-// `sessionStorage` once the token is accepted, and the passkey pages hand the
-// ceremony to the browser.
+// `sessionStorage`, and the passkey pages hand the ceremony to the browser.
 
 export const SESSION_KEY = "reef.session";
 export const EMBEDDED_KEY = "reef.embedded";
@@ -59,26 +56,9 @@ export function localStorageOrNull(): Storage | null {
   }
 }
 
-/** Share `token`, which the daemon has accepted, with the origin's tabs. */
-export function storeSession(
-  token: string,
-  storage: Storage | null = localStorageOrNull(),
-  tab: Storage | null = sessionStorageOrNull(),
-) {
-  write(storage, token);
-  write(tab, null);
-  if (!embeddedNow) return;
-  try {
-    tab?.setItem(EMBEDDED_KEY, "1");
-  } catch {
-    // Storage refused: this page load still knows (`embeddedNow`).
-  }
-}
-
 /**
- * The tab's token: from `#session=` (removed from the URL, with the launch
- * id), else the tab's own not yet accepted, else the origin's. Null means the
- * tab has no session.
+ * The tab's token: from `#session=` (stored, then removed from the URL), else
+ * from storage. Null means the tab has no session.
  */
 export function takeSession(
   location: Location = window.location,
@@ -88,15 +68,19 @@ export function takeSession(
 ): string | null {
   const match = FRAGMENT.exec(location.hash);
   if (match?.[1]) {
-    write(tab, match[1]);
-    embeddedNow = match[2] !== undefined;
-    const query = new URLSearchParams(location.search);
-    query.delete("launch");
-    const rest = query.toString() && `?${query.toString()}`;
-    history.replaceState(history.state, "", location.pathname + rest);
+    write(storage, match[1]);
+    if (match[2]) {
+      try {
+        tab?.setItem(EMBEDDED_KEY, "1");
+      } catch {
+        // Storage refused: this page load still knows (`embeddedNow`).
+      }
+      embeddedNow = true;
+    }
+    history.replaceState(history.state, "", location.pathname + location.search);
     return match[1];
   }
-  return read(tab) ?? read(storage);
+  return read(storage);
 }
 
 /**
@@ -104,28 +88,6 @@ export function takeSession(
  * if it is still the stored one: a tab `reef ui` opened since may have
  * stored a newer token, which other tabs of the origin now share.
  */
-export function endSession(
-  token: string,
-  storage: Storage | null = localStorageOrNull(),
-  tab: Storage | null = sessionStorageOrNull(),
-) {
+export function endSession(token: string, storage: Storage | null = localStorageOrNull()) {
   if (read(storage) === token) write(storage, null);
-  if (read(tab) === token) write(tab, null);
-}
-
-/**
- * Removes every service worker and cache of a local web UI's origin. Reef
- * makes none there, so another process that held the port left them (#346).
- * The remote listener's origin is left alone: the phone's app has a worker of
- * its own (R3.40).
- */
-export async function dropForeignWorkers(hostname: string = window.location.hostname) {
-  if (hostname !== "localhost") return;
-  try {
-    const workers = await navigator.serviceWorker.getRegistrations();
-    await Promise.all(workers.map((worker) => worker.unregister()));
-    await Promise.all((await caches.keys()).map((name) => caches.delete(name)));
-  } catch {
-    // No service workers here, or site data is blocked.
-  }
 }

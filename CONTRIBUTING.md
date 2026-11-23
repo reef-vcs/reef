@@ -95,7 +95,7 @@ The schema in `crates/reef-api/proto/reef/api/v1` is the API of record ([ADR 002
 
 ## Working on the web UI
 
-The web UI is a TypeScript app in `web/`, written against React's API and built with Preact in React's place (Vite and Vitest alias `react` and `react-dom` to `preact/compat`, #252), which the daemon embeds and serves on a loopback listener at `http://localhost:<port>` ([ADR 0047](docs/adr/0047-web-ui-transport-and-local-listener.md), [ADR 0085](docs/adr/0085-verified-human-presence.md)). Import from `react` and type against React's types as usual; the unit tests render through `src/test/testing-library.ts`, the Preact Testing Library with React Testing Library's `act`. It needs Node at the version in `web/.node-version` (24); nothing else in the repository does.
+The web UI is a TypeScript app in `web/`, written against React's API and built with Preact in React's place (Vite and Vitest alias `react` and `react-dom` to `preact/compat`, #252), which the daemon embeds and serves on a loopback listener at `http://<run>.reef.localhost:<port>` ([ADR 0047](docs/adr/0047-web-ui-transport-and-local-listener.md), [ADR 0085](docs/adr/0085-verified-human-presence.md)). Import from `react` and type against React's types as usual; the unit tests render through `src/test/testing-library.ts`, the Preact Testing Library with React Testing Library's `act`. It needs Node at the version in `web/.node-version` (24); nothing else in the repository does.
 
 ```sh
 just web-install   # npm ci in web/, then generate the TypeScript client from the protos
@@ -117,7 +117,7 @@ CI's `web` job runs `just web-check` on every pull request. It is where a schema
 
 To work on the app against a real daemon, run `reef ui --print` with a daemon built after `just web-build` (or any daemon whose `CreateWebSession` works), then start the dev server with `REEF_UI_URL` set to the printed `url`: Vite proxies `/reef.api.v1.` paths to the daemon's listener and rewrites `Host` and `Origin` to its own, so the daemon has no dev mode. Open `http://127.0.0.1:5173/#session=<token>` with the token from the printed session URL. That URL is a credential until the daemon stops; keep it out of issues and logs.
 
-Passkey ceremonies (the Passkeys page, the approval page, **Sign off**) do not work through the dev server: the browser signs the page's origin into every assertion, and the daemon accepts only its own, `http://localhost:<its port>`, which a policy also pins (#346). Preview them on a scratch daemon built after `just web-build`, opened at the `localhost` URL `reef ui` prints; every other page previews through Vite as before. The end-to-end test `e2e/passkeys.spec.ts` gives Chromium a virtual authenticator; the other browsers skip the steps that need one.
+Passkey ceremonies (the Passkeys page, the approval page, **Sign off**) do not work through the dev server: the browser signs the page's origin into every assertion, and the daemon accepts only its own, `http://<its run>.reef.localhost:<its port>` (#346). Preview them on a scratch daemon built after `just web-build`, opened at the URL `reef ui` prints; every other page previews through Vite as before. The end-to-end test `e2e/passkeys.spec.ts` gives Chromium a virtual authenticator; the other browsers skip the steps that need one.
 
 ### The Python SDK
 

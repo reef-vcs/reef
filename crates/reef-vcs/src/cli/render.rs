@@ -721,15 +721,18 @@ mod tests {
             web_ui_line(Some(&reef_client::json::WebUiStatus {
                 state: state.to_owned(),
                 origin: origin.map(str::to_owned),
-                fixed: origin.is_some(),
+                site: origin.map(str::to_owned),
                 problem: (state == "unavailable").then(|| "another process answers".to_owned()),
             }))
         };
-        let at = Some("http://localhost:17333");
-        assert_eq!(line("bound", at), "listening at http://localhost:17333");
+        let at = Some("http://0123456789abcdef.reef.localhost:17333");
+        assert_eq!(
+            line("bound", at),
+            "listening at http://0123456789abcdef.reef.localhost:17333"
+        );
         assert_eq!(
             line("unbound", at),
-            "not listening until `reef ui`, then at http://localhost:17333"
+            "not listening until `reef ui`, then at http://0123456789abcdef.reef.localhost:17333"
         );
         assert_eq!(
             line("unbound", None),
@@ -737,7 +740,7 @@ mod tests {
         );
         assert_eq!(
             line("unavailable", at),
-            "not listening at http://localhost:17333: another process answers; do not touch a passkey on a page there"
+            "not listening at http://0123456789abcdef.reef.localhost:17333: another process answers; do not touch a passkey on a page there"
         );
         assert_eq!(line("disabled", at), "disabled");
         assert!(web_ui_line(None).starts_with("unknown"));

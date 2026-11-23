@@ -1268,15 +1268,15 @@ impl TextRender for Passkeys {
 /// The origin a pin names, or why there is none: a kernel-chosen port ends
 /// with the daemon's run, and one another process holds is not the daemon's.
 fn origin_to_pin(web_ui: &WebUiStatus) -> Result<&str, String> {
-    match (web_ui.state.as_str(), web_ui.origin.as_deref()) {
+    match (web_ui.state.as_str(), web_ui.site.as_deref()) {
         ("disabled", _) => Err("the web UI is off (`[ui] enabled = false`).".to_owned()),
         ("not_built", _) => Err("this daemon was built without the web UI.".to_owned()),
-        ("unavailable", at) => Err(format!(
+        ("unavailable", site) => Err(format!(
             "the web UI's address, {}, is not this daemon's now ({}). Do not touch a passkey on a page there.",
-            at.unwrap_or("-"),
+            site.unwrap_or("-"),
             web_ui.problem.as_deref().unwrap_or("unknown")
         )),
-        (_, Some(origin)) if web_ui.fixed => Ok(origin),
+        (_, Some(site)) => Ok(site),
         _ => Err("a pin names the web UI's address, and this daemon's port changes at every start. Set `[ui] listen = \"127.0.0.1:<port>\"` in its config.toml, restart it, and list again.".to_owned()),
     }
 }
@@ -1422,9 +1422,10 @@ mod passkey_tests {
             key.set_presence(v1::SessionPresence::UserVerified);
             SessionKey::from(&key)
         };
-        let at = key("http://localhost:17333");
+        let at = key("http://0123456789abcdef.reef.localhost:17333");
         let text = |pinned| presence_text(&at, pinned);
-        let touch = "user_verified (passkey \"Touch ID\" at http://localhost:17333";
+        let touch =
+            "user_verified (passkey \"Touch ID\" at http://0123456789abcdef.reef.localhost:17333";
         assert_eq!(text(Some(Ok(()))), format!("{touch}, pinned here)"));
         assert_eq!(
             text(Some(Err(Unpinned::Passkey))),
@@ -1446,7 +1447,7 @@ mod passkey_tests {
     fn the_snippet_pins_live_passkeys_by_name() {
         let a = "a".repeat(64);
         let b = "b".repeat(64);
-        let origin = "http://localhost:17333";
+        let origin = "http://reef.localhost:17333";
         let live = [
             passkey("alice", &a, false),
             passkey("alice", &b, false),
@@ -1478,10 +1479,10 @@ mod passkey_tests {
             Passkeys { items, web_ui }.render(&mut out).unwrap();
             String::from_utf8(out).unwrap()
         };
-        let at = |state: &str, fixed| WebUiStatus {
+        let at = |state: &str, fixed: bool| WebUiStatus {
             state: state.to_owned(),
-            origin: Some(origin.to_owned()),
-            fixed,
+            origin: None,
+            site: fixed.then(|| origin.to_owned()),
             problem: Some("another process answers there".to_owned()),
         };
         for state in ["bound", "unbound"] {

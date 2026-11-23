@@ -114,12 +114,14 @@ message GetDaemonStatusResponse {
 message WebUiStatus {
   // Whether it is bound.
   WebUiState state = 1;
-  // `http://localhost:<port>`: the bound origin, or a fixed port's before
-  // it is bound; empty for a kernel-chosen port before it is bound.
+  // `http://<16 hex>.reef.localhost:<port>`, with a name of the daemon's
+  // run: the bound origin, or a fixed port's before it is bound; empty for a
+  // kernel-chosen port before it is bound.
   string origin = 2;
-  // `[ui] listen` names a port, so the origin outlives the daemon's run and
-  // a policy's `[passkeys]` can pin it.
-  bool fixed = 3;
+  // `http://reef.localhost:<port>`, what a policy's `[passkeys]` pins: it
+  // covers every run's origin. Empty when `[ui] listen` names no port, since
+  // the port then ends with the run.
+  string site = 3;
   // Why it is UNAVAILABLE; empty otherwise.
   string problem = 4;
 }

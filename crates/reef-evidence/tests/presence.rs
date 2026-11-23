@@ -747,6 +747,42 @@ fn a_certificate_carries_its_origin_and_judges_no_port() {
     assert_eq!(unreadable.origin(), "");
 }
 
+// #346: the web UI is at a run's own name under its RP ID, `reef.localhost`.
+#[test]
+fn an_origin_may_be_a_name_under_the_rp_id() {
+    let challenge = [7; 32];
+    let check = |rp: &str, origin: &str| {
+        let mut authenticator = Authenticator::new(Algorithm::EdDsa);
+        let assertion = authenticator.assert(rp, origin, &challenge);
+        check_assertion(authenticator.passkey(), rp, &challenge, &assertion)
+            .map(|asserted| asserted.origin)
+    };
+    for (rp, origin) in [
+        (
+            "reef.localhost",
+            "http://0123456789abcdef.reef.localhost:17333",
+        ),
+        ("reef.localhost", "http://reef.localhost:17333"),
+        ("reef.example", "https://a.b.reef.example"),
+        ("reef.example", "https://reef.example:8443"),
+    ] {
+        assert_eq!(check(rp, origin).as_deref(), Ok(origin), "{rp}");
+    }
+    for (rp, origin) in [
+        ("reef.localhost", "http://localhost:17333"),
+        ("reef.localhost", "http://evilreef.localhost:17333"),
+        ("reef.localhost", "http://reef.localhost.example:17333"),
+        ("reef.localhost", "http://.reef.localhost:17333"),
+        ("reef.localhost", "http://a@b.reef.localhost:17333"),
+        ("reef.localhost", "http://reef.localhost:17333:1"),
+        ("reef.example", "http://a.reef.example"),
+        ("reef.example", "https://example"),
+        ("a.reef.example", "https://reef.example"),
+    ] {
+        assert!(check(rp, origin).is_err(), "{rp} {origin}");
+    }
+}
+
 /// The user-verified certificate's statement as JSON.
 fn statement() -> Value {
     serde_json::from_slice(&binding(chromium_evidence()).payload().unwrap()).unwrap()

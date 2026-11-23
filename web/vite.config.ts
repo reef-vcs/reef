@@ -14,9 +14,7 @@ export default defineConfig({
   // `preact/compat/jsx-runtime` and `react-dom/client` to
   // `preact/compat/client`.
   resolve: { alias: { react: "preact/compat", "react-dom": "preact/compat" } },
-  // Relative, since the daemon serves the hashed files under a prefix of its
-  // run's own (#346): a chunk imports and preloads its neighbours beside it.
-  base: "./",
+  base: "/",
   build: {
     outDir: "../crates/reef-web/assets",
     emptyOutDir: true,

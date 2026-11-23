@@ -64,7 +64,7 @@ struct Pin {
     /// The passkey's fingerprint: the SHA-256 of its public key, 64
     /// lowercase hex.
     fingerprint: String,
-    /// The web origin its touch must run at: `http://localhost:17333`, or
+    /// The web origin its touch must run at: `http://reef.localhost:17333`, or
     /// `https://<dns name>`.
     origin: String,
 }

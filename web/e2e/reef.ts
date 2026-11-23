@@ -17,7 +17,7 @@ import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promis
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { test as base, expect } from "@playwright/test";
 
@@ -52,7 +52,7 @@ export interface Workspace {
 }
 
 export interface Session {
-  /** `http://localhost:<port>/`. */
+  /** `http://<run>.reef.localhost:<port>/`. */
   url: string;
   /** `url` with `#session=<token>`. */
   sessionUrl: string;
@@ -322,13 +322,6 @@ export class Reef {
     const token = sessionUrl.split("#session=")[1] ?? "";
     expect(token, "reef ui --print gave a session URL").not.toBe("");
     return { url: printed.url, sessionUrl, token };
-  }
-
-  /** The launch file `reef ui` opens in a browser, as a URL. */
-  async launch(): Promise<string> {
-    const { launch_path } = (await this.reef(["ui"])) as { launch_path: string };
-    expect(launch_path, "reef ui wrote a launch file").not.toBe("");
-    return pathToFileURL(launch_path).href;
   }
 
   /** `reef --no-autostart <args>`, parsed as JSON; throws with its output on failure. */

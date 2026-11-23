@@ -1385,12 +1385,13 @@ pub struct WebUiStatus {
     /// `disabled`, `not_built`, `unbound` (nothing has asked for it yet),
     /// `bound` or `unavailable` (the last bind failed).
     pub state: String,
-    /// `http://localhost:<port>`: the bound origin, or a fixed port's before
-    /// it is bound; `null` for a kernel-chosen port before it is bound.
+    /// `http://<16 hex>.reef.localhost:<port>`, with a name of the daemon's
+    /// run: the bound origin, or a fixed port's before it is bound; `null`
+    /// for a kernel-chosen port before it is bound.
     pub origin: Option<String>,
-    /// Whether `[ui] listen` names a port, so the origin outlives the
-    /// daemon's run and a policy's `[passkeys]` can pin it.
-    pub fixed: bool,
+    /// `http://reef.localhost:<port>`, what a policy's `[passkeys]` pins;
+    /// `null` when `[ui] listen` names no port, which then ends with the run.
+    pub site: Option<String>,
     /// Why it is `unavailable`.
     pub problem: Option<String>,
 }
@@ -1408,7 +1409,7 @@ impl From<&v1::WebUiStatus> for WebUiStatus {
             }
             .to_owned(),
             origin: text(&web_ui.origin),
-            fixed: web_ui.fixed,
+            site: text(&web_ui.site),
             problem: text(&web_ui.problem),
         }
     }

@@ -38,7 +38,7 @@ use crate::db::{IdentityRow, PasskeyInserted, PasskeyRow, PasskeyUsed};
 use crate::model::Timestamp;
 
 /// The RP ID of the web UI's listener, which serves `http://localhost`.
-pub const RP_ID: &str = "localhost";
+pub const RP_ID: &str = reef_policy::origin::LOCAL_HOST;
 
 /// The most live passkeys one identity may hold.
 pub const MAX_PASSKEYS: usize = 32;

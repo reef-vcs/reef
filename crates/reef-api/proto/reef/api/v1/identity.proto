@@ -667,8 +667,9 @@ message SessionKey {
   // empty for a key issued any other way.
   string approval_id = 25;
   // The web origin a `user_verified` key's assertion ran at (#346), from
-  // the certificate: `http://localhost:17333`; empty otherwise. A policy
-  // counts the key only at an origin its `[passkeys]` pins.
+  // the certificate: `http://<16 hex>.reef.localhost:17333`; empty
+  // otherwise. A policy counts the key only at an origin its `[passkeys]`
+  // pins.
   string passkey_origin = 26;
 }
 

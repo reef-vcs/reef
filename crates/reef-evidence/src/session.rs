@@ -443,7 +443,8 @@ pub struct CertificatePresenceEvidence {
     /// Its COSE algorithm: ES256 (-7), `EdDSA` (-8) or RS256 (-257).
     #[schemars(extend("enum" = [-7, -8, -257]))]
     pub algorithm: i64,
-    /// The `WebAuthn` RP ID, the origin's host: `localhost`.
+    /// The `WebAuthn` RP ID, the origin's host or a domain it is under:
+    /// `reef.localhost`.
     pub rp_id: String,
     /// The one sign-off the assertion approves.
     pub approves: CertificateApproves,

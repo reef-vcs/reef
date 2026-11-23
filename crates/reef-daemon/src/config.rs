@@ -1300,8 +1300,9 @@ pub struct UiSection {
     /// Where the listener binds, at the first `reef ui`, or with a port that
     /// is not 0 and a passkey registered, at start (#346): `127.0.0.1:<port>`
     /// or `[::1]:<port>`, either meaning both loopback families on that
-    /// port, served as `http://localhost:<port>`; port 0 for one the kernel
-    /// picks at every start, whose origin a policy cannot pin. Default
+    /// port, served as `http://<a name of this run>.reef.localhost:<port>`;
+    /// port 0 for one the kernel picks at every start, whose origin a policy
+    /// cannot pin. Default
     /// `127.0.0.1:17333` ([`DEFAULT_UI_PORT`]) in the default state
     /// directory, `127.0.0.1:0` in any other.
     pub listen: String,

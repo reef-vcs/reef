@@ -1769,9 +1769,9 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Sink {
 /// gRPC-web over the web listener with a session token.
 mod web {
     use hyper_util::client::legacy::Client as HttpClient;
-    use hyper_util::client::legacy::connect::HttpConnector;
     use hyper_util::rt::TokioExecutor;
     use reef_api::v1::artifact_service_client::ArtifactServiceClient;
+    use reef_daemon::testing::{WebConnector, web_connector};
     use tonic::body::Body;
     use tonic::service::Interceptor;
     use tonic::service::interceptor::InterceptedService;
@@ -1793,13 +1793,13 @@ mod web {
     }
 
     pub(super) type Web = InterceptedService<
-        GrpcWebClientService<HttpClient<HttpConnector, tonic_web::GrpcWebCall<Body>>>,
+        GrpcWebClientService<HttpClient<WebConnector, tonic_web::GrpcWebCall<Body>>>,
         Bearer,
     >;
 
     /// The artifact service over the web listener at `url` with `token`.
     pub(super) fn artifacts(url: &str, token: &str) -> ArtifactServiceClient<Web> {
-        let client = HttpClient::builder(TokioExecutor::new()).build_http();
+        let client = HttpClient::builder(TokioExecutor::new()).build(web_connector());
         let service = GrpcWebClientLayer::new().layer(client);
         ArtifactServiceClient::with_origin(
             InterceptedService::new(service, Bearer(token.to_owned())),

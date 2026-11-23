@@ -285,7 +285,7 @@ pub struct Key {
     /// presence evidence; empty without one.
     pub passkey: String,
     /// The web origin that touch ran at (#346), from the same evidence:
-    /// `http://localhost:17333`. Empty without one.
+    /// `http://0123456789abcdef.reef.localhost:17333`. Empty without one.
     pub passkey_origin: String,
     /// `client` or `daemon`.
     pub custody: String,

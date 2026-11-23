@@ -118,7 +118,7 @@ pub(crate) fn open(path: &Path) -> bool {
     }
 }
 
-/// The port of `url` (`http://localhost:<port>/`).
+/// The port of `url` (`http://<run>.reef.localhost:<port>/`).
 fn port_of(url: &str) -> &str {
     url.trim_end_matches('/')
         .rsplit(':')

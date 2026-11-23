@@ -116,12 +116,12 @@
       "status": "unsatisfied"
     }
   ],
-  "sha256": "4d1d66a399492bbd461f52ac3e334d86f49bec4feeb4b572a6478c69f3136902",
+  "sha256": "6aec774b66a8a9c931620d356149bd8849ef5d777861c87484798f15a4ddaa2a",
   "verified": [
     {
       "evidence_id": "ev-0",
       "identity": "alice",
-      "origin": "http://localhost:17333",
+      "origin": "http://0123456789abcdef.reef.localhost:17333",
       "passkey": "3c9e0d5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f",
       "pinned": true,
       "unpinned": ""
@@ -129,7 +129,7 @@
     {
       "evidence_id": "ev-1",
       "identity": "carol",
-      "origin": "http://localhost:17333",
+      "origin": "http://0123456789abcdef.reef.localhost:17333",
       "passkey": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
       "pinned": false,
       "unpinned": "passkey"

@@ -258,7 +258,6 @@ async fn serve(state: Arc<AppState>) {
         names: state.remote.names.clone(),
         tokens: Arc::clone(&state.remote.tokens),
         failures: Arc::new(Failures::new(&limits)),
-        assets: state.web.assets(),
     });
     let incoming = super::incoming::incoming(
         listener,

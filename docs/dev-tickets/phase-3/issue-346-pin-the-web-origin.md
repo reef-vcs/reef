@@ -184,7 +184,7 @@ R3.40 also changes what the pin is worth. At `https://<dns name>` the browser ch
 
 ### Departures
 
-The review of the implementation broke "What a squatter leaves in the browser" in Chromium, and the implementation departs from it: a launch file has the browser clear the pinned address and opens it only if that succeeds (ADR 0094 decision 5; a first form on a second listener was broken by the second review), Reef's page removes every worker and cache, a failed hold is tried again, streams end with their sessions, and a token stays in its tab until it is accepted. Test 7 (a daemon moved to another port) is covered by the attack test's end, which pins the other origin and lands; test 17's restart by `a_passkey_makes_the_daemon_hold_its_fixed_port`. S-275's "certifies nothing" was wrong: a script at the pinned origin with a session gets one misled touch certified by the daemon.
+Review broke "What a squatter leaves in the browser", and two later forms of it, with running attacks (ADR 0094, Context). On 2026-11-23 the user chose a name of each run under `reef.localhost` instead of `http://localhost:17333` (decision 1 keeps the port). The whole of that section, S-275 to S-277 as drafted here, the `?launch=` id, the asset prefix, the worker's answer and the app's storing of a session after acceptance are not in the implementation. What follows from the name: the RP ID is `reef.localhost`; a pin names `http://reef.localhost:<port>` and covers each run's name; the certificate's reader accepts an origin under the RP ID; `WebUiStatus` has `site`, what a policy pins, in place of `fixed`; a tab of an earlier run is told that its session ended. A failed hold is tried again. Test 7 (a daemon moved to another port) is covered by the attack test's end, which pins the other origin and lands; tests 12, 14 and 18 by `each_run_has_a_name_of_its_own_at_one_port` and `e2e/squatter.spec.ts`. The text above and below is the brief as accepted.
 
 ## What the pin stops, and what it does not
 
@@ -400,7 +400,7 @@ By hand, with a real authenticator, on a daemon from this branch that serves `ju
 
 ## What later tickets inherit
 
-- **R3.40**: a pin may name `https://<dns name>[:port]`; the RP ID is the origin's host; the remote channel supplies its own origin where the web channel supplies `WebUi::origin`. The gates share `SECURITY_HEADERS`, whose `worker-src 'none'` the remote listener must relax for its own worker, and the app removes foreign workers on `localhost` only (`dropForeignWorkers`).
+- **R3.40**: a pin may name `https://<dns name>[:port]`; the RP ID is the origin's host; the remote channel supplies its own origin where the web channel supplies `WebUi::origin`. The phone's passkeys have another RP ID, so they are other passkeys, pinned beside the local ones.
 - **R4.13** (the hosted web UI): the same pin, one origin.
 - **The release notes**: policies written against an unreleased `main` must add origins.
 

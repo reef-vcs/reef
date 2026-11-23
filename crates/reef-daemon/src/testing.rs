@@ -6,9 +6,13 @@
     reason = "test fixtures; a panic is the failure report"
 )]
 
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
+use hyper_util::client::legacy::connect::HttpConnector;
+use hyper_util::client::legacy::connect::dns::Name;
 use reef_api::v1::IfNotJj;
 use reef_lib::jj::Repo;
 use reef_lib::jj::settings::{Identity, user_settings_with_max_new_file_size};
@@ -22,6 +26,37 @@ use crate::daemon::{Daemon, DaemonHandle};
 /// Above the generator's largest files, so a synthetic tree is tracked in
 /// full.
 const MAX_NEW_FILE_SIZE: u64 = 16 << 20;
+
+/// Resolves every name to loopback, as a browser does a name under
+/// `localhost`, such as the web UI's (#346): the system's resolver may not.
+#[derive(Clone, Copy, Debug)]
+pub struct Loopback;
+
+impl tower::Service<Name> for Loopback {
+    type Response = std::array::IntoIter<SocketAddr, 2>;
+    type Error = std::io::Error;
+    type Future = std::future::Ready<Result<Self::Response, Self::Error>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, _name: Name) -> Self::Future {
+        let addrs: [SocketAddr; 2] = [
+            (Ipv4Addr::LOCALHOST, 0).into(),
+            (Ipv6Addr::LOCALHOST, 0).into(),
+        ];
+        std::future::ready(Ok(addrs.into_iter()))
+    }
+}
+
+/// How a test's HTTP client reaches the web UI by its name.
+pub type WebConnector = HttpConnector<Loopback>;
+
+/// A [`WebConnector`].
+pub fn web_connector() -> WebConnector {
+    HttpConnector::new_with_resolver(Loopback)
+}
 
 /// Turns off every automatic snapshot, so a test's snapshots are its own:
 /// no debounced watcher snapshot, no fallback or full-scan timer, and no
