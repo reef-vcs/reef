@@ -19,6 +19,18 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 target_dir="${CARGO_TARGET_DIR:-$root/target}/shell"
 tauri=(npx --yes @tauri-apps/cli@2.12.6)
 
+# App Transport Security refuses http to a name under localhost unless the app excepts it, and the
+# window loads the daemon's page at one (#346, ADR 0094).
+check_ats() {
+    local plist="$1/Reef.app/Contents/Info.plist" key
+    for key in NSIncludesSubdomains NSExceptionAllowsInsecureHTTPLoads; do
+        if [[ "$(plutil -extract "NSAppTransportSecurity.NSExceptionDomains.reef\\.localhost.$key" raw -o - "$plist" 2>/dev/null)" != true ]]; then
+            echo "$plist does not except reef.localhost ($key) from App Transport Security" >&2
+            exit 1
+        fi
+    done
+}
+
 case "$mode" in
     debug)
         if [[ -z "${APPLE_SIGNING_IDENTITY:-}" ]]; then
@@ -28,6 +40,7 @@ case "$mode" in
         fi
         echo "signing with: ${APPLE_SIGNING_IDENTITY/#-/ad hoc (notification permission resets at each rebuild)}" >&2
         (cd "$root/shell" && CARGO_TARGET_DIR=$target_dir "${tauri[@]}" build --debug --bundles app >&2)
+        check_ats "$target_dir/debug/bundle/macos"
         echo "$target_dir/debug/bundle/macos"
         ;;
     release)
@@ -43,6 +56,7 @@ case "$mode" in
         export APPLE_SIGNING_IDENTITY=-
         (cd "$root/shell" && CARGO_TARGET_DIR=$target_dir "${tauri[@]}" build \
             --target "$triple" --config "$config" --bundles app,dmg >&2)
+        check_ats "$target_dir/$triple/release/bundle/macos"
         echo "$target_dir/$triple/release/bundle"
         ;;
     *)

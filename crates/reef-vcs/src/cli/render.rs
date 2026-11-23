@@ -475,13 +475,19 @@ fn web_ui_line(web_ui: Option<&reef_client::json::WebUiStatus>) -> String {
     let Some(web_ui) = web_ui else {
         return "unknown (a daemon before #346)".to_owned();
     };
-    let at = web_ui.origin.as_deref().unwrap_or("a port of its own");
+    let site = web_ui.site.as_deref().map_or_else(
+        || "at a port of its own".to_owned(),
+        |site| format!("under {site}"),
+    );
     match web_ui.state.as_str() {
-        "bound" => format!("listening at {at}"),
-        "unbound" => format!("not listening until `reef ui`, then at {at}"),
+        "bound" => format!(
+            "listening at {}",
+            web_ui.origin.as_deref().unwrap_or("unknown")
+        ),
+        "unbound" => format!("not listening until `reef ui`, then {site}"),
         "not_built" => "not built into this daemon".to_owned(),
         "unavailable" => format!(
-            "not listening at {at}: {}; do not touch a passkey on a page there",
+            "not listening {site}: {}; do not touch a passkey on a page there",
             web_ui.problem.as_deref().unwrap_or("unknown")
         ),
         other => other.to_owned(),
@@ -717,32 +723,33 @@ mod tests {
 
     #[test]
     fn the_web_ui_line_says_whose_the_address_is() {
-        let line = |state: &str, origin: Option<&str>| {
+        let line = |state: &str, origin: Option<&str>, site: Option<&str>| {
             web_ui_line(Some(&reef_client::json::WebUiStatus {
                 state: state.to_owned(),
                 origin: origin.map(str::to_owned),
-                site: origin.map(str::to_owned),
+                site: site.map(str::to_owned),
                 problem: (state == "unavailable").then(|| "another process answers".to_owned()),
             }))
         };
-        let at = Some("http://0123456789abcdef.reef.localhost:17333");
+        let site = Some("http://reef.localhost:17333");
+        let origin = "http://0123456789abcdef.reef.localhost:17333";
         assert_eq!(
-            line("bound", at),
-            "listening at http://0123456789abcdef.reef.localhost:17333"
+            line("bound", Some(origin), site),
+            format!("listening at {origin}")
         );
         assert_eq!(
-            line("unbound", at),
-            "not listening until `reef ui`, then at http://0123456789abcdef.reef.localhost:17333"
+            line("unbound", None, site),
+            "not listening until `reef ui`, then under http://reef.localhost:17333"
         );
         assert_eq!(
-            line("unbound", None),
+            line("unbound", None, None),
             "not listening until `reef ui`, then at a port of its own"
         );
         assert_eq!(
-            line("unavailable", at),
-            "not listening at http://0123456789abcdef.reef.localhost:17333: another process answers; do not touch a passkey on a page there"
+            line("unavailable", None, site),
+            "not listening under http://reef.localhost:17333: another process answers; do not touch a passkey on a page there"
         );
-        assert_eq!(line("disabled", at), "disabled");
+        assert_eq!(line("disabled", None, site), "disabled");
         assert!(web_ui_line(None).starts_with("unknown"));
     }
 

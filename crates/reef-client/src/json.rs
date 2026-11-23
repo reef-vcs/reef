@@ -1385,9 +1385,8 @@ pub struct WebUiStatus {
     /// `disabled`, `not_built`, `unbound` (nothing has asked for it yet),
     /// `bound` or `unavailable` (the last bind failed).
     pub state: String,
-    /// `http://<16 hex>.reef.localhost:<port>`, with a name of the daemon's
-    /// run: the bound origin, or a fixed port's before it is bound; `null`
-    /// for a kernel-chosen port before it is bound.
+    /// `http://<16 hex>.reef.localhost:<port>`, with a name drawn when the
+    /// port is bound; `null` before.
     pub origin: Option<String>,
     /// `http://reef.localhost:<port>`, what a policy's `[passkeys]` pins;
     /// `null` when `[ui] listen` names no port, which then ends with the run.

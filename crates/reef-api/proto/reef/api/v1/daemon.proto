@@ -51,7 +51,8 @@ message CreateWebSessionRequest {
 
 // A web UI session.
 message CreateWebSessionResponse {
-  // The web UI's address, such as `http://localhost:52817/`. No token.
+  // The web UI's address, `http://<16 hex>.reef.localhost:<port>/`. No
+  // token.
   string url = 1;
   // `url`, then the request's `path` without its leading `/`, with the
   // session's token in its fragment (`#session=<token>`).
@@ -114,9 +115,8 @@ message GetDaemonStatusResponse {
 message WebUiStatus {
   // Whether it is bound.
   WebUiState state = 1;
-  // `http://<16 hex>.reef.localhost:<port>`, with a name of the daemon's
-  // run: the bound origin, or a fixed port's before it is bound; empty for a
-  // kernel-chosen port before it is bound.
+  // `http://<16 hex>.reef.localhost:<port>`, with a name drawn when the port
+  // is bound; empty before.
   string origin = 2;
   // `http://reef.localhost:<port>`, what a policy's `[passkeys]` pins: it
   // covers every run's origin. Empty when `[ui] listen` names no port, since

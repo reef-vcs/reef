@@ -6,8 +6,8 @@
 //! `gate::WebGateLayer`. A daemon whose user never runs `reef ui` opens no
 //! TCP port. Once bound, the listener stays until the daemon stops.
 //!
-//! `<run>` is a new random name at every start, which every browser resolves
-//! to loopback. A process that held the port while the daemon was down may
+//! `<run>` is a random name drawn when the port is bound, which browsers
+//! resolve to loopback. A process that held the port while the daemon was down may
 //! have left service workers, caches and storage in the browser, all of them
 //! at names of its own choosing, and nothing at this run's (#346, ADR 0094).
 //!
@@ -229,9 +229,7 @@ pub struct Caller {
 pub struct WebUi {
     bound: tokio::sync::Mutex<Option<Bound>>,
     sessions: Arc<Sessions>,
-    /// This run's name: `<16 hex>.reef.localhost`.
-    host: String,
-    /// `http://<host>:<port>`, once bound: the one origin a passkey ceremony
+    /// `http://<run>.reef.localhost:<port>`, once bound: the one origin a passkey ceremony
     /// is accepted from.
     origin: OnceLock<String>,
     /// Why the last bind failed, until one succeeds.
@@ -250,7 +248,6 @@ impl WebUi {
         WebUi {
             bound: tokio::sync::Mutex::new(None),
             sessions: Arc::new(Sessions::new(limits)),
-            host: format!("{:016x}.{LOCAL_HOST}", rand::rng().random::<u64>()),
             origin: OnceLock::new(),
             problem: Mutex::new(None),
         }
@@ -328,14 +325,9 @@ impl WebUi {
         } else {
             WebUiState::Unbound
         };
-        let origin = match web.origin() {
-            Some(origin) => origin.to_owned(),
-            None if port != 0 => format!("http://{}:{port}", web.host),
-            None => String::new(),
-        };
         WebUiStatus {
             state: listener.into(),
-            origin,
+            origin: web.origin().unwrap_or_default().to_owned(),
             site: match port {
                 0 => String::new(),
                 _ => format!("http://{LOCAL_HOST}:{port}"),
@@ -446,7 +438,11 @@ async fn bind(state: &Arc<AppState>) -> Result<Bound, WebError> {
         refuse_answering(port).await?;
     }
     let loopback = Loopback::bind(port).await?;
-    let authority = format!("{}:{}", state.web.host, loopback.port);
+    // Drawn once the port is this daemon's, and told to no one before: a
+    // process that knew it could take the port first and leave a worker at
+    // that name.
+    let run = rand::rng().random::<u64>();
+    let authority = format!("{run:016x}.{LOCAL_HOST}:{}", loopback.port);
     let _ = state.web.origin.set(format!("http://{authority}"));
     let gate = Arc::new(gate::Gate {
         origin: format!("http://{authority}"),

@@ -1062,11 +1062,25 @@ async fn each_run_has_a_name_of_its_own_at_one_port() {
     })
     .await;
     let status = async |client: &Client| client.daemon_status(true).await.unwrap().web_ui.unwrap();
+    // The name is told to no one before the port is the daemon's: a process
+    // that knew it could take the port first and leave a worker there.
     let before = status(&daemon.client).await;
     assert_eq!(before.site, format!("http://reef.localhost:{port}"));
+    assert_eq!(before.origin, "");
+    let squatter = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
+    daemon
+        .client
+        .create_web_session(false, "")
+        .await
+        .unwrap_err();
+    let refused = status(&daemon.client).await;
+    assert_eq!(refused.state(), v1::WebUiState::Unavailable);
+    assert_eq!(refused.origin, "");
+    drop(squatter);
     let first = session(&daemon.client, false).await;
     assert_eq!(port_of(&first), port);
-    assert_eq!(format!("{}/", before.origin), first.url);
+    let bound = status(&daemon.client).await;
+    assert_eq!(format!("{}/", bound.origin), first.url);
     assert_eq!(session(&daemon.client, false).await.url, first.url);
     let daemon = daemon.restart().await;
     let second = session(&daemon.client, false).await;
@@ -1086,8 +1100,7 @@ async fn each_run_has_a_name_of_its_own_at_one_port() {
         )
         .await;
         assert_eq!(call.status(), StatusCode::OK);
-        let refused = call.headers().get("grpc-status").unwrap();
-        assert_eq!(refused, "7", "permission denied");
+        assert_eq!(refused_reason(&call), "WEB_SESSION_INVALID");
     }
     let evil = format!("evil.reef.localhost:{port}");
     let call = raw_status_call(&authority_of(&second), &[("host", &evil)]).await;
@@ -1105,6 +1118,17 @@ async fn each_run_has_a_name_of_its_own_at_one_port() {
     daemon.stop().await;
 }
 
+/// The reason of a gRPC-web refusal, which its headers carry whole.
+fn refused_reason(response: &http::Response<Bytes>) -> String {
+    use base64::Engine as _;
+    let details = response.headers().get("grpc-status-details-bin").unwrap();
+    let bytes = base64::engine::general_purpose::STANDARD_NO_PAD
+        .decode(details.as_bytes())
+        .unwrap();
+    let status = Status::with_details(Code::Unknown, "", bytes.into());
+    reef_daemon::error::detail_of(&status).unwrap().reason
+}
+
 /// `GET path` at `authority` with `host` as its `Host`.
 async fn get_at(authority: &str, host: &str, path: &str) -> http::Response<Bytes> {
     send(authority, Method::GET, path, &[("host", host)], Vec::new()).await
@@ -1119,8 +1143,8 @@ async fn a_fixed_port_answered_on_every_address_is_refused() {
         wildcards.push("[::]");
     }
     for wildcard in wildcards {
-        let held = std::net::TcpListener::bind(format!("{wildcard}:0")).unwrap();
-        let port = held.local_addr().unwrap().port();
+        let port = free_port();
+        let held = std::net::TcpListener::bind(format!("{wildcard}:{port}")).unwrap();
         let daemon = TestDaemon::start_with(|config| {
             config.file.ui.listen = format!("127.0.0.1:{port}");
         })

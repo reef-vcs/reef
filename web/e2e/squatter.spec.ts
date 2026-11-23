@@ -1,7 +1,9 @@
 // What a process that held the web UI's port leaves in the browser (#346):
 // service workers never checked for updates, pages cached for every query,
-// and storage, at every name it can guess. A run of the daemon has a name no
-// one could, so the first launch is Reef's and finds none of it.
+// and storage, at every name it can guess or read: an earlier run's, and
+// whatever the daemon says before it has the port, which is none. A run's
+// name is drawn once the port is bound, so the first launch is Reef's and
+// finds none of it.
 import { createServer } from "node:http";
 import { expect, freePort, test } from "./reef";
 
@@ -20,6 +22,11 @@ test("what a squatter left at the port is not at a run's name", async ({ page, r
   const port = await freePort();
   await reef.stop();
   await reef.writeConfig(`127.0.0.1:${String(port)}`);
+  await reef.start();
+  const unbound = (await reef.reef(["daemon", "status"])) as { web_ui: { origin: string | null } };
+  expect(unbound.web_ui.origin, "the name is not told before the port is bound").toBeNull();
+  const earlier = new URL((await reef.session()).url).hostname;
+  await reef.stop();
 
   await test.step("a squatter poisons every name it can guess", async () => {
     const squatter = createServer((request, response) => {
@@ -30,7 +37,7 @@ test("what a squatter left at the port is not at a run's name", async ({ page, r
       response.end(worker ? WORKER : "<!doctype html><title>Squatter</title>");
     });
     await new Promise<void>((resolve) => squatter.listen(port, "localhost", resolve));
-    for (const host of ["localhost", "reef.localhost", "0123456789abcdef.reef.localhost"]) {
+    for (const host of ["localhost", "reef.localhost", earlier]) {
       const origin = `http://${host}:${String(port)}`;
       await page.goto(`${origin}/`);
       await page.evaluate(async () => {
@@ -47,6 +54,7 @@ test("what a squatter left at the port is not at a run's name", async ({ page, r
 
   await reef.start();
   const session = await reef.session();
+  expect(new URL(session.url).hostname, "a name of this run").not.toBe(earlier);
   await page.goto(session.sessionUrl);
   await expect(page.getByRole("heading", { name: "Repositories" })).toBeVisible();
   const left = await page.evaluate(async () => ({
