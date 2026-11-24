@@ -195,7 +195,9 @@ pub const KEYS: &[(&str, &[&str])] = &[
     ("ui", &["enabled", "listen"]),
     (
         "remote",
-        &["enabled", "listen", "names", "tls_cert", "tls_key"],
+        &[
+            "enabled", "listen", "names", "tls_cert", "tls_key", "origin",
+        ],
     ),
     ("status_index", &["enabled", "sync_timeout"]),
     ("overlaps", &["max_age"]),
@@ -1365,6 +1367,10 @@ pub struct RemoteSection {
     pub tls_cert: String,
     /// `tls_cert`'s private key (PKCS#8, SEC1 or PKCS#1 PEM).
     pub tls_key: String,
+    /// The one address a phone opens (R3.40), such as
+    /// `https://mac.example.ts.net:7470`: where devices are paired and their
+    /// tokens work. `https`, and a host in `names`. Empty: no pairing.
+    pub origin: String,
 }
 
 impl Default for RemoteSection {
@@ -1375,6 +1381,7 @@ impl Default for RemoteSection {
             names: Vec::new(),
             tls_cert: String::new(),
             tls_key: String::new(),
+            origin: String::new(),
         }
     }
 }
@@ -1383,6 +1390,47 @@ impl RemoteSection {
     /// `listen` as an address, if it parses.
     pub fn listen_addr(&self) -> Option<std::net::SocketAddr> {
         self.listen.parse().ok()
+    }
+
+    /// `origin`, if it is set and parses.
+    pub fn origin(&self) -> Option<reef_policy::Origin> {
+        reef_policy::Origin::parse(&self.origin).ok()
+    }
+
+    /// Why `origin` is invalid; `None` when empty or valid.
+    fn invalid_origin(&self) -> Option<String> {
+        if self.origin.is_empty() {
+            return None;
+        }
+        let because = |reason: &str| {
+            Some(format!(
+                "{:?} must be the address a phone opens, such as https://mac.example:7470: {reason}",
+                self.origin
+            ))
+        };
+        let origin = match reef_policy::Origin::parse(&self.origin) {
+            Ok(origin) => origin,
+            Err(reason) => return because(reason),
+        };
+        if !self.origin.starts_with("https://") {
+            return because("it does not start with https://");
+        }
+        let host = origin.host();
+        let local = reef_policy::origin::LOCAL_HOST;
+        if host
+            .strip_suffix(local)
+            .is_some_and(|under| under.is_empty() || under.ends_with('.'))
+        {
+            return because("that host is the local web UI's, whose passkeys are its own");
+        }
+        if !self
+            .names
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(host))
+        {
+            return because("its host is not in remote.names");
+        }
+        None
     }
 
     /// Why `[remote]` is invalid, as `(key, reason)`; `None` when valid.
@@ -1421,7 +1469,8 @@ impl RemoteSection {
                 return Some((key, format!("{value:?} must be an absolute path")));
             }
         }
-        None
+        self.invalid_origin()
+            .map(|reason| ("remote.origin", reason))
     }
 }
 
@@ -2305,6 +2354,7 @@ impl Config {
                     ),
                     ("tls_cert", s(&f.remote.tls_cert)),
                     ("tls_key", s(&f.remote.tls_key)),
+                    ("origin", s(&f.remote.origin)),
                 ],
             ),
             (

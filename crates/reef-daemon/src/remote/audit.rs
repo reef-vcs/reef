@@ -11,15 +11,16 @@ use reef_lib::error::ErrorChain;
 use tonic::codegen::http::HeaderMap;
 
 use super::failures::Logged;
-use super::{Caller, Refusal, RemoteError};
+use super::{Caller, RemoteError};
 
-/// A token refusal, with how many since the address's last line.
-pub(crate) fn token_refused(peer: SocketAddr, method: &str, state: Refusal, logged: &Logged) {
+/// A token's refusal, or a pairing code's, with how many since the address's
+/// last line.
+pub(crate) fn token_refused(peer: SocketAddr, method: &str, state: &str, logged: &Logged) {
     tracing::info!(
         target: "reef_daemon::remote::audit",
         peer = %peer,
         method,
-        state = state.as_str(),
+        state,
         refusal_count = logged.count,
         "remote token refused"
     );
@@ -49,6 +50,60 @@ pub(crate) fn refused(
         method,
         error = %ErrorChain(error),
         "remote call refused"
+    );
+}
+
+/// A pairing code drawn (R3.40), by the name it is for.
+pub(crate) fn pairing_started(name: &str, identity_id: &str) {
+    tracing::info!(
+        target: "reef_daemon::remote::audit",
+        token_name = name,
+        identity_id,
+        "pairing started"
+    );
+}
+
+/// A code taken by `peer` for the device `name`: it works no more, whatever
+/// becomes of the redeem.
+pub(crate) fn pairing_taken(peer: SocketAddr, name: &str) {
+    tracing::info!(
+        target: "reef_daemon::remote::audit",
+        peer = %peer,
+        token_name = name,
+        "pairing code taken"
+    );
+}
+
+/// Every code waiting ended after too many wrong ones, the last from `peer`.
+pub(crate) fn pairings_ended(peer: SocketAddr) {
+    tracing::warn!(
+        target: "reef_daemon::remote::audit",
+        peer = %peer,
+        "too many wrong pairing codes; every code waiting ended"
+    );
+}
+
+/// A device paired from `peer` (R3.40), and the one of its name that ended;
+/// empty for none.
+pub(crate) fn paired(peer: SocketAddr, token_id: &str, token_name: &str, replaced: &str) {
+    tracing::info!(
+        target: "reef_daemon::remote::audit",
+        peer = %peer,
+        token_id,
+        token_name,
+        revoked_token_id = replaced,
+        "device paired"
+    );
+}
+
+/// A code taken from `peer` that made no token.
+pub(crate) fn pairing_failed(peer: SocketAddr, token_name: &str, error: &tonic::Status) {
+    tracing::info!(
+        target: "reef_daemon::remote::audit",
+        peer = %peer,
+        token_name,
+        error = error.message(),
+        "pairing failed after its code was taken"
     );
 }
 

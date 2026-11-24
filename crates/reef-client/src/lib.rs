@@ -114,7 +114,7 @@ use reef_api::v1::{
 use reef_api::v1::{
     CreateRemoteTokenRequest, CreateRemoteTokenResponse, ListRemoteTokensRequest, RemoteScope,
     RemoteToken, RevokeRemoteTokenRequest, RevokeRemoteTokenResponse, RotateRemoteTokenRequest,
-    RotateRemoteTokenResponse,
+    RotateRemoteTokenResponse, StartPairingRequest, StartPairingResponse,
 };
 use reef_api::v1::{
     GetChangeRequest, GetChangeResponse, GetDiffRequest, GetDiffResponse, GetOperationRequest,
@@ -747,6 +747,24 @@ impl Client {
             self.remote_tokens().rotate_remote_token(request),
         )
         .await
+    }
+
+    /// `RemoteService.StartPairing` (R3.40): a code that pairs a device named
+    /// `name` for the person `identity` (empty: the default one); `expires_in`
+    /// `None` is the daemon's default.
+    pub async fn start_pairing(
+        &self,
+        name: &str,
+        identity: &str,
+        expires_in: Option<std::time::Duration>,
+    ) -> Result<StartPairingResponse, ClientError> {
+        let request = StartPairingRequest {
+            name: name.to_owned(),
+            identity: identity.to_owned(),
+            expires_in: expires_in.map(proto_duration),
+        };
+        self.call("StartPairing", self.remote_tokens().start_pairing(request))
+            .await
     }
 
     /// `RemoteService.RevokeRemoteToken`.

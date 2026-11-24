@@ -863,13 +863,13 @@ async fn resume_by_cursor_served(served: Served) {
 // 11
 #[tokio::test(flavor = "multi_thread")]
 async fn slow_subscriber_is_held_not_dropped() {
-    slow_subscriber_is_held(Served::Broker).await;
+    Box::pin(slow_subscriber_is_held(Served::Broker)).await;
 }
 
 // R2.22, 9
 #[tokio::test(flavor = "multi_thread")]
 async fn slow_subscriber_is_held_not_dropped_from_the_log() {
-    slow_subscriber_is_held(Served::Log).await;
+    Box::pin(slow_subscriber_is_held(Served::Log)).await;
 }
 
 async fn slow_subscriber_is_held(served: Served) {

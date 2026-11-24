@@ -452,9 +452,8 @@ pub(crate) fn digest(
             .map(|row| v1::InboxLanding {
                 subject: subjects
                     .get(&row.change_id)
-                    .and_then(|text| text.lines().next())
-                    .unwrap_or_default()
-                    .to_owned(),
+                    .map(|text| reef_lib::jj::history::subject(text))
+                    .unwrap_or_default(),
                 change_id: row.change_id,
                 agent: row.agent.unwrap_or_default(),
                 landed_at: Some(timestamp(row.landed_at)),

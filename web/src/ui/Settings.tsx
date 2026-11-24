@@ -1,14 +1,80 @@
 // The settings button and its panel (the design pass): the developer-mode
-// switch, the daemon's version, and the links the footer used to hold. A
+// switch, on a paired phone its pairing (R3.40), the daemon's version, and the links the footer used to hold. A
 // plain disclosure: Escape and a click outside close it, as does moving to
 // another page.
 import { useEffect, useId, useRef, useState } from "react";
+import { device, type Device } from "../device";
 import type { GetDaemonStatusResponse } from "../gen/reef/api/v1/daemon_pb";
 import { setDevMode, useDevMode } from "./dev-mode";
 import { SettingsIcon } from "./icons";
 import { Link, usePath } from "./router";
 
-export function Settings({ status }: { status: GetDaemonStatusResponse | null }) {
+function ThisPhone({ paired, onUnpair }: { paired: Device; onUnpair: (() => void) | undefined }) {
+  const [asking, setAsking] = useState(false);
+  const keep = useRef<HTMLButtonElement>(null);
+  const ask = useRef<HTMLButtonElement>(null);
+  const asked = useRef(false);
+  // The button pressed is gone once it is pressed; focus goes to its place.
+  useEffect(() => {
+    if (asking) keep.current?.focus();
+    else if (asked.current) ask.current?.focus();
+    asked.current = asking;
+  }, [asking]);
+  return (
+    <section className="settings-phone" aria-label="This phone">
+      <h2>This phone</h2>
+      <p className="secondary">
+        Paired as {paired.name}
+        {paired.expiresAt !== null &&
+          ` until ${new Date(paired.expiresAt).toLocaleDateString(undefined, { dateStyle: "medium" })}`}
+        . It only reads.
+      </p>
+      {asking ? (
+        <>
+          <p>
+            This phone forgets its key, in every tab. If anything else may have it, run{" "}
+            <code>reef remote token revoke {paired.name}</code> on the computer Reef runs on.
+          </p>
+          <p className="actions">
+            <button type="button" onClick={onUnpair}>
+              Unpair
+            </button>
+            <button
+              ref={keep}
+              type="button"
+              onClick={() => {
+                setAsking(false);
+              }}
+            >
+              Keep it
+            </button>
+          </p>
+        </>
+      ) : (
+        <p className="actions">
+          <button
+            ref={ask}
+            type="button"
+            onClick={() => {
+              setAsking(true);
+            }}
+          >
+            Unpair this phone
+          </button>
+        </p>
+      )}
+    </section>
+  );
+}
+
+export function Settings({
+  status,
+  onUnpair,
+}: {
+  status: GetDaemonStatusResponse | null;
+  onUnpair?: (() => void) | undefined;
+}) {
+  const paired = device();
   // Open on the page it was opened on: moving to another page closes it.
   const path = usePath();
   const [openOn, setOpenOn] = useState<string | null>(null);
@@ -76,6 +142,7 @@ export function Settings({ status }: { status: GetDaemonStatusResponse | null })
               }}
             />
           </div>
+          {paired && <ThisPhone paired={paired} onUnpair={onUnpair} />}
           <div className="settings-about">
             <h2>About</h2>
             {status ? (
@@ -87,7 +154,7 @@ export function Settings({ status }: { status: GetDaemonStatusResponse | null })
             )}
             <p className="settings-links">
               <Link to="/states">State colors</Link>
-              <Link to="/passkeys">Passkeys</Link>
+              {!paired && <Link to="/passkeys">Passkeys</Link>}
               <a href="/THIRD_PARTY_LICENSES.txt">Third-party licenses</a>
             </p>
           </div>

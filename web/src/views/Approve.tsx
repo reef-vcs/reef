@@ -6,7 +6,9 @@
 import { durationFromMs, timestampMs } from "@bufbuild/protobuf/wkt";
 import { useEffect, useState } from "react";
 import { client, type Connection } from "../api/connection";
-import { isSessionInvalid, reefError, type ReefError } from "../api/errors";
+import { isPassing, isSessionInvalid, reefError, type ReefError } from "../api/errors";
+import { useAgain } from "../api/streams";
+import { device } from "../device";
 import { after } from "../live/backoff";
 import { ChangeService, type Change } from "../gen/reef/api/v1/changes_pb";
 import { ApprovalState, IdentityService, type Approval } from "../gen/reef/api/v1/identity_pb";
@@ -36,7 +38,12 @@ type Action =
 /** The approval, then each change of its state, by long polls until it is no longer pending. */
 function useApproval(connection: Connection, id: string, onSessionInvalid: () => void) {
   const [load, setLoad] = useState<Load>({ kind: "loading" });
+  const [error, setError] = useState<ReefError | null>(null);
+  // One that ended changes no more, and the daemon forgets it after 2 minutes.
+  const over = load.kind === "loaded" && load.approval.state !== ApprovalState.PENDING;
+  const again = useAgain(connection, error, true);
   useEffect(() => {
+    if (over) return;
     const controller = new AbortController();
     const identities = client(connection, IdentityService);
     void (async () => {
@@ -47,6 +54,7 @@ function useApproval(connection: Connection, id: string, onSessionInvalid: () =>
           { signal: controller.signal },
         );
         if (controller.signal.aborted || !approval) return;
+        setError(null);
         setLoad({ kind: "loaded", approval });
         if (approval.state !== ApprovalState.PENDING) return;
         wait = Math.max(1_000, msLeft(approval, Date.now()));
@@ -56,13 +64,18 @@ function useApproval(connection: Connection, id: string, onSessionInvalid: () =>
       const error = reefError(thrown);
       if (isSessionInvalid(error)) onSessionInvalid();
       else if (error.reason === APPROVAL_NOT_FOUND) setLoad({ kind: "missing" });
-      else setLoad({ kind: "failed", error });
+      else {
+        setError(error);
+        setLoad((held) =>
+          held.kind === "loaded" && isPassing(error) ? held : { kind: "failed", error },
+        );
+      }
     });
     return () => {
       controller.abort();
     };
-  }, [connection, id, onSessionInvalid]);
-  return [load, setLoad] as const;
+  }, [connection, again, over, id, onSessionInvalid]);
+  return [load, setLoad, over ? null : error] as const;
 }
 
 /** The change the approval is for, for its description and author. */
@@ -70,6 +83,8 @@ function useChange(connection: Connection, approval: Approval | null) {
   const repo = approval?.repoId ?? "";
   const commit = approval?.commitId ?? "";
   const [change, setChange] = useState<{ commit: string; change: Change | null } | null>(null);
+  const [error, setError] = useState<ReefError | null>(null);
+  const again = useAgain(connection, error, true);
   useEffect(() => {
     if (!commit) return;
     let current = true;
@@ -77,16 +92,23 @@ function useChange(connection: Connection, approval: Approval | null) {
       .getChange({ repo, revision: commit, skipSnapshot: true })
       .then(
         (response) => {
-          if (current) setChange({ commit, change: response.change ?? null });
+          if (!current) return;
+          setError(null);
+          setChange({ commit, change: response.change ?? null });
         },
-        () => {
-          if (current) setChange({ commit, change: null });
+        (thrown: unknown) => {
+          if (!current) return;
+          const error = reefError(thrown);
+          setError(error);
+          setChange((held) =>
+            held?.commit === commit && isPassing(error) ? held : { commit, change: null },
+          );
         },
       );
     return () => {
       current = false;
     };
-  }, [connection, repo, commit]);
+  }, [connection, again, repo, commit]);
   return change?.commit === commit ? change.change : undefined;
 }
 
@@ -102,6 +124,8 @@ function useBelow(connection: Connection, approval: Approval | null) {
   const repo = approval?.repoId ?? "";
   const commit = approval?.commitId ?? "";
   const [below, setBelow] = useState<{ commit: string; changes: Change[] | null } | null>(null);
+  const [error, setError] = useState<ReefError | null>(null);
+  const again = useAgain(connection, error, true);
   useEffect(() => {
     if (!commit) return;
     let current = true;
@@ -115,16 +139,23 @@ function useBelow(connection: Connection, approval: Approval | null) {
       .then(
         ({ entries }) => {
           const changes = entries.flatMap((entry) => (entry.change ? [entry.change] : []));
-          if (current) setBelow({ commit, changes });
+          if (!current) return;
+          setError(null);
+          setBelow({ commit, changes });
         },
-        () => {
-          if (current) setBelow({ commit, changes: null });
+        (thrown: unknown) => {
+          if (!current) return;
+          const error = reefError(thrown);
+          setError(error);
+          setBelow((held) =>
+            held?.commit === commit && isPassing(error) ? held : { commit, changes: null },
+          );
         },
       );
     return () => {
       current = false;
     };
-  }, [connection, repo, commit]);
+  }, [connection, again, repo, commit]);
   return below?.commit === commit ? below.changes : undefined;
 }
 
@@ -295,7 +326,7 @@ export function Approve({
   id: string;
   onSessionInvalid: () => void;
 }) {
-  const [load, setLoad] = useApproval(connection, id, onSessionInvalid);
+  const [load, setLoad, error] = useApproval(connection, id, onSessionInvalid);
   const approval = load.kind === "loaded" ? load.approval : null;
   const change = useChange(connection, approval);
   const below = useBelow(connection, approval);
@@ -310,7 +341,7 @@ export function Approve({
         <h1>No such approval</h1>
         <p>
           The daemon holds no approval <span className="mono">{id}</span>. It ended over 2 minutes
-          ago, the daemon restarted, or it was never requested. Nothing was approved.
+          ago, the daemon restarted, or it was never requested.
         </p>
       </section>
     );
@@ -344,13 +375,14 @@ export function Approve({
         One passkey touch approves exactly this sign-off, on this tree of this change, and nothing
         else.
       </p>
+      {error && <ErrorView error={error} />}
       <Facts approval={shown} change={change} below={below} />
       {pending ? (
         <>
           <p role="timer">
             {open
               ? `${timeLeft(left)} left, until ${clock(shown.expiresAt).text}`
-              : "Expired. Nothing was approved."}
+              : "Its time is over."}
           </p>
           <p className="actions">
             <button
@@ -361,7 +393,11 @@ export function Approve({
             >
               Approve
             </button>
-            <button type="button" disabled={!open || busy} onClick={() => void run("declining")}>
+            <button
+              type="button"
+              disabled={!open || busy || device() !== null}
+              onClick={() => void run("declining")}
+            >
               Decline
             </button>
           </p>

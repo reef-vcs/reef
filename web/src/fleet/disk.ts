@@ -74,6 +74,13 @@ export class DiskScheduler {
     this.ask();
   }
 
+  /** The selection again, not spaced: what is known of it may be from before the streams were lost. */
+  readAgain() {
+    if (!this.selected) return;
+    this.markDirty(this.selected);
+    this.paced.requestNow();
+  }
+
   /** The user asked: first, and not spaced. */
   measureAgain(id: string) {
     this.forced.add(id);
@@ -109,7 +116,7 @@ export class DiskScheduler {
     });
   }
 
-  private measureNext(): Promise<void> | undefined {
+  private measureNext(): Promise<boolean> | undefined {
     if (this.stopped) return undefined;
     const id = this.next();
     if (id === undefined) return undefined;
@@ -117,7 +124,7 @@ export class DiskScheduler {
     return this.measure(id, walk);
   }
 
-  private async measure(id: string, walk: boolean) {
+  private async measure(id: string, walk: boolean): Promise<boolean> {
     const before = this.results.get(id);
     const mark = this.marks.get(id) ?? 0;
     // An operation that touched it while the walk ran may postdate what it saw.
@@ -129,7 +136,7 @@ export class DiskScheduler {
         snapshotFirst: false,
         skipDiskUsage: !walk,
       });
-      if (this.stopped) return;
+      if (this.stopped) return true;
       this.results.set(id, {
         response,
         measuredAt: walk ? this.now() : before?.measuredAt,
@@ -140,11 +147,11 @@ export class DiskScheduler {
       // The walk updated the daemon's figure: the list shows it.
       if (walk) this.onMeasured();
     } catch (thrown) {
-      if (this.stopped) return;
+      if (this.stopped) return true;
       const error = reefError(thrown);
       if (isSessionInvalid(error)) {
         this.onSessionInvalid();
-        return;
+        return true;
       }
       // Not retried until an operation touches it again or the user asks.
       this.results.set(id, {
@@ -159,5 +166,6 @@ export class DiskScheduler {
     this.onChange();
     // The next one, from a frame, spaced after this run.
     this.ask();
+    return true;
   }
 }

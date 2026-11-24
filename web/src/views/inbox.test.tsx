@@ -3,20 +3,25 @@
 // that shows only its repository, the Answer box, and a digest marked seen
 // once on screen that keeps what it showed for the visit.
 import { timestampFromMs } from "@bufbuild/protobuf/wkt";
-import { Code } from "@connectrpc/connect";
+import { Code, ConnectError } from "@connectrpc/connect";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { create } from "@bufbuild/protobuf";
+import { DEVICE_READS } from "../device";
 import { InboxReason, InboxSectionSchema } from "../gen/reef/api/v1/inbox_pb";
 import { InboxStore } from "../live/inbox";
 import type { Live } from "../live/share";
-import { daemonError, immediateFrames, settle } from "../test/fakes";
+import { RepositoryService } from "../gen/reef/api/v1/repositories_pb";
+import { daemonError, fakeTransport, immediateFrames, settle } from "../test/fakes";
 import { helpItem, InboxDaemon, OTHER, proposalItem, REPO, section } from "../test/inbox-daemon";
+import { narrow } from "../test/narrow";
+import { paired } from "../test/paired";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "../test/testing-library";
 import { Inbox, SEEN_AFTER_MS } from "./Inbox";
 import { InboxModel } from "./inbox-model";
 
 afterEach(() => {
   cleanup();
+  Element.prototype.scrollIntoView = () => undefined;
 });
 
 /** The browser's inbox stream, fed by `daemon`: `send` is its next frame. */
@@ -32,11 +37,12 @@ function live(daemon: InboxDaemon) {
   };
 }
 
-async function open(daemon: InboxDaemon, repo?: string) {
+async function open(daemon: InboxDaemon, repo?: string, item?: string) {
   const stream = live(daemon);
   render(
     <Inbox
       repo={repo}
+      {...(item ? { item } : {})}
       repoNames={new Map([[REPO, "reef"]])}
       connection={daemon.connection()}
       live={stream.live}
@@ -91,6 +97,66 @@ describe("the inbox", () => {
     ]);
     expect(screen.getByRole("link", { name: "Change dddd" })).toBeTruthy();
     expect(screen.getByText("Needs a sign-off from release")).toBeTruthy();
+  });
+
+  it("opened at a help request, scrolls to it with its answer open", async () => {
+    const scrolled = vi.fn();
+    Element.prototype.scrollIntoView = scrolled;
+    const daemon = new InboxDaemon();
+    daemon.sections = [
+      section(REPO, {
+        needsYouNow: [helpItem("h1", 2_000), helpItem("h2", 1_000)],
+        needsYouNowTotal: 2,
+      }),
+    ];
+    await open(daemon, REPO, `help:${REPO}:h2`);
+    expect(scrolled).toHaveBeenCalledOnce();
+    const opened = screen.getByLabelText("Your answer").closest("li");
+    expect(opened?.getAttribute("data-key")).toBe(`help:${REPO}:h2`);
+    expect(screen.getAllByLabelText("Your answer")).toHaveLength(1);
+  });
+
+  it("on a phone, folds all but what needs you now", async () => {
+    narrow();
+    const daemon = new InboxDaemon();
+    daemon.sections = [
+      section(REPO, { needsYouNow: [helpItem("h1", 2_000)], needsYouNowTotal: 1 }),
+    ];
+    await open(daemon);
+    expect(needs().querySelector("details")).toBeNull();
+    for (const name of ["Watching", "Landed since you last looked"]) {
+      const bucket = screen.getByRole("region", { name });
+      expect(bucket.querySelector("details")?.open).toBe(false);
+    }
+  });
+
+  it("on a phone, opens the bucket of the item it was opened at", async () => {
+    narrow();
+    const daemon = new InboxDaemon();
+    const change = "d".repeat(32);
+    daemon.sections = [
+      section(REPO, {
+        watching: [proposalItem(change, InboxReason.IN_REVIEW, 1_000, "Waits")],
+        watchingTotal: 1,
+      }),
+    ];
+    await open(daemon, REPO, `proposal:${REPO}:${change}`);
+    const watching = screen.getByRole("region", { name: "Watching" });
+    expect(watching.querySelector("details")?.open).toBe(true);
+    const landed = screen.getByRole("region", { name: "Landed since you last looked" });
+    expect(landed.querySelector("details")?.open).toBe(false);
+  });
+
+  it("on a paired phone, says that it only reads in place of the answer", async () => {
+    paired();
+    const daemon = new InboxDaemon();
+    daemon.sections = [
+      section(REPO, { needsYouNow: [helpItem("h1", 2_000)], needsYouNowTotal: 1 }),
+    ];
+    await open(daemon, REPO, `help:${REPO}:h1`);
+    expect(screen.getByText(DEVICE_READS)).toBeTruthy();
+    expect(screen.queryByLabelText("Your answer")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Answer" })).toBeNull();
   });
 
   it("on the home page, shows a repository the stream adds after it opened", async () => {
@@ -252,6 +318,99 @@ describe("the inbox", () => {
     expect(digest?.count, "each landing once").toBe(2n);
     expect(digest?.newest.map((l) => l.seq)).toEqual([6n, 5n]);
     stop();
+  });
+
+  it("marks again, saying nothing, after a mark no answer came for", async () => {
+    const daemon = new InboxDaemon();
+    daemon.sections = [
+      section(REPO, {
+        landed: { count: 1n, fromSeq: 4n, throughSeq: 5n, fromMark: true },
+      }),
+    ];
+    const stream = live(daemon);
+    const model = new InboxModel(
+      daemon.connection(),
+      stream.live.inbox,
+      immediateFrames,
+      vi.fn(),
+      undefined,
+    );
+    const stop = model.start();
+    daemon.refuseMarks = new ConnectError("Load failed", Code.Unknown);
+    await model.markSeen(REPO, 5n);
+    expect(model.getSnapshot().error).toBeNull();
+    daemon.refuseMarks = null;
+    await model.markSeen(REPO, 5n);
+    expect(daemon.marks.map((m) => m.seq)).toEqual([5n]);
+    stop();
+  });
+
+  it("finds its repository once the daemon answers, and not again after a refusal", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    try {
+      for (const [thrown, tries] of [
+        [new ConnectError("Load failed", Code.Unknown), 3],
+        [daemonError(Code.NotFound, { reason: "REPOSITORY_NOT_FOUND" }), 1],
+      ] as const) {
+        let asked = 0;
+        const model = new InboxModel(
+          {
+            label: "test",
+            transport: fakeTransport({
+              [RepositoryService.typeName]: {
+                getRepository: () => {
+                  asked += 1;
+                  if (asked < 3) throw thrown;
+                  return { repository: { id: REPO } };
+                },
+              },
+            }),
+          },
+          live(new InboxDaemon()).live.inbox,
+          immediateFrames,
+          vi.fn(),
+          "reef",
+        );
+        const stop = model.start();
+        await settle(60);
+        expect(model.getSnapshot().error?.code).toBe(thrown.code);
+        await vi.advanceTimersByTimeAsync(10_000);
+        await settle(60);
+        expect(asked).toBe(tries);
+        expect(model.getSnapshot().error === null).toBe(tries === 3);
+        stop();
+        expect(vi.getTimerCount()).toBe(0);
+      }
+      let asks = 0;
+      const gone = new InboxModel(
+        {
+          label: "test",
+          transport: fakeTransport({
+            [RepositoryService.typeName]: {
+              getRepository: () => {
+                asks += 1;
+                throw new ConnectError("Load failed", Code.Unknown);
+              },
+            },
+          }),
+        },
+        live(new InboxDaemon()).live.inbox,
+        immediateFrames,
+        vi.fn(),
+        "reef",
+      );
+      const stop = gone.start();
+      await settle(60);
+      expect(vi.getTimerCount()).toBe(1);
+      await vi.advanceTimersByTimeAsync(60_000);
+      asks = 0;
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      expect(asks).toBeLessThanOrEqual(21);
+      stop();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("keeps a failed repository's rows as they were, and says it could not read it", async () => {

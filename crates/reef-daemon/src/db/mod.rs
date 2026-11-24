@@ -105,7 +105,8 @@ pub use lifecycle::{
 /// `0026_resolution_tiers` (R3.28, numbered after R3.32's, which merged
 /// first; `0024` is unused), `0027_dependent_lifecycle` (R3.11),
 /// `0028_passkeys` (R3.43), `0029_web_audit` (R3.31),
-/// `0030_inbox_marks` (R3.33) and `0031_inbox_raises` (R3.39).
+/// `0030_inbox_marks` (R3.33), `0031_inbox_raises` (R3.39) and
+/// `0032_paired_devices` (R3.40).
 /// They are independent of each other, so a database may have a later one
 /// without an earlier one; see [`migrate`].
 const MIGRATIONS: &[(&str, &str)] = &[
@@ -209,6 +210,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0031_inbox_raises",
         include_str!("migrations/0031_inbox_raises.sql"),
+    ),
+    (
+        "0032_paired_devices",
+        include_str!("migrations/0032_paired_devices.sql"),
     ),
 ];
 
@@ -997,7 +1002,8 @@ mod tests {
                 "0028_passkeys",
                 "0029_web_audit",
                 "0030_inbox_marks",
-                "0031_inbox_raises"
+                "0031_inbox_raises",
+                "0032_paired_devices"
             ]
         );
         // A newer daemon applied a migration this binary does not have, without
@@ -1055,7 +1061,8 @@ mod tests {
                 "0028_passkeys",
                 "0029_web_audit",
                 "0030_inbox_marks",
-                "0031_inbox_raises"
+                "0031_inbox_raises",
+                "0032_paired_devices"
             ]
         );
         let repo = "aaaa000000000001".parse().unwrap();
@@ -1327,6 +1334,9 @@ mod tests {
         assert_eq!(tokens.len(), 1);
         assert_eq!(tokens[0].name, "laptop");
         assert_eq!(tokens[0].identity_id, None);
+        // R3.40 12: a row from before 0032 is no device.
+        assert_eq!(tokens[0].scope, TokenScope::Write);
+        assert_eq!(tokens[0].device_origin, None);
         assert_eq!(db.identity_counts().unwrap(), (0, 0, 0, 0));
     }
 

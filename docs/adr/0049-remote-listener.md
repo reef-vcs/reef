@@ -4,7 +4,7 @@
 - Date: 2026-10-31
 - Ticket: R2.08
 - Amends: [0027](0027-trust-boundaries-in-phase-1.md), [0031](0031-writes-over-jj-state.md)
-- Amended by: [0057](0057-operator-identities-and-session-keys.md) (a token may be linked to an operator identity at creation; `IssueSessionKey`'s rule is `Rule::LinkedIdentity`)
+- Amended by: [0057](0057-operator-identities-and-session-keys.md) (a token may be linked to an operator identity at creation; `IssueSessionKey`'s rule is `Rule::LinkedIdentity`), [0095](0095-paired-devices.md) (a third scope, a paired device's; a pairing code is the one credential besides a token, for one method; decision 11: a live token passes on a connection opened before its address's backoff)
 
 ## Context
 
@@ -24,13 +24,13 @@ tonic's own TLS does not fit: its acceptor offers ALPN `h2` only (gRPC-web over 
 8. **The gate is R2.18's, for a non-loopback origin.** `Host` must be a name in `[remote] names` or an IP literal, any port (a port forward changes it); no upgrades or preflights, no CORS; assets public with R2.18's security headers; `Origin` must be `https://` and the request's own `Host`, `Sec-Fetch-Site` `same-origin`; binary gRPC-web or native gRPC only. Then the token, its scope, and its per-token limits (32 calls, 16 streams). The gate puts the caller in the request's extensions, which no client can set, and strips `authorization` and any `reef-remote*` header.
 9. **The token is on every operation a remote call causes.** As `reef.remote-token` and `reef.remote-token-name`, typed as `Operation.remote`. The daemon carries the token along the paths that already carry the agent: a remote call's agent string is marked with it (`RemoteToken::mark`), and `OpMeta` splits it into the attributes; a `reef-agent` value is visible ASCII and a workspace owner may hold no control character, so neither can carry the mark. Snapshots a call takes first are marked too. A remote call's agent defaults to the token's name, not the workspace's owner. This amends [0031](0031-writes-over-jj-state.md), decision 2.
 10. **Every remote write, refusal and token change is in the daemon's log**, under the target `reef_daemon::remote::audit`, with the token, the peer, the method and the outcome read from the trailers. Token refusals from one address are logged at most once per 10 s with a count. No line holds a secret. The threat model's requirement 5 is amended from "the operation log's description" to the operation's attributes and the daemon's log.
-11. **Limits on the unauthenticated surface.** 256 connections, 32 per IPv4 address or IPv6 /64; an address with 10 token refusals within a minute is in backoff for a minute, doubling to an hour: its new connections are closed before TLS and its open connections' requests refused. A connection that makes no authenticated request within 30 s of its handshake is closed, so connections without a token cannot hold the slots. The backoff is for resources and log volume; no rate makes a 256-bit guess succeed.
+11. **Limits on the unauthenticated surface.** 256 connections, 32 per IPv4 address or IPv6 /64; an address with 10 token refusals within a minute is in backoff for a minute, doubling to an hour: its new connections are closed before TLS, and on its open connections whatever is not a live token is refused (until [0095](0095-paired-devices.md), live tokens too). A connection that makes no authenticated request within 30 s of its handshake is closed, so connections without a token cannot hold the slots. The backoff is for resources and log volume; no rate makes a 256-bit guess succeed.
 12. **The CLI reaches a remote daemon through profiles.** `reef remote add <name> <url> --fingerprint … --token-file -` saves `<state>/remotes.toml` (`0600`) after checking the pin and the token; the token is never an argument. `reef --remote <name> …`, or `REEF_REMOTE` (a profile, or an `https://` URL with `REEF_REMOTE_TOKEN` and `REEF_REMOTE_FINGERPRINT`), points a command at it. The noun is `reef remote` (decided by the user); git-remote settings can live under `reef git` later. Commands that need this machine (`here`, `ws run`, `ui`, `init`, `mcp`, `daemon` other than `status`, `config`, `backup`, `restore`) or call ADMIN RPCs (`ws gc`, `store build`, `repo register|forget`, `remote token`) are refused with exit 9 before connecting; in remote mode a command needs `--workspace` or `--repo`, and paths are sent as given.
 
 ## Consequences
 
 - A daemon in a VM is reachable from another machine with one flag and one token, through the CLI, the SDKs' gRPC, and a browser.
-- The generated certificate shows a browser warning once per origin; a phone's browser needs a supplied certificate, which the quickstart says.
+- The generated certificate shows a browser warning once per origin; a phone's browser needs a supplied certificate, and for its Home Screen app an exception is not enough ([docs/phone.md](../phone.md)).
 - A leaked `write` token can describe, abandon, undo and edit in every registered repository until it expires or is revoked; every operation it causes names it.
 - A restored state directory has no key: clients get a pin mismatch whose hint says to compare and re-add.
 - `--remote` is a top-level option (`reef --remote vm status`), as `git -C` is, so every command's long help stays within its budget.
@@ -44,7 +44,7 @@ tonic's own TLS does not fit: its acceptor offers ALPN `h2` only (gRPC-web over 
 - **Mutual TLS instead of tokens**: no browser story, and a certificate is harder to hand to a phone than a string.
 - **Tokens hashed with a slow KDF**: protects nothing a 256-bit random secret needs.
 - **An `admin` scope**: would make store builds, which run commands in the daemon, reachable from the network.
-- **CORS now**: no client needs it until the mobile shell (R3.40).
+- **CORS now**: no client needs it. The phone's app is the page itself, at the listener's own origin ([0095](0095-paired-devices.md)).
 - **An `Unauthenticated` error kind**: a new exit code for one answer every client already tells by its reason.
 - **Binding on first use**, as R2.18 does: a remote client cannot ask a daemon to bind.
 - **Threading a typed caller through every write path** instead of marking the agent: the same effect with a parameter on some thirty functions.

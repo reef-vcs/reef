@@ -119,193 +119,6 @@ fn table_is_sound() {
     assert!(text(licenses.bytes).contains("react"));
 }
 
-/// The little JSON Vite's manifest uses: objects, arrays, strings and
-/// booleans. reef-web has no dependencies (`crate_graph`), so no serde.
-#[derive(Debug)]
-enum Json {
-    Object(Vec<(String, Json)>),
-    Array(Vec<Json>),
-    String(String),
-    Bool(bool),
-}
-
-impl Json {
-    fn get(&self, key: &str) -> Option<&Json> {
-        match self {
-            Json::Object(fields) => fields.iter().find(|(k, _)| k == key).map(|(_, v)| v),
-            _ => None,
-        }
-    }
-
-    fn str(&self) -> &str {
-        match self {
-            Json::String(s) => s,
-            other => panic!("not a string: {other:?}"),
-        }
-    }
-
-    /// An array of strings at `key`, or none.
-    fn strings(&self, key: &str) -> Vec<&str> {
-        match self.get(key) {
-            Some(Json::Array(items)) => items.iter().map(Json::str).collect(),
-            _ => Vec::new(),
-        }
-    }
-
-    fn is(&self, key: &str) -> bool {
-        matches!(self.get(key), Some(Json::Bool(true)))
-    }
-}
-
-fn parse(text: &str) -> Json {
-    fn skip(s: &[u8], at: &mut usize) {
-        while *at < s.len() && s[*at].is_ascii_whitespace() {
-            *at += 1;
-        }
-    }
-    fn string(s: &[u8], at: &mut usize) -> String {
-        assert_eq!(s[*at], b'"');
-        *at += 1;
-        let mut out = Vec::new();
-        while s[*at] != b'"' {
-            if s[*at] == b'\\' {
-                *at += 1;
-                out.push(match s[*at] {
-                    b'n' => b'\n',
-                    b't' => b'\t',
-                    other => other,
-                });
-            } else {
-                out.push(s[*at]);
-            }
-            *at += 1;
-        }
-        *at += 1;
-        String::from_utf8(out).expect("UTF-8")
-    }
-    fn value(s: &[u8], at: &mut usize) -> Json {
-        skip(s, at);
-        match s[*at] {
-            b'{' => {
-                *at += 1;
-                let mut fields = Vec::new();
-                loop {
-                    skip(s, at);
-                    if s[*at] == b'}' {
-                        *at += 1;
-                        return Json::Object(fields);
-                    }
-                    if s[*at] == b',' {
-                        *at += 1;
-                        skip(s, at);
-                    }
-                    let key = string(s, at);
-                    skip(s, at);
-                    assert_eq!(s[*at], b':');
-                    *at += 1;
-                    fields.push((key, value(s, at)));
-                }
-            }
-            b'[' => {
-                *at += 1;
-                let mut items = Vec::new();
-                loop {
-                    skip(s, at);
-                    if s[*at] == b']' {
-                        *at += 1;
-                        return Json::Array(items);
-                    }
-                    if s[*at] == b',' {
-                        *at += 1;
-                    }
-                    items.push(value(s, at));
-                }
-            }
-            b'"' => Json::String(string(s, at)),
-            b't' => {
-                *at += 4;
-                Json::Bool(true)
-            }
-            b'f' => {
-                *at += 5;
-                Json::Bool(false)
-            }
-            other => panic!("unexpected {:?} in the manifest", other as char),
-        }
-    }
-    let mut at = 0;
-    value(text.as_bytes(), &mut at)
-}
-
-fn manifest() -> Json {
-    parse(text(get("manifest.json").expect("manifest.json").bytes))
-}
-
-/// The pages that load lazily, by their source path in the manifest.
-const PAGES: &[&str] = &[
-    "src/views/RepoFrame.tsx",
-    "src/views/Smartlog.tsx",
-    "src/views/Fleet.tsx",
-    "src/views/Activity.tsx",
-    "src/views/States.tsx",
-    "src/views/Passkeys.tsx",
-    "src/views/Approve.tsx",
-    "src/views/Inbox.tsx",
-    "src/views/Proposal.tsx",
-];
-
-/// The chunks a route loads: the entry, each lazy chunk on its way (the
-/// repository frame, then the page), and their static imports, transitively.
-fn route_files(manifest: &Json, lazy: &[&str]) -> Vec<String> {
-    let mut seen: Vec<String> = Vec::new();
-    let mut stack: Vec<String> = vec!["index.html".to_owned()];
-    stack.extend(lazy.iter().map(|&key| key.to_owned()));
-    while let Some(key) = stack.pop() {
-        let entry = manifest
-            .get(&key)
-            .unwrap_or_else(|| panic!("{key} not in the manifest"));
-        let file = entry.get("file").expect("file").str().to_owned();
-        if seen.contains(&file) {
-            continue;
-        }
-        seen.push(file);
-        stack.extend(entry.strings("imports").into_iter().map(str::to_owned));
-    }
-    seen
-}
-
-#[test]
-fn manifest_is_sound() {
-    if !BUILT {
-        eprintln!("skipped: the placeholder is embedded");
-        return;
-    }
-    let manifest = manifest();
-    let Json::Object(entries) = &manifest else {
-        panic!("the manifest is not an object")
-    };
-    for (key, entry) in entries {
-        let file = entry.get("file").expect("file").str();
-        assert!(get(file).is_some(), "{key}: {file} is not embedded");
-        for css in entry.strings("css") {
-            assert!(get(css).is_some(), "{key}: {css} is not embedded");
-        }
-    }
-    let entry = manifest.get("index.html").expect("the entry");
-    assert!(entry.is("isEntry"));
-    let scripts = linked(text(index().bytes), "src");
-    assert_eq!(
-        scripts,
-        vec![entry.get("file").expect("file").str().to_owned()]
-    );
-    for page in PAGES {
-        assert!(
-            manifest.get(page).is_some_and(|p| p.is("isDynamicEntry")),
-            "{page} is not a lazy chunk"
-        );
-    }
-}
-
 #[test]
 fn bundle_budget() {
     if !BUILT {
@@ -313,63 +126,21 @@ fn bundle_budget() {
         return;
     }
     let total: usize = all().iter().map(|a| a.bytes.len()).sum();
-    let js: usize = all()
-        .iter()
-        .filter(|a| a.path.ends_with(".js"))
-        .map(|a| a.bytes.len())
-        .sum();
-    eprintln!("assets: {total} bytes, JavaScript: {js} bytes");
+    let scripts: Vec<_> = all().iter().filter(|a| a.path.ends_with(".js")).collect();
     // The licenses file is text the browser never loads; it is not app weight.
     let licenses = get("THIRD_PARTY_LICENSES.txt").map_or(0, |a| a.bytes.len());
-    // 600 KiB, and 500 KiB per page below, again since #252: each page
-    // imports only the services it calls, and Preact runs the app behind
-    // React's API. R3.42 had raised them to 650 and 550 KiB as a stopgap
-    // (user, 2026-11-09).
+    // 600 KiB, again since #252: Preact runs the app behind React's API. R3.42
+    // had raised it to 650 KiB as a stopgap (user, 2026-11-09).
     assert!(
         total - licenses <= 600 << 10,
         "assets are {} bytes, over 600 KiB",
         total - licenses
     );
-    // What a page loads, not what is embedded (R2.21, one chunk per page).
-    // 500 KiB since R2.20; per page since R2.21, decided with the user; 550
-    // KiB in R3.42 (user, 2026-11-09, stopgap); 500 KiB again since #252.
-    let manifest = manifest();
-    let routes: &[(&str, &[&str])] = &[
-        // The home page is the inbox (R3.33).
-        ("/", &["src/views/Inbox.tsx"]),
-        (
-            "/repos/<id>/smartlog",
-            &["src/views/RepoFrame.tsx", "src/views/Smartlog.tsx"],
-        ),
-        (
-            "/repos/<id>/workspaces",
-            &["src/views/RepoFrame.tsx", "src/views/Fleet.tsx"],
-        ),
-        (
-            "/repos/<id>/activity",
-            &["src/views/RepoFrame.tsx", "src/views/Activity.tsx"],
-        ),
-        ("/states", &["src/views/States.tsx"]),
-        ("/passkeys", &["src/views/Passkeys.tsx"]),
-        ("/approve/<id>", &["src/views/Approve.tsx"]),
-        (
-            "/repos/<id>/inbox",
-            &["src/views/RepoFrame.tsx", "src/views/Inbox.tsx"],
-        ),
-        (
-            "/repos/<id>/proposals/<change>",
-            &["src/views/RepoFrame.tsx", "src/views/Proposal.tsx"],
-        ),
-    ];
-    for (route, lazy) in routes {
-        let bytes: usize = route_files(&manifest, lazy)
-            .iter()
-            .map(|file| get(file).expect("embedded").bytes.len())
-            .sum();
-        eprintln!("{route}: {bytes} bytes of JavaScript");
-        assert!(
-            bytes <= 500 << 10,
-            "{route} loads {bytes} bytes of JavaScript, over 500 KiB"
-        );
-    }
+    // One file, so that a page opens though the connection died since the app
+    // loaded (R3.40; user, 2026-11-23). Each page had its own since R2.21.
+    assert_eq!(scripts.len(), 1, "{scripts:?}");
+    let js = scripts[0].bytes.len();
+    eprintln!("assets: {total} bytes, JavaScript: {js} bytes");
+    // What a page loaded at most since R2.20.
+    assert!(js <= 500 << 10, "{js} bytes of JavaScript, over 500 KiB");
 }

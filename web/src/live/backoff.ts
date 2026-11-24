@@ -35,10 +35,14 @@ export function sleep(ms: number, signal: AbortSignal): Promise<void> {
 export class Backoff {
   static readonly FIRST_MS = 100;
   static readonly MAX_MS = 2000;
+  /** A page's own: what it reads may fail for as long as the page is open. */
+  static readonly PAGE_MS = 30_000;
   private delay = 0;
 
+  constructor(private readonly max = Backoff.MAX_MS) {}
+
   next(): number {
-    this.delay = this.delay === 0 ? Backoff.FIRST_MS : Math.min(this.delay * 2, Backoff.MAX_MS);
+    this.delay = this.delay === 0 ? Backoff.FIRST_MS : Math.min(this.delay * 2, this.max);
     return this.delay;
   }
 

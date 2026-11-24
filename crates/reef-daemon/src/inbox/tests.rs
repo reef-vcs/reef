@@ -376,3 +376,26 @@ fn every_landing_reason_has_words() {
         assert!(!words::landing_words(reason).contains('_'), "{text}");
     }
 }
+
+#[test]
+fn a_landed_subject_is_cut() {
+    let base = DigestBase {
+        seq: 0,
+        from_mark: false,
+    };
+    for len in [127 << 10, 129 << 10, 2 << 20] {
+        let landed = Landed {
+            newest: vec![crate::db::inbox::LandedRow {
+                change_id: "c".to_owned(),
+                seq: 1,
+                landed_at: Timestamp(1),
+                agent: None,
+            }],
+            ..Landed::default()
+        };
+        let text = format!("x{}\n\nbody", "ö".repeat(len / 2));
+        let subjects = HashMap::from([("c".to_owned(), text)]);
+        let digest = digest(base, Timestamp(1), landed, &subjects);
+        assert_eq!(digest.newest[0].subject, format!("x{}", "ö".repeat(99)));
+    }
+}

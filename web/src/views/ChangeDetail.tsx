@@ -7,6 +7,7 @@
 import { useEffect, useRef, useState } from "react";
 import { client, type Connection } from "../api/connection";
 import { isSessionInvalid, reefError, type ReefError } from "../api/errors";
+import { useAgain } from "../api/streams";
 import type { Change } from "../gen/reef/api/v1/changes_pb";
 import { DiffFormat, DiffService, type GetDiffResponse } from "../gen/reef/api/v1/diff_pb";
 import { FileChangeKind } from "../gen/reef/api/v1/files_pb";
@@ -17,6 +18,7 @@ import type { Workspace } from "../gen/reef/api/v1/workspaces_pb";
 import type { EdgeKind } from "../graph/node";
 import { shellQuote } from "../graph/revset";
 import { after } from "../live/backoff";
+import { spacing } from "../live/paced";
 import { outcomeState } from "../state/states";
 import { StateBadge } from "../state/StateBadge";
 import { Avatar } from "../ui/Avatar";
@@ -33,7 +35,7 @@ import { activityHref } from "./activity-route";
 import { fleetHref } from "./fleet-route";
 import { proposalHref } from "./proposal-route";
 import { SignOff } from "./SignOff";
-import { MIN_SPACING_MS, type SmartlogRow } from "./smartlog-model";
+import type { SmartlogRow } from "./smartlog-model";
 
 export const HISTORY_DISABLED = "HISTORY_DISABLED";
 const FILES_SHOWN = 100;
@@ -78,6 +80,7 @@ function useFiles(
   // Each answer is kept with its commit, so one for another selection is never shown.
   const [files, setFiles] = useState<{ commit: string; response: GetDiffResponse } | null>(null);
   const [error, setError] = useState<{ commit: string; error: ReefError } | null>(null);
+  const again = useAgain(connection, error?.commit === commit ? error.error : null, false);
   useEffect(() => {
     let current = true;
     client(connection, DiffService)
@@ -90,7 +93,9 @@ function useFiles(
       })
       .then(
         (response) => {
-          if (current) setFiles({ commit, response });
+          if (!current) return;
+          setError(null);
+          setFiles({ commit, response });
         },
         (thrown: unknown) => {
           if (!current) return;
@@ -102,7 +107,7 @@ function useFiles(
     return () => {
       current = false;
     };
-  }, [connection, repo, commit, at, onSessionInvalid]);
+  }, [connection, again, repo, commit, at, onSessionInvalid]);
   return {
     files: files?.commit === commit ? files.response : null,
     error: error?.commit === commit ? error.error : null,
@@ -111,7 +116,7 @@ function useFiles(
 
 /**
  * Who wrote the change, read when the selection changes, and again when its
- * cause does, spaced like a refresh. Null while frozen at an operation.
+ * cause does, spaced like a refresh, or the streams are live again. Null while frozen at an operation.
  */
 function useHistory(
   connection: Connection,
@@ -126,13 +131,14 @@ function useHistory(
   );
   // Answers and errors are kept with their change, so neither shows under another.
   const [error, setError] = useState<{ changeId: string; error: ReefError } | null>(null);
-  const last = useRef({ changeId: "", at: Number.NEGATIVE_INFINITY, duration: 0 });
+  const again = useAgain(connection, error?.changeId === changeId ? error.error : null, true);
+  const last = useRef({ changeId: "", again, at: Number.NEGATIVE_INFINITY, duration: 0 });
   useEffect(() => {
     if (frozen) return;
     let current = true;
     const read = () => {
       const started = Date.now();
-      last.current = { changeId, at: started, duration: last.current.duration };
+      last.current = { changeId, again, at: started, duration: last.current.duration };
       const done = () => {
         last.current.duration = Date.now() - started;
       };
@@ -154,15 +160,15 @@ function useHistory(
           },
         );
     };
-    // Spaced like a refresh: max(250 ms, 4 × the last read) after the last start.
-    const spacing = Math.max(MIN_SPACING_MS, 4 * last.current.duration);
-    const wait = last.current.changeId === changeId ? last.current.at + spacing - Date.now() : 0;
+    const { at, duration } = last.current;
+    const spaced = last.current.changeId === changeId && last.current.again === again;
+    const wait = spaced ? spacing(at, duration, Date.now()) : 0;
     const cancel = wait > 0 ? after(wait, read) : (read(), undefined);
     return () => {
       current = false;
       cancel?.();
     };
-  }, [connection, repo, changeId, cause, frozen, onSessionInvalid]);
+  }, [connection, again, repo, changeId, cause, frozen, onSessionInvalid]);
   return {
     history: history?.changeId === changeId ? history.change : undefined,
     error: error?.changeId === changeId ? error.error : null,

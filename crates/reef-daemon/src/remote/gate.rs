@@ -12,11 +12,18 @@
 //!    `Sec-Fetch-Site`, if sent, is `same-origin`, or `403`.
 //! 7. The content type is binary gRPC-web or native gRPC, or `415`.
 //! 8. `authorization: Bearer <token>` names a live token, or
-//!    `REMOTE_TOKEN_INVALID`; each refusal counts against the address, and
-//!    an address in backoff is refused here too, on a connection it opened
-//!    before. The header is removed.
-//! 9. The method is in the token's scope (`read`: `ACCESS_READ`; `write`:
-//!    also `ACCESS_WRITE`; never `ACCESS_ADMIN`), or `REMOTE_ACCESS_DENIED`.
+//!    `REMOTE_TOKEN_INVALID`; each refusal counts against the address. On a
+//!    connection an address opened before its backoff, only a live token
+//!    still passes: other callers may share the address. The header is
+//!    removed.
+//!    A pairing code (R3.40, `Bearer reef_pair_<code>`) is taken for
+//!    `RedeemPairing` at `[remote] origin`, or refused with
+//!    `PAIRING_CODE_INVALID`, which counts the same; with any other method
+//!    it is no token, and no token calls `RedeemPairing`. A device's token
+//!    is at the address it was paired at, or `REMOTE_ORIGIN_CHANGED`.
+//! 9. The method is in the token's scope (`read`: `ACCESS_READ`; `device`:
+//!    also [`super::rules::DEVICE`]; `write`: also `ACCESS_WRITE`; never
+//!    `ACCESS_ADMIN`), or `REMOTE_ACCESS_DENIED`.
 //! 10. The token is under its limits of calls and streams, or
 //!     `REMOTE_BUSY`.
 //! 11. The request passes with a [`Caller`] in its extensions, which a
@@ -41,6 +48,7 @@ use tower::{Layer, Service};
 
 use super::failures::Failures;
 use super::incoming::Peer;
+use super::pairing::{self, Pairing, Pairings};
 use super::tokens::{Refused, Tokens, Use};
 use super::{Caller, RemoteError, access_name, audit};
 use crate::db::TokenScope;
@@ -80,7 +88,10 @@ pub(crate) fn is_streaming(path: &str) -> bool {
 pub(crate) struct Gate {
     /// `[remote] names`, or the host name, lowercased.
     pub(crate) names: Vec<String>,
+    /// `[remote] origin` (R3.40).
+    pub(crate) origin: Option<reef_policy::Origin>,
     pub(crate) tokens: Arc<Tokens>,
+    pub(crate) pairings: Arc<Pairings>,
     pub(crate) failures: Arc<Failures>,
 }
 
@@ -203,13 +214,64 @@ impl Gate {
         }
     }
 
+    /// Whether `request` came to `origin`, byte for byte. Where the caller
+    /// says it is, so it stops a page elsewhere, not a program.
+    fn is_at(request: &http::Request<Body>, origin: &str) -> bool {
+        authority(request).is_some_and(|authority| {
+            origin
+                .strip_prefix("https://")
+                .is_some_and(|at| at == authority)
+        })
+    }
+
+    /// Counts a refusal against `peer`, and logs it when one is due.
+    fn count(&self, peer: SocketAddr, path: &str, state: &'static str) {
+        if let Some(logged) = self.failures.refused(peer.ip()) {
+            audit::token_refused(peer, path, state, &logged);
+        }
+    }
+
+    /// Step 8 for a pairing code.
+    fn redeem(
+        &self,
+        request: &http::Request<Body>,
+        code: &str,
+        peer: SocketAddr,
+    ) -> Result<Pairing, RemoteError> {
+        let path = request.uri().path();
+        if path != pairing::REDEEM {
+            let state = super::Refusal::Unknown;
+            self.count(peer, path, state.as_str());
+            return Err(RemoteError::TokenInvalid { state });
+        }
+        // The address first: a code typed at another one is not used up there.
+        let at_origin = self
+            .origin
+            .as_ref()
+            .is_some_and(|origin| Self::is_at(request, origin.as_str()));
+        let taken = if at_origin {
+            self.pairings.take(code).map_err(|wrong| wrong.ended_all)
+        } else {
+            Err(false)
+        };
+        taken
+            .inspect(|pairing| audit::pairing_taken(peer, &pairing.name))
+            .map_err(|ended_all| {
+                self.count(peer, path, "pairing_code");
+                if ended_all {
+                    audit::pairings_ended(peer);
+                }
+                RemoteError::PairingCodeInvalid
+            })
+    }
+
     /// Steps 8 to 10 for `request` from `peer`: the caller and its hold on
-    /// the token, or the refusal.
+    /// the token, or a pairing whose code it holds, or the refusal.
     fn admit(
         &self,
         request: &http::Request<Body>,
         peer: SocketAddr,
-    ) -> Result<(Caller, Use), tonic::Status> {
+    ) -> Result<Admitted, tonic::Status> {
         self.admit_inner(request, peer)
             .map_err(|denied| match denied {
                 Denied::Remote(error) => status(error),
@@ -221,24 +283,43 @@ impl Gate {
         &self,
         request: &http::Request<Body>,
         peer: SocketAddr,
-    ) -> Result<(Caller, Use), Denied> {
+    ) -> Result<Admitted, Denied> {
         let path = request.uri().path();
-        // An address in backoff is closed at accept; a connection it opened
-        // before is refused here, uncounted, until the backoff ends.
-        if self.failures.blocked(peer.ip()) {
+        let bearer = bearer(request.headers());
+        // An address in backoff is closed at accept; on a connection it
+        // opened before, what is not a live token is refused here, uncounted,
+        // until the backoff ends. Its other callers' tokens still pass: they
+        // may share the address with whoever sent the wrong ones.
+        let blocked = self.failures.blocked(peer.ip());
+        if blocked && self.tokens.verify(bearer, peer).is_err() {
             return Err(Denied::Remote(RemoteError::TokenInvalid {
                 state: super::Refusal::Unknown,
             }));
         }
-        let verified = match self.tokens.verify(bearer(request.headers()), peer) {
+        if let Some(code) = bearer.and_then(pairing::code_of) {
+            return self
+                .redeem(request, code, peer)
+                .map(Admitted::Pairing)
+                .map_err(Denied::Remote);
+        }
+        let verified = match self.tokens.verify(bearer, peer) {
             Ok(verified) => verified,
             Err(state) => {
-                if let Some(logged) = self.failures.refused(peer.ip()) {
-                    audit::token_refused(peer, path, state, &logged);
-                }
+                self.count(peer, path, state.as_str());
                 return Err(Denied::Remote(RemoteError::TokenInvalid { state }));
             }
         };
+        if let Some(device_origin) = &verified.device_origin {
+            let origin = self.origin.as_ref().map(reef_policy::Origin::as_str);
+            if origin != Some(device_origin) || !Self::is_at(request, device_origin) {
+                let error = RemoteError::OriginChanged {
+                    device_origin: device_origin.clone(),
+                    origin: origin.unwrap_or_default().to_owned(),
+                };
+                audit::refused(&verified.id, &verified.name, peer, path, &error);
+                return Err(Denied::Remote(error));
+            }
+        }
         let access = reef_api::access(path);
         // A v1 method this daemon does not know: the client is newer. Said
         // as every listener says it, so the client names the version
@@ -246,10 +327,12 @@ impl Gate {
         if access.is_none() && path.starts_with("/reef.api.v1.") {
             return Err(Denied::Status(crate::error::unknown_method(path)));
         }
-        let allowed = matches!(
-            (access, verified.scope),
-            (Some(Access::Read), _) | (Some(Access::Write), TokenScope::Write)
-        );
+        let allowed = match (access, verified.scope) {
+            (Some(Access::Read), _) => true,
+            (Some(Access::Write), TokenScope::Write) => path != pairing::REDEEM,
+            (Some(Access::Write), TokenScope::Device) => super::rules::device_may(path),
+            _ => false,
+        };
         if !allowed {
             let error = RemoteError::AccessDenied {
                 method: path.to_owned(),
@@ -278,8 +361,15 @@ impl Gate {
             ended: verified.ended,
             tokens: Arc::downgrade(&self.tokens),
         };
-        Ok((caller, held))
+        Ok(Admitted::Token(caller, held))
     }
+}
+
+/// What [`Gate::admit`] let through.
+enum Admitted {
+    Token(Caller, Use),
+    /// A redeem whose code was taken (R3.40).
+    Pairing(Pairing),
 }
 
 /// Why [`Gate::admit_inner`] refused.
@@ -325,11 +415,17 @@ where
         for name in forged {
             headers.remove(name);
         }
-        let (caller, held) = match admitted {
-            Ok(admitted) => admitted,
+        let held = match admitted {
+            Ok(Admitted::Token(caller, held)) => {
+                request.extensions_mut().insert(caller);
+                Some(held)
+            }
+            Ok(Admitted::Pairing(pairing)) => {
+                request.extensions_mut().insert(pairing);
+                None
+            }
             Err(error) => return Box::pin(async move { Ok(secure(refusal(error, grpc_web))) }),
         };
-        request.extensions_mut().insert(caller);
         // The service that was polled ready serves this request; a clone
         // takes its place.
         let clone = self.inner.clone();
@@ -346,10 +442,11 @@ where
                 drop(held);
                 return Ok(secure(http::Response::from_parts(parts, body)));
             }
-            Ok(secure(http::Response::from_parts(
-                parts,
-                super::streams::Holding::body(body, held),
-            )))
+            let body = match held {
+                Some(held) => super::streams::Holding::body(body, held),
+                None => body,
+            };
+            Ok(secure(http::Response::from_parts(parts, body)))
         })
     }
 }

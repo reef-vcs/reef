@@ -1,6 +1,7 @@
 // Remote access (R2.08, ADR 0049): tokens for the daemon's remote listener,
 // a TLS port that serves the READ and WRITE methods to callers holding a
-// token. Every RPC here is ADMIN, so it is served only on the socket.
+// token. Every RPC here but RedeemPairing is ADMIN, so it is served only on
+// the socket.
 syntax = "proto3";
 
 package reef.api.v1;
@@ -31,7 +32,9 @@ service RemoteService {
   }
 
   // Gives a live token a new secret; the old one stays valid for
-  // `overlap`. Errors: NOT_FOUND with reason REMOTE_TOKEN_NOT_FOUND.
+  // `overlap`. Errors: NOT_FOUND with reason REMOTE_TOKEN_NOT_FOUND;
+  // FAILED_PRECONDITION with reason DEVICE_TOKEN_ROTATE (metadata `name`)
+  // for a paired device's, whose new secret nobody could put on it.
   rpc RotateRemoteToken(RotateRemoteTokenRequest) returns (RotateRemoteTokenResponse) {
     option (reef.api.v1.access) = ACCESS_ADMIN;
   }
@@ -41,6 +44,36 @@ service RemoteService {
   rpc RevokeRemoteToken(RevokeRemoteTokenRequest) returns (RevokeRemoteTokenResponse) {
     option (reef.api.v1.access) = ACCESS_ADMIN;
     option idempotency_level = IDEMPOTENT;
+  }
+
+  // Starts pairing a device (R3.40): a code to type once on a phone, which
+  // trades it for its token at `[remote] origin`. Kept in memory, at most 4
+  // at once; a restart drops them, and a second start under one name takes
+  // the first's place. Errors: FAILED_PRECONDITION with reason
+  // REMOTE_ORIGIN_REQUIRED (`[remote] origin` is not set), TOO_MANY_PAIRINGS
+  // or TOO_MANY_REMOTE_TOKENS (metadata `limit`), IDENTITY_REVOKED (metadata `name`, `revoked_at`) or
+  // DEFAULT_IDENTITY_UNAVAILABLE; INVALID_ARGUMENT with reason
+  // INVALID_REMOTE_TOKEN_NAME, or INVALID_IDENTITY_NAME (metadata `name`);
+  // ALREADY_EXISTS with reason REMOTE_TOKEN_EXISTS (a live token that is no
+  // device has the name); NOT_FOUND with reason IDENTITY_NOT_FOUND;
+  // PERMISSION_DENIED with reason SESSION_KEY_REFUSED (metadata `rule`) for
+  // an identity that is no person.
+  rpc StartPairing(StartPairingRequest) returns (StartPairingResponse) {
+    option (reef.api.v1.access) = ACCESS_ADMIN;
+  }
+
+  // Trades a pairing code for a device's token (R3.40). Served on the remote
+  // listener alone, at `[remote] origin`, to `authorization: Bearer
+  // reef_pair_<code>`, and to no token. The code is taken before the token is
+  // made, so it works once. A live device of the same name ends. Errors:
+  // PERMISSION_DENIED with reason PAIRING_CODE_INVALID, one answer for a code
+  // that is wrong, used or expired, and for a call at another address;
+  // REMOTE_TOKEN_INVALID for an address that sent too many; ALREADY_EXISTS
+  // with reason REMOTE_TOKEN_EXISTS, and FAILED_PRECONDITION with reason
+  // TOO_MANY_REMOTE_TOKENS or IDENTITY_REVOKED, when that changed since the
+  // start.
+  rpc RedeemPairing(RedeemPairingRequest) returns (RedeemPairingResponse) {
+    option (reef.api.v1.access) = ACCESS_WRITE;
   }
 }
 
@@ -54,6 +87,10 @@ enum RemoteScope {
   // `path` on CreateWorkspace; release, move and renew only of workspaces
   // this token created.
   REMOTE_SCOPE_WRITE = 2;
+  // A paired device's (R3.40): ACCESS_READ methods and MarkInboxSeen, at the
+  // address it was paired at. Only StartPairing and RedeemPairing make one;
+  // CreateRemoteToken refuses it.
+  REMOTE_SCOPE_DEVICE = 3;
 }
 
 // A token, without its secret.
@@ -81,7 +118,12 @@ message RemoteToken {
   string last_used_from = 10;
   // The operator identity it is linked to (R3.03), by name: the only
   // identity it gets session keys for. Empty for none. Rotation keeps it.
+  // For a device, the person it was paired for.
   string identity = 11;
+  // The address a device was paired at (R3.40), such as
+  // `https://mac.example:7470`: the only one its token works at. Empty for
+  // the other scopes.
+  string device_origin = 12;
 }
 
 // Ask for a new token.
@@ -156,6 +198,39 @@ message RevokeRemoteTokenResponse {
   RemoteToken token = 1;
 }
 
+// Ask for a pairing code.
+message StartPairingRequest {
+  // The device's name: `[a-z0-9][a-z0-9._-]{0,62}`, such as `iphone`.
+  string name = 1;
+  // The person it is for, by name; empty: the default person.
+  string identity = 2;
+  // How long its token lives once paired, 1 minute to 366 days; unset: 90
+  // days.
+  google.protobuf.Duration expires_in = 3;
+}
+
+// A pairing code.
+message StartPairingResponse {
+  // 8 characters of Crockford's base32, such as `K7QX9M2D`: a credential
+  // until it is used or expires. Typed with or without a `-` in the middle.
+  string code = 1;
+  // When the code stops working, 10 minutes from now.
+  google.protobuf.Timestamp expires_at = 2;
+  // `[remote] origin`: the address to open on the phone.
+  string origin = 3;
+}
+
+// Trade the pairing code in the request's `authorization` for a token.
+message RedeemPairingRequest {}
+
+// A paired device.
+message RedeemPairingResponse {
+  // Its token, without the secret.
+  RemoteToken token = 1;
+  // The bearer token, `reef_<id>_<secret>`: a credential, answered once.
+  string secret = 2;
+}
+
 // Who called through the remote listener.
 message RemoteCaller {
   // The token's id.
@@ -188,6 +263,9 @@ message RemoteListener {
   string error = 6;
   // Tokens neither revoked nor expired.
   uint32 live_token_count = 7;
+  // `[remote] origin` (R3.40): the address a phone opens, and where devices
+  // are paired. Empty when not set.
+  string origin = 8;
 }
 
 // Whether the remote listener serves.

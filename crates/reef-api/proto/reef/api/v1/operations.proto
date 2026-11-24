@@ -103,7 +103,7 @@ service OperationService {
   }
   // New operations as they are recorded, in frames, optionally replaying
   // history first. A frame with no operations is a keepalive, sent at least
-  // every 30 seconds.
+  // every 15 seconds.
   //
   // Within a repository every operation comes after its parents, across
   // frames too, and none comes twice; repositories interleave. The first

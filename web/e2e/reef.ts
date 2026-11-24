@@ -13,7 +13,7 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { closeSync, existsSync, openSync, realpathSync } from "node:fs";
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
@@ -241,6 +241,31 @@ export class Reef {
       join(this.state, "config.toml"),
       `[ui]\nlisten = "${listen}"\n\n[watcher]\nbackend = "notify"\n\n[lease]\nheartbeat = "5s"\n`,
     );
+  }
+
+  /**
+   * Restarts the daemon with its remote listener on a free loopback port
+   * (R3.40), or on `listen` behind the port `through`; `[remote] origin`.
+   */
+  async serveRemote(behind?: { through: number; listen: number }): Promise<string> {
+    await this.stop();
+    const port = String(behind?.listen ?? (await freePort()));
+    const origin = `https://localhost:${String(behind?.through ?? port)}`;
+    const config = join(this.state, "config.toml");
+    await appendFile(
+      config,
+      `\n[remote]\nenabled = true\nlisten = "127.0.0.1:${port}"\nnames = ["localhost"]\norigin = "${origin}"\n`,
+    );
+    await this.start();
+    return origin;
+  }
+
+  /** Restarts the daemon with its configuration file edited. */
+  async reconfigure(edit: (text: string) => string) {
+    await this.stop();
+    const config = join(this.state, "config.toml");
+    await writeFile(config, edit(await readFile(config, "utf8")));
+    await this.start();
   }
 
   async start() {

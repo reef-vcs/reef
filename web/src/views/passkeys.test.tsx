@@ -3,9 +3,11 @@
 // and a later passkey, removing one, and the browser's refusals in words.
 import { timestampFromMs } from "@bufbuild/protobuf/wkt";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { DEVICE_READS } from "../device";
 import { equal } from "../sign/bytes";
 import { removalChallenge } from "../sign/key";
 import { settle } from "../test/fakes";
+import { paired } from "../test/paired";
 import { IdentityDaemon, passkey, person } from "../test/identity-daemon";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "../test/testing-library";
 import { hex, sha256 } from "../sign/bytes";
@@ -61,6 +63,19 @@ async function heldKey(): Promise<{
 }
 
 describe("the Passkeys page", () => {
+  it("on a paired phone, reads only", async () => {
+    paired();
+    installAuthenticator();
+    const daemon = new IdentityDaemon();
+    daemon.passkeys = [passkey(daemon.arsood, "MacBook Touch ID", 1)];
+    await setup(daemon);
+    expect(screen.getByText(DEVICE_READS)).toBeTruthy();
+    fireEvent.input(within(card("arsood")).getByLabelText("Label"), { target: { value: "x" } });
+    const buttons = within(card("arsood")).getAllByRole<HTMLButtonElement>("button");
+    expect(buttons).toHaveLength(3);
+    for (const button of buttons) expect(button.disabled, button.textContent).toBe(true);
+  });
+
   it("pins no passkey whose key is not the one the touching authenticator holds", async () => {
     const daemon = new IdentityDaemon();
     const person = await heldKey();

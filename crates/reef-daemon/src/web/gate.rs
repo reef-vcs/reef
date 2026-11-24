@@ -9,7 +9,8 @@
 //!    says that its session ended (#346).
 //! 2. No `Upgrade` (`400`) and no `OPTIONS` (`405`): no WebSocket, and
 //!    every cross-origin preflight fails. No response carries CORS headers.
-//! 3. `GET` and `HEAD` on any path but an API path serve the assets.
+//! 3. `GET` and `HEAD` on any path but an API path serve the assets, but
+//!    nothing an app is installed from (R3.40).
 //! 4. An API path (`/reef.<package>.<Service>/<Rpc>`) is `POST` (`405`);
 //!    any other path is `404` on `POST` and `405` otherwise.
 //! 5. `Origin`, if sent, is the listener's own, and `Sec-Fetch-Site`, if
@@ -49,7 +50,7 @@ use crate::error::status;
 pub(crate) const SECURITY_HEADERS: &[(&str, &str)] = &[
     (
         "content-security-policy",
-        "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; manifest-src 'self'; worker-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
     ),
     ("x-content-type-options", "nosniff"),
     ("referrer-policy", "no-referrer"),
@@ -173,7 +174,7 @@ impl Gate {
         let api = is_api_path(path);
         if !api {
             return Some(if method == Method::GET || method == Method::HEAD {
-                assets::serve(path, method == Method::HEAD)
+                assets::serve_local(path, method == Method::HEAD)
             } else if method == Method::POST {
                 plain(StatusCode::NOT_FOUND)
             } else {

@@ -4,6 +4,7 @@
 import { useEffect, useState } from "react";
 import { client, type Connection } from "../api/connection";
 import { isSessionInvalid, reefError, type ReefError } from "../api/errors";
+import { useAgain } from "../api/streams";
 import {
   type ChangeEffect,
   ChangeEffectKind,
@@ -200,6 +201,7 @@ export function OperationDetail({
       return cached ? { op, operation: cached } : { op };
     },
   );
+  const again = useAgain(connection, (answer.op === op && answer.error) || null, false);
   useEffect(() => {
     // Keyed by `op`, so a cached answer is already the initial state.
     if (cache.get(op)) return;
@@ -222,7 +224,7 @@ export function OperationDetail({
     return () => {
       current = false;
     };
-  }, [repo, op, connection, cache, onSessionInvalid]);
+  }, [repo, op, connection, again, cache, onSessionInvalid]);
 
   const operation = answer.op === op ? answer.operation : undefined;
   const error = answer.op === op ? answer.error : undefined;

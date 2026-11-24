@@ -482,7 +482,7 @@ mod tests {
             ),
             (
                 "scope".to_owned(),
-                names(&crate::db::TokenScope::ALL, crate::db::TokenScope::as_str),
+                names(&crate::db::TokenScope::ALL, crate::db::TokenScope::column),
             ),
             (
                 "kind".to_owned(),

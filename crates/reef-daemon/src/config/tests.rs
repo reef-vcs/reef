@@ -601,6 +601,52 @@ fn executor_keys() {
     }
 }
 
+// R3.40 14: `[remote] origin` is one https address at a name it serves.
+#[test]
+fn remote_origin() {
+    let with = |origin: &str| {
+        load_file(&format!(
+            "[remote]\nnames = [\"Mac.example\", \"10.0.0.1\", \"reef.localhost\", \"mac.reef.localhost\"]\norigin = \"{origin}\"\n"
+        ))
+    };
+    for (origin, reason) in [
+        ("http://mac.example:7470", "over http only"),
+        ("http://reef.localhost:7470", "does not start with https://"),
+        ("mac.example:7470", "does not start with"),
+        ("https://10.0.0.1:7470", "not a lowercase DNS name"),
+        ("https://[::1]:7470", "not a lowercase DNS name"),
+        ("https://mac.example:7470/", "no path"),
+        ("https://mac.example:7470/repos", "no path"),
+        ("https://alice@mac.example", "not a lowercase DNS name"),
+        ("https://mac.example:443", "leave it out here"),
+        (
+            "https://other.example:7470",
+            "its host is not in remote.names",
+        ),
+        ("https://Mac.example:7470", "not a lowercase DNS name"),
+        ("https://reef.localhost:7470", "the local web UI's"),
+        ("https://mac.reef.localhost:7470", "the local web UI's"),
+    ] {
+        let err = with(origin).unwrap_err();
+        let ConfigError::Invalid {
+            key, reason: said, ..
+        } = &err
+        else {
+            panic!("{origin}: {err:?}");
+        };
+        assert_eq!(key, "remote.origin", "{origin}");
+        assert!(
+            said.contains(reason) && said.contains(origin),
+            "{origin}: {said}"
+        );
+    }
+    for origin in ["https://mac.example:7470", "https://mac.example"] {
+        let config = with(origin).unwrap();
+        assert_eq!(config.file.remote.origin().unwrap().as_str(), origin);
+    }
+    assert_eq!(with("").unwrap().file.remote.origin(), None);
+}
+
 // R2.18 12: the web UI listens on loopback with a port, nowhere else.
 #[test]
 fn listen_must_be_loopback() {

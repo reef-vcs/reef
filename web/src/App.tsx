@@ -1,32 +1,32 @@
 // The app shell: the app bar and the routes over one connection and one live
 // layer. Without a session, or once the daemon refuses it, every route is
 // the no-session page. The home page is the inbox across every repository
-// (R3.33) above the overview, which is in the entry chunk; every other page
-// is its own (R2.21), and the repository pages share a frame keyed by the
-// repository.
-import { useEffect, useMemo, useState } from "react";
+// (R3.33) above the overview, and the repository pages share a frame keyed by
+// the repository. All of it is one file (R3.40): nothing is asked of the
+// network after it but the API.
+import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { client, type Connection } from "./api/connection";
-import { isSessionInvalid, reefError, type ReefError } from "./api/errors";
+import { isSessionInvalid, REMOTE_ORIGIN_CHANGED, reefError, type ReefError } from "./api/errors";
+import { useAgain } from "./api/streams";
+import { device, endDevice } from "./device";
 import { DaemonService, type GetDaemonStatusResponse } from "./gen/reef/api/v1/daemon_pb";
 import { animationFrame, type FrameScheduler } from "./live/frame";
 import { Live, type LiveEnvironment } from "./live/share";
-import { endSession } from "./session";
+import { endSession, SESSION_KEY, storedSession } from "./session";
 import { AppBar } from "./ui/AppBar";
 import { ErrorView } from "./ui/ErrorView";
 import { HeaderSlots } from "./ui/header-slots";
-import { lazyRoute } from "./ui/lazy-route";
 import type { RepoPage } from "./ui/RepoNav";
 import { match, navigate, usePath, useSearch } from "./ui/router";
+import { Approve } from "./views/Approve";
 import { inboxHref } from "./views/inbox-route";
 import { ItemLink } from "./views/ItemLink";
 import { NoSession } from "./views/NoSession";
 import { NotFound } from "./views/NotFound";
 import { Overview } from "./views/Overview";
-
-const RepoFrame = lazyRoute(() => import("./views/RepoFrame").then((m) => m.RepoFrame));
-const States = lazyRoute(() => import("./views/States").then((m) => m.States));
-const Passkeys = lazyRoute(() => import("./views/Passkeys").then((m) => m.Passkeys));
-const Approve = lazyRoute(() => import("./views/Approve").then((m) => m.Approve));
+import { Passkeys } from "./views/Passkeys";
+import { RepoFrame } from "./views/RepoFrame";
+import { States } from "./views/States";
 
 const REPO_PAGES: [string, RepoPage][] = [
   ["/repos/:repo/smartlog", "smartlog"],
@@ -54,13 +54,16 @@ function repoRoute(path: string): { repo: string; page: RepoPage; change: string
 function useDaemonStatus(connection: Connection, onSessionInvalid: () => void) {
   const [status, setStatus] = useState<GetDaemonStatusResponse | null>(null);
   const [error, setError] = useState<ReefError | null>(null);
+  const again = useAgain(connection, error, true);
   useEffect(() => {
     let current = true;
     client(connection, DaemonService)
       .getDaemonStatus({})
       .then(
         (response) => {
-          if (current) setStatus(response);
+          if (!current) return;
+          setStatus(response);
+          setError(null);
         },
         (thrown: unknown) => {
           if (!current) return;
@@ -72,8 +75,17 @@ function useDaemonStatus(connection: Connection, onSessionInvalid: () => void) {
     return () => {
       current = false;
     };
-  }, [connection, onSessionInvalid]);
+  }, [connection, again, onSessionInvalid]);
   return { status, error };
+}
+
+/** Why the daemon refuses this tab's streams, while it does. */
+function Refusal({ live }: { live: Live }) {
+  const refusal = useSyncExternalStore(
+    (listener) => live.subscribeState(listener),
+    () => live.refusal,
+  );
+  return refusal && <ErrorView error={refusal} />;
 }
 
 function Shell({
@@ -81,11 +93,13 @@ function Shell({
   live,
   frame,
   onSessionInvalid,
+  onUnpair,
 }: {
   connection: Connection;
   live: Live;
   frame: FrameScheduler;
   onSessionInvalid: () => void;
+  onUnpair: () => void;
 }) {
   const path = usePath();
   const search = useSearch();
@@ -116,11 +130,13 @@ function Shell({
         <AppBar
           live={live}
           status={status}
+          onUnpair={onUnpair}
           onCrumb={setCrumb}
           onTabs={setTabs}
           onStrip={setStrip}
         />
         <main>
+          <Refusal live={live} />
           {error && <ErrorView error={error} />}
           {path === "/" ? (
             <Overview
@@ -166,21 +182,51 @@ function Shell({
 export function App({
   session,
   environment,
+  onPaired,
 }: {
   /** Null when the tab has no session. */
   session: { connection: Connection; token: string } | null;
   environment?: LiveEnvironment;
+  /** This device was paired (R3.40): shows the app with its token. */
+  onPaired?: (token: string) => void;
 }) {
   const connection = session?.connection ?? null;
   const [ended, setEnded] = useState(session === null);
+  const [moved, setMoved] = useState<ReefError | null>(null);
   const [live] = useState(() => (connection ? new Live(connection, environment) : null));
+  function forget() {
+    if (!session) return;
+    endDevice(session.token);
+    endSession(session.token);
+  }
   const [end] = useState(() => () => {
     // Stop the streams too: an ended tab must not keep the lock and feed
     // other tabs on a refused token.
     live?.close();
-    if (session) endSession(session.token);
+    const refused = session?.connection.refused;
+    if (refused?.reason === REMOTE_ORIGIN_CHANGED) setMoved(refused);
+    else forget();
     setEnded(true);
   });
+  const [unpair] = useState(() => () => {
+    live?.close();
+    forget();
+    setEnded(true);
+  });
+
+  // A phone unpaired in one tab is unpaired in all of them.
+  useEffect(() => {
+    if (!device()) return;
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === null || event.key === SESSION_KEY) {
+        if (storedSession() === null) unpair();
+      }
+    };
+    window.addEventListener("storage", onStorage);
+    return () => {
+      window.removeEventListener("storage", onStorage);
+    };
+  }, [unpair]);
 
   useEffect(() => {
     if (!live) return;
@@ -192,13 +238,14 @@ export function App({
     };
   }, [live, end]);
 
-  if (ended || !connection || !live) return <NoSession />;
+  if (ended || !connection || !live) return <NoSession onPaired={onPaired} moved={moved} />;
   return (
     <Shell
       connection={connection}
       live={live}
       frame={environment?.frame ?? animationFrame}
       onSessionInvalid={end}
+      onUnpair={unpair}
     />
   );
 }

@@ -17,6 +17,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use rand::RngExt as _;
 use tokio_util::sync::CancellationToken;
 
+use super::pairing::Pairing;
 use super::{Limits, Refusal, RemoteError};
 use crate::db::{Db, Digest, RemoteTokenRow, TokenScope};
 use crate::model::Timestamp;
@@ -90,6 +91,8 @@ pub struct Verified {
     pub name: String,
     /// Its scope.
     pub scope: TokenScope,
+    /// The address a device was paired at (R3.40).
+    pub device_origin: Option<String>,
     /// Cancelled when it is revoked or expires.
     pub ended: CancellationToken,
 }
@@ -122,7 +125,7 @@ fn digest(secret: &str) -> Digest {
 }
 
 /// Constant-time equality of two digests (`blake3::Hash`'s `PartialEq`).
-fn same(a: &Digest, b: &Digest) -> bool {
+pub(super) fn same(a: &Digest, b: &Digest) -> bool {
     blake3::Hash::from_bytes(*a) == blake3::Hash::from_bytes(*b)
 }
 
@@ -153,8 +156,42 @@ fn new_id() -> String {
     })
 }
 
-fn later(at: Timestamp, by: Duration) -> Timestamp {
+pub(super) fn later(at: Timestamp, by: Duration) -> Timestamp {
     Timestamp(at.0.saturating_add(crate::model::duration_millis(by)))
+}
+
+/// A token to issue.
+struct New<'a> {
+    name: &'a str,
+    scope: TokenScope,
+    /// `None`: never expires.
+    expires_in: Option<Duration>,
+    identity_id: Option<String>,
+    device_origin: Option<String>,
+}
+
+/// What [`Tokens::pair`] made.
+pub(crate) struct Paired {
+    pub(crate) row: RemoteTokenRow,
+    /// The bearer token.
+    pub(crate) secret: String,
+    /// The id of the device of the same name that ended.
+    pub(crate) replaced: Option<String>,
+}
+
+fn check_issue(name: &str, expires_in: Option<Duration>) -> Result<(), RemoteError> {
+    if !valid_name(name) {
+        return Err(RemoteError::InvalidTokenName {
+            name: name.to_owned(),
+        });
+    }
+    if expires_in.is_some_and(|life| life.is_zero()) {
+        return Err(RemoteError::InvalidDuration {
+            field: "expires_in",
+            reason: "must be positive",
+        });
+    }
+    Ok(())
 }
 
 impl Tokens {
@@ -220,30 +257,107 @@ impl Tokens {
         expires_in: Option<Duration>,
         identity_id: Option<String>,
     ) -> Result<(RemoteTokenRow, String), RemoteError> {
-        if !valid_name(name) {
-            return Err(RemoteError::InvalidTokenName {
-                name: name.to_owned(),
-            });
-        }
-        if expires_in.is_some_and(|life| life.is_zero()) {
-            return Err(RemoteError::InvalidDuration {
-                field: "expires_in",
-                reason: "must be positive",
-            });
-        }
-        let now = Timestamp::now();
+        check_issue(name, expires_in)?;
         let mut entries = self.lock();
-        if Self::live_named(&mut entries, name, now).is_some() {
+        if let Some(entry) = Self::live_named(&mut entries, name, Timestamp::now()) {
             return Err(RemoteError::TokenExists {
                 name: name.to_owned(),
+                rotates: entry.row.scope != TokenScope::Device,
             });
         }
-        let live = entries.values().filter(|e| e.row.is_live(now)).count();
+        self.issue(
+            &mut entries,
+            New {
+                name,
+                scope,
+                expires_in,
+                identity_id,
+                device_origin: None,
+            },
+            None,
+        )
+    }
+
+    /// Issues a device's token (R3.40). A live device of the same name ends,
+    /// and so do its streams; a live token that is no device refuses it.
+    pub(crate) fn pair(&self, pairing: Pairing) -> Result<Paired, RemoteError> {
+        check_issue(&pairing.name, Some(pairing.expires_in))?;
+        let mut entries = self.lock();
+        let replaced = Self::replaced(&mut entries, &pairing.name)?;
+        let (row, secret) = self.issue(
+            &mut entries,
+            New {
+                name: &pairing.name,
+                scope: TokenScope::Device,
+                expires_in: Some(pairing.expires_in),
+                identity_id: Some(pairing.identity_id),
+                device_origin: Some(pairing.origin),
+            },
+            replaced.as_deref(),
+        )?;
+        if let Some(entry) = replaced.as_ref().and_then(|id| entries.get_mut(id)) {
+            entry.row.revoked_at = Some(row.created_at);
+            entry.ended.cancel();
+        }
+        Ok(Paired {
+            row,
+            secret,
+            replaced,
+        })
+    }
+
+    /// Whether a device named `name` could be paired now.
+    pub(crate) fn check_pair(&self, name: &str, expires_in: Duration) -> Result<(), RemoteError> {
+        check_issue(name, Some(expires_in))?;
+        let mut entries = self.lock();
+        let replaced = Self::replaced(&mut entries, name)?;
+        self.check_room(&entries, replaced.as_deref())
+    }
+
+    /// Whether another live token fits, with `replaced` gone.
+    fn check_room(
+        &self,
+        entries: &HashMap<String, Entry>,
+        replaced: Option<&str>,
+    ) -> Result<(), RemoteError> {
+        let now = Timestamp::now();
+        let live = entries
+            .values()
+            .filter(|e| e.row.is_live(now) && Some(e.row.id.as_str()) != replaced)
+            .count();
         if live >= self.limits.max_tokens {
             return Err(RemoteError::TooManyTokens {
                 limit: self.limits.max_tokens,
             });
         }
+        Ok(())
+    }
+
+    /// The id of the live device that pairing one named `name` would end.
+    fn replaced(
+        entries: &mut HashMap<String, Entry>,
+        name: &str,
+    ) -> Result<Option<String>, RemoteError> {
+        match Self::live_named(entries, name, Timestamp::now()) {
+            Some(entry) if entry.row.scope == TokenScope::Device => Ok(Some(entry.row.id.clone())),
+            Some(_) => Err(RemoteError::TokenExists {
+                name: name.to_owned(),
+                rotates: false,
+            }),
+            None => Ok(None),
+        }
+    }
+
+    /// Writes `new` and holds it; `replaced` is the live token it takes the
+    /// place of, which its caller ends in memory.
+    fn issue(
+        &self,
+        entries: &mut HashMap<String, Entry>,
+        new: New<'_>,
+        replaced: Option<&str>,
+    ) -> Result<(RemoteTokenRow, String), RemoteError> {
+        self.check_room(entries, replaced)?;
+        let now = Timestamp::now();
         let id = loop {
             let id = new_id();
             if !entries.contains_key(&id) {
@@ -253,20 +367,21 @@ impl Tokens {
         let secret = new_secret();
         let row = RemoteTokenRow {
             id: id.clone(),
-            name: name.to_owned(),
-            scope,
+            name: new.name.to_owned(),
+            scope: new.scope,
             digest: digest(&secret),
             previous_digest: None,
             previous_until: None,
             created_at: now,
-            expires_at: expires_in.map(|life| later(now, life)),
+            expires_at: new.expires_in.map(|life| later(now, life)),
             rotated_at: None,
             revoked_at: None,
             last_used_at: None,
             last_used_from: None,
-            identity_id,
+            identity_id: new.identity_id,
+            device_origin: new.device_origin,
         };
-        self.db.insert_remote_token(&row)?;
+        self.db.insert_remote_token(&row, replaced)?;
         entries.insert(
             id.clone(),
             Entry {
@@ -300,6 +415,11 @@ impl Tokens {
                 name: name.to_owned(),
             });
         };
+        if entry.row.scope == TokenScope::Device {
+            return Err(RemoteError::DeviceRotate {
+                name: name.to_owned(),
+            });
+        }
         let secret = new_secret();
         let mut row = entry.row.clone();
         row.previous_digest = (!overlap.is_zero()).then_some(row.digest);
@@ -362,6 +482,7 @@ impl Tokens {
             id: row.id.clone(),
             name: row.name.clone(),
             scope: row.scope,
+            device_origin: row.device_origin.clone(),
             ended: entry.ended.clone(),
         })
     }

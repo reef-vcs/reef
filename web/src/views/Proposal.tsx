@@ -11,6 +11,7 @@
 // rendered as text.
 import { useCallback, useEffect, useReducer, useState, useSyncExternalStore } from "react";
 import { client, type Connection } from "../api/connection";
+import { device } from "../device";
 import { CommentKind, HelpState } from "../gen/reef/api/v1/comment_event_pb";
 import { EvidenceResult, type Evidence } from "../gen/reef/api/v1/evidence_pb";
 import { IdentityStatus } from "../gen/reef/api/v1/identity_pb";
@@ -467,6 +468,7 @@ export function Proposal({
   const entry = read.entry;
   const pinned = reviewed;
   const state = entry.lifecycle?.state ?? LifecycleState.UNSPECIFIED;
+  const paired = device() !== null;
   const amended = current.commitId !== reviewed.commitId;
   const unproposed = entry.lifecycle?.amended ?? false;
   const acceptOff = acceptBlocked({
@@ -479,8 +481,12 @@ export function Proposal({
         ? { name: signer.identity.name, passkeys: signer.passkeys }
         : undefined,
     supported: hasPasskeySupport(),
+    device: paired,
   });
-  const declineOff = declineBlocked(state, amended);
+  const declineOff = declineBlocked(state, amended, paired);
+  // The notice above the buttons already says what UNPROPOSED does.
+  const acceptSaid = unproposed && acceptOff === UNPROPOSED ? null : acceptOff;
+  const reasons = busy ? [] : [...new Set([acceptSaid, declineOff])].filter((r) => r !== null);
   const badge = entry.change ? changeState(entry.change) : lifecycleState(state);
   const status = automaticWords(entry.automatic);
   const openHelp = read.comments.filter(
@@ -561,7 +567,7 @@ export function Proposal({
           type="button"
           className="primary"
           disabled={busy || acceptOff !== null}
-          title={acceptOff ?? undefined}
+          aria-describedby={acceptSaid && !busy ? "decide-why" : undefined}
           onClick={onAccept}
         >
           {read.stack.length > 0
@@ -571,7 +577,7 @@ export function Proposal({
         <button
           type="button"
           disabled={busy || declineOff !== null}
-          title={declineOff ?? undefined}
+          aria-describedby={declineOff && !busy ? "decide-why" : undefined}
           aria-expanded={declining}
           onClick={() => {
             setDeclining((open) => !open);
@@ -579,13 +585,16 @@ export function Proposal({
         >
           Decline
         </button>
-        <a className="button-link" href="#comment">
-          Comment
-        </a>
-        {acceptOff && !unproposed && action.kind !== "working" && (
-          <span className="secondary">
-            {acceptOff}
-            {signer.kind === "loaded" &&
+        {!paired && (
+          <a className="button-link" href="#comment">
+            Comment
+          </a>
+        )}
+        {reasons.length > 0 && (
+          <p className="decide-why secondary" id="decide-why">
+            {reasons.join(" ")}
+            {!paired &&
+              signer.kind === "loaded" &&
               signer.passkeys === 0 &&
               state === LifecycleState.PROPOSED && (
                 <>
@@ -593,14 +602,14 @@ export function Proposal({
                   <Link to="/passkeys">Add one</Link> to accept with a touch.
                 </>
               )}
-          </span>
+          </p>
         )}
         {!acceptOff && action.kind === "idle" && (
-          <span className="secondary">
+          <p className="decide-why secondary">
             One passkey touch signs off tree{" "}
             <span className="mono">{shortId(reviewed.treeId)}</span>
             {signer.kind === "loaded" && ` as ${signer.identity.name}`}, then asks to land it.
-          </span>
+          </p>
         )}
       </div>
       {signer.kind === "failed" && <ErrorView error={signer.error} />}
@@ -623,7 +632,7 @@ export function Proposal({
         connection={connection}
         repo={repoId}
         commit={reviewed.commitId}
-        onAnchor={amended ? undefined : setAnchor}
+        onAnchor={amended || paired ? undefined : setAnchor}
         onSessionInvalid={onSessionInvalid}
       />
       <ProposalComments
@@ -639,7 +648,7 @@ export function Proposal({
         connection={connection}
         run={runComment}
         busy={busy}
-        writable={!amended}
+        writable={!amended && !paired}
       />
       <section className="proposal-section" aria-labelledby="proposal-history">
         <details>

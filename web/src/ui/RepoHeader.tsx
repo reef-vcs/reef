@@ -1,8 +1,10 @@
-// The header of the three repository pages (R2.21, in the app bar since the
-// design pass): the repository's name and the tabs in the bar, and the
-// scrubber in the strip below it, over the repository's operation window.
+// The header of the repository pages (R2.21, in the app bar since the design
+// pass): the repository's name and the tabs in the bar, and, on a page that
+// reads at an operation, the scrubber in the strip below it, over the
+// repository's operation window.
 import { useEffect, useSyncExternalStore } from "react";
 import type { Connection } from "../api/connection";
+import type { Live } from "../live/share";
 import type { OperationWindow } from "../log/window";
 import { smartlogHref } from "../views/smartlog-route";
 import { InSlot } from "./header-slots";
@@ -20,9 +22,20 @@ const PAGE_TITLES: Record<RepoPage, string> = {
   proposal: "Proposal",
 };
 
+/** The pages that read at an operation; the inbox and a proposal are live (R3.40). */
+const AT_OPERATION: ReadonlySet<RepoPage> = new Set(["smartlog", "workspaces", "activity"]);
+
 /** A repository's name: the last component of its root. */
 export function repoName(root: string | undefined, repo: string): string {
   return root ? root.replace(/\/+$/, "").split("/").pop() || root : shortId(repo);
+}
+
+/** How many items of `repo`, an id, need the person now. */
+function useNeeds(live: Live, repo: string): number {
+  return useSyncExternalStore(
+    (listener) => live.inbox.subscribe(listener),
+    () => live.inbox.sections.get(repo)?.needsYouNowTotal ?? 0,
+  );
 }
 
 export function RepoHeader({
@@ -31,6 +44,7 @@ export function RepoHeader({
   at,
   window: win,
   connection,
+  live,
   onSessionInvalid,
 }: {
   repo: string;
@@ -38,9 +52,11 @@ export function RepoHeader({
   at: string;
   window: OperationWindow;
   connection: Connection;
+  live: Live;
   onSessionInvalid: () => void;
 }) {
   const { fatal, repository } = useSyncExternalStore(win.subscribe, win.getSnapshot);
+  const needs = useNeeds(live, repository?.id ?? repo);
   const name = repoName(repository?.root, repo);
   useEffect(() => {
     // The inbox titles itself, with its count (inbox/needs.ts).
@@ -56,9 +72,9 @@ export function RepoHeader({
         </Link>
       </InSlot>
       <InSlot slot="tabs">
-        <RepoNav repo={repo} current={current} at={at} />
+        <RepoNav repo={repo} current={current} at={at} needs={needs} />
       </InSlot>
-      {!fatal && (
+      {!fatal && AT_OPERATION.has(current) && (
         <InSlot slot="strip">
           <Scrubber
             window={win}

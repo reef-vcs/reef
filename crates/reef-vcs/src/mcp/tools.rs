@@ -613,6 +613,14 @@ pub(super) const NOT_TOOLS: &[(&str, &str)] = &[
         "ADMIN; a person issues tokens",
     ),
     (
+        "/reef.api.v1.RemoteService/StartPairing",
+        "ADMIN; a person pairs a phone",
+    ),
+    (
+        "/reef.api.v1.RemoteService/RedeemPairing",
+        "a phone's, with the code a person types on it",
+    ),
+    (
         "/reef.api.v1.RepositoryService/GetRepository",
         "get_status names the repository",
     ),

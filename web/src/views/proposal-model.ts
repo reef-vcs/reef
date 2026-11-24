@@ -21,7 +21,8 @@
 // is shown in its section and does not fail the page.
 import { Code } from "@connectrpc/connect";
 import { client, type Connection } from "../api/connection";
-import { isSessionInvalid, reefError, type ReefError } from "../api/errors";
+import { isPassing, isSessionInvalid, reefError, type ReefError } from "../api/errors";
+import { streamsOf } from "../api/streams";
 import { AutomaticState, ChangeService, type ProposalEntry } from "../gen/reef/api/v1/changes_pb";
 import { CommentService, type Comment } from "../gen/reef/api/v1/comments_pb";
 import { EvidenceService, type Evidence } from "../gen/reef/api/v1/evidence_pb";
@@ -99,10 +100,14 @@ abstract class RepoReader<S extends { version: number }> {
     const unsubscribePresence = this.presence.subscribe(() => {
       this.onPresence();
     });
+    const unsubscribeResume = streamsOf(this.connection).onResume(() => {
+      if (this.requested) this.paced.requestNow();
+    });
     if (this.operations.live) this.requestFirst();
     return () => {
       this.stopped = true;
       unsubscribe();
+      unsubscribeResume();
       unsubscribePresence();
       this.paced.stop();
       this.poll?.();
@@ -119,7 +124,8 @@ abstract class RepoReader<S extends { version: number }> {
     this.paced.requestNow();
   }
 
-  protected abstract read(repo: string): Promise<void>;
+  /** Whether all of it was answered. */
+  protected abstract read(repo: string): Promise<boolean>;
 
   /** Whether evidence may arrive with no event: in review, and judged by nothing. */
   protected abstract inReview(): boolean;
@@ -181,7 +187,7 @@ abstract class RepoReader<S extends { version: number }> {
     if (batch.live) this.paced.request();
   }
 
-  private refresh(): Promise<void> | undefined {
+  private refresh(): Promise<boolean> | undefined {
     if (this.stopped) return undefined;
     if (!this.operations.live) {
       this.waiting = true;
@@ -190,20 +196,22 @@ abstract class RepoReader<S extends { version: number }> {
     return this.readRepo();
   }
 
-  private async readRepo() {
+  private async readRepo(): Promise<boolean> {
     try {
       if (this.repoId === undefined) {
         const { repository } = await client(this.connection, RepositoryService).getRepository({
           repo: this.repo,
         });
-        if (this.isStopped()) return;
+        if (this.isStopped()) return true;
         this.repoId = repository?.id || this.repo;
         this.onRepository(repository);
       }
-      await this.read(this.repoId);
+      return await this.read(this.repoId);
     } catch (thrown) {
-      if (this.isStopped()) return;
-      this.onError(this.failed(thrown));
+      if (this.isStopped()) return true;
+      const error = this.failed(thrown);
+      this.onError(error);
+      return error === null || !isPassing(error);
     } finally {
       this.arm();
     }
@@ -247,7 +255,7 @@ export interface ProposalSnapshot {
   /** Null until the first read answers. */
   read: ProposalRead | null;
   repository: Repository | undefined;
-  /** A failed refresh; the last good read stays. */
+  /** A failed refresh, or a first read the daemon has not answered; the last good read stays. */
   error: ReefError | null;
   /** The change is not a recorded proposal, or the repository is unknown: the page is replaced. */
   fatal: ReefError | null;
@@ -279,7 +287,7 @@ export class ProposalModel extends RepoReader<ProposalSnapshot> {
 
   protected onError(error: ReefError | null) {
     if (!error) return;
-    if (this.snapshot.read === null) this.update({ fatal: error });
+    if (this.snapshot.read === null && !isPassing(error)) this.update({ fatal: error });
     else this.update({ error });
   }
 
@@ -315,14 +323,14 @@ export class ProposalModel extends RepoReader<ProposalSnapshot> {
     return { comments, more: token !== "" };
   }
 
-  protected async read(repo: string) {
+  protected async read(repo: string): Promise<boolean> {
     const changes = client(this.connection, ChangeService);
     const listed = await changes.listProposals({
       repo,
       changes: [this.change],
       states: ANY_STATE,
     });
-    if (this.isStopped()) return;
+    if (this.isStopped()) return true;
     const hex = hexFromEither(this.change) ?? this.change;
     const entry =
       listed.entries.find((e) => e.changeId === hex) ??
@@ -340,7 +348,7 @@ export class ProposalModel extends RepoReader<ProposalSnapshot> {
         next: [],
         metadata: {},
       });
-      return;
+      return true;
     }
     const changeId = entry.changeId;
     const below = entry.dependencies.map((d) => d.changeId);
@@ -371,15 +379,22 @@ export class ProposalModel extends RepoReader<ProposalSnapshot> {
         pageSize: 1,
       }),
     ]);
-    if (this.isStopped()) return;
+    if (this.isStopped()) return true;
+    // A verdict no answer came for this time: the last one of this commit stands.
+    const { policyError } = policyRead;
+    const last = this.snapshot.read;
+    const held =
+      policyError && isPassing(policyError) && last?.entry.change?.commitId === commit
+        ? last
+        : null;
     const members = new Map(stack.entries.map((e) => [e.changeId, e]));
     this.update({
       read: {
         entry,
         stack: below.map((id) => ({ changeId: id, entry: members.get(id) })),
-        evaluation: policyRead.evaluation,
-        members: policyRead.members,
-        policyError: policyRead.policyError,
+        evaluation: (held ?? policyRead).evaluation,
+        members: (held ?? policyRead).members,
+        policyError,
         evidence: evidence.evidence,
         comments: comments.comments,
         moreComments: comments.more,
@@ -387,6 +402,8 @@ export class ProposalModel extends RepoReader<ProposalSnapshot> {
         provenance: provenance.records[0],
       },
       error: null,
+      fatal: null,
     });
+    return !(policyError && isPassing(policyError));
   }
 }

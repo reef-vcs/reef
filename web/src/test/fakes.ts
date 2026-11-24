@@ -30,7 +30,8 @@ import {
   type SubscribePresenceResponse,
 } from "../gen/reef/api/v1/presence_pb";
 import type { FrameScheduler } from "../live/frame";
-import type { Channel, LiveEnvironment } from "../live/share";
+import { direct, type Channel, type LiveEnvironment } from "../live/share";
+import { line, type SilenceEnvironment } from "../live/silence";
 
 export function manualFrames(): {
   frame: FrameScheduler;
@@ -347,9 +348,73 @@ export class FakeBus {
   };
 }
 
+/** Two clocks, the timers on them and the page's waking, moved by hand. */
+export class FakeTime {
+  private at = { mono: 1_000, wall: 1_795_000_000_000 };
+  private timers: { due: number; run: () => void }[] = [];
+  private readonly wakers = new Set<() => void>();
+
+  readonly silence: SilenceEnvironment = {
+    clock: { mono: () => this.at.mono, wall: () => this.at.wall },
+    after: (ms, run) => {
+      const timer = { due: this.at.mono + ms, run };
+      this.timers.push(timer);
+      return () => {
+        this.timers = this.timers.filter((other) => other !== timer);
+      };
+    },
+    onWake: (run) => {
+      this.wakers.add(run);
+      return () => this.wakers.delete(run);
+    },
+  };
+
+  /** Runs the timers due in `ms`, in order, each at its time. */
+  async pass(ms: number) {
+    const end = this.at.mono + ms;
+    for (;;) {
+      const next = this.timers.filter((t) => t.due <= end).sort((a, b) => a.due - b.due)[0];
+      if (!next) break;
+      this.step(next.due - this.at.mono);
+      this.timers = this.timers.filter((other) => other !== next);
+      next.run();
+      await settle(30);
+    }
+    this.step(end - this.at.mono);
+    await settle(30);
+  }
+
+  /** The device sleeps: no timer runs, and only the wall clock moves. */
+  sleep(ms: number) {
+    this.at.wall += ms;
+  }
+
+  /** Someone sets the clock. */
+  set(wall: number) {
+    this.at.wall = wall;
+  }
+
+  /** Timers and listeners not yet cancelled. */
+  get held(): number {
+    return this.timers.length + this.wakers.size;
+  }
+
+  async wake() {
+    for (const run of this.wakers) run();
+    await settle(30);
+  }
+
+  private step(ms: number) {
+    this.at.mono += ms;
+    this.at.wall += ms;
+  }
+}
+
 export function environment(
   frame: FrameScheduler,
   shared?: { locks: FakeLocks; bus: FakeBus },
+  /** The streams are the remote page's, cut when silent, on this time. */
+  time?: FakeTime,
 ): LiveEnvironment {
   return {
     locks: shared?.locks as LiveEnvironment["locks"],
@@ -359,5 +424,6 @@ export function environment(
     sleep: async () => {
       await settle(1);
     },
+    line: () => (time ? line(time.silence) : direct),
   };
 }

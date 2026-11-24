@@ -3,7 +3,7 @@
 - Status: accepted
 - Date: 2026-10-31
 - Ticket: R2.18
-- Amended by: [0085](0085-verified-human-presence.md) (decisions 2, 4, 5 and 6: the listener is `localhost` on both loopback families and passes an allowlist of writes; the app runs on Preact behind React's API), [0094](0094-the-pinned-web-origin.md) (decision 2 and two rejected alternatives: a fixed port in the default state directory, held from the daemon's start once a passkey is registered, and a new name under `reef.localhost` at every start), and the amendments below
+- Amended by: [0085](0085-verified-human-presence.md) (decisions 2, 4, 5 and 6: the listener is `localhost` on both loopback families and passes an allowlist of writes; the app runs on Preact behind React's API), [0094](0094-the-pinned-web-origin.md) (decision 2 and two rejected alternatives: a fixed port in the default state directory, held from the daemon's start once a passkey is registered, and a new name under `reef.localhost` at every start), [0095](0095-paired-devices.md) (the security headers refuse service workers, nothing an app is installed from is served, and over the remote listener a page shares no streams), and the amendments below
 
 ## Context
 

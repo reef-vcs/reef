@@ -399,6 +399,25 @@ describe("review fixes", () => {
     expect(t.snap().error).toBeNull();
   });
 
+  it("retries a list that fails for long every 30 s", async () => {
+    const oplog = new FakeOplog();
+    oplog.failList = daemonError(Code.Unavailable, { hint: "not open" });
+    vi.useFakeTimers();
+    setup(oplog);
+    await quiet();
+    const seconds = async (n: number) => {
+      for (let s = 0; s < n; s++) {
+        vi.advanceTimersByTime(1_000);
+        await quiet();
+      }
+    };
+    await seconds(120);
+    const before = oplog.listCalls.length;
+    expect(before).toBeGreaterThan(8);
+    await seconds(120);
+    expect(oplog.listCalls.length - before).toBeLessThanOrEqual(4);
+  });
+
   it("starts over when a hidden tab's batch passes the store's limit", async () => {
     const oplog = new FakeOplog();
     grow(oplog, 3);

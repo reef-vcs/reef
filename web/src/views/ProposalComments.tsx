@@ -6,6 +6,7 @@
 // the instruction waits for Confirm, as on the CLI.
 import { useState, type SubmitEvent } from "react";
 import { client, type Connection } from "../api/connection";
+import { device, DEVICE_READS } from "../device";
 import { CommentKind, HelpState, InstructionState } from "../gen/reef/api/v1/comment_event_pb";
 import {
   CommentService,
@@ -173,7 +174,8 @@ function CommentItem({
           </p>
         </div>
       )}
-      {help?.state === HelpState.OPEN && (
+      {help?.state === HelpState.OPEN && device() && <p className="secondary">{DEVICE_READS}</p>}
+      {help?.state === HelpState.OPEN && !device() && (
         <Answer
           repo={repo}
           change={change}

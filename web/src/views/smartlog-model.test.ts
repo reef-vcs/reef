@@ -21,6 +21,7 @@ import {
   sessionInvalid,
   settle,
 } from "../test/fakes";
+import { Dying } from "../test/dying";
 import { entries, FakeRepoDaemon, hexId, REPO } from "../test/smartlog-daemon";
 import {
   INVALID_REVSET,
@@ -35,6 +36,30 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
+});
+
+describe("at an operation", () => {
+  it("reads again once at a time", async () => {
+    const line = new Dying(new FakeRepoDaemon().connection());
+    line.state = "failing";
+    const model = new SmartlogModel(
+      line.connection,
+      new OperationStore(immediateFrames),
+      immediateFrames,
+      vi.fn(),
+      { repo: REPO, revset: SMARTLOG_REVSET, at: "op1" },
+    );
+    const stop = model.start();
+    await settle(40);
+    line.state = "hung";
+    line.calls.length = 0;
+    for (let i = 0; i < 5; i++) {
+      line.back();
+      await settle(40);
+    }
+    expect(line.calls).toHaveLength(1);
+    stop();
+  });
 });
 
 const LOG = `

@@ -23,10 +23,8 @@ export default defineConfig({
     // which the CSP's 'self' allows.
     assetsInlineLimit: 0,
     modulePreload: { polyfill: false },
-    // The chunk graph, which reef-web's budget test reads to sum what each
-    // page loads (R2.21). Embedded like any file (not under a dot directory,
-    // which reef-web skips); it names only files index.html already exposes.
-    manifest: "manifest.json",
+    // The app is one file (R3.40).
+    chunkSizeWarningLimit: 600,
   },
   server: {
     host: "127.0.0.1",

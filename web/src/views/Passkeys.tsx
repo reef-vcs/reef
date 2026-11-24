@@ -5,7 +5,8 @@
 // touch runs under (#346), which this page's is.
 import { useEffect, useState, type SubmitEvent } from "react";
 import { client, type Connection } from "../api/connection";
-import { isSessionInvalid, reefError, type ReefError } from "../api/errors";
+import { isPassing, isSessionInvalid, reefError, type ReefError } from "../api/errors";
+import { useAgain } from "../api/streams";
 import { DaemonService } from "../gen/reef/api/v1/daemon_pb";
 import {
   IdentityKind,
@@ -24,6 +25,7 @@ import {
   NO_SUPPORT,
   type Failure,
 } from "../sign/passkey";
+import { device } from "../device";
 import { embedded } from "../session";
 import { Copy } from "../ui/Copy";
 import { ErrorView } from "../ui/ErrorView";
@@ -64,6 +66,8 @@ export function policySnippet({ identity, passkeys }: Person, origin: string): s
 
 function usePeople(connection: Connection, version: number, onSessionInvalid: () => void) {
   const [load, setLoad] = useState<Load>({ kind: "loading" });
+  const [error, setError] = useState<ReefError | null>(null);
+  const again = useAgain(connection, error, true);
   useEffect(() => {
     let current = true;
     const identities = client(connection, IdentityService);
@@ -81,19 +85,26 @@ function usePeople(connection: Connection, version: number, onSessionInvalid: ()
             passkeys: keys.passkeys.filter((passkey) => passkey.identityId === identity.id),
           }))
           .sort((a, b) => Number(b.identity.isDefault) - Number(a.identity.isDefault));
+        setError(null);
         setLoad({ kind: "loaded", people, site: daemon.webUi?.site ?? "" });
       },
       (thrown: unknown) => {
         if (!current) return;
         const error = reefError(thrown);
-        if (isSessionInvalid(error)) onSessionInvalid();
-        else setLoad({ kind: "failed", error });
+        if (isSessionInvalid(error)) {
+          onSessionInvalid();
+          return;
+        }
+        setError(error);
+        setLoad((held) =>
+          held.kind === "loaded" && isPassing(error) ? held : { kind: "failed", error },
+        );
       },
     );
     return () => {
       current = false;
     };
-  }, [connection, version, onSessionInvalid]);
+  }, [connection, again, version, onSessionInvalid]);
   return load;
 }
 
@@ -118,6 +129,7 @@ function PersonCard({
   onRemove: (passkey: Passkey) => void;
 }) {
   const { identity, passkeys } = person;
+  const paired = device() !== null;
   const [label, setLabel] = useState("");
   // Anyone who can open this page can add a passkey, an agent included, so
   // the snippet names only passkeys this browser's authenticator proved it
@@ -213,7 +225,7 @@ function PersonCard({
                     <td>
                       <button
                         type="button"
-                        disabled={busy}
+                        disabled={busy || paired}
                         aria-label={`Remove ${passkey.label}`}
                         onClick={() => {
                           onRemove(passkey);
@@ -235,7 +247,7 @@ function PersonCard({
           <p>
             <button
               type="button"
-              disabled={busy || confirming === "busy"}
+              disabled={busy || paired || confirming === "busy"}
               onClick={() => void confirm()}
             >
               Confirm a passkey to pin
@@ -282,7 +294,7 @@ function PersonCard({
             }}
           />
         </label>
-        <button type="submit" className="primary" disabled={busy || !label.trim()}>
+        <button type="submit" className="primary" disabled={busy || paired || !label.trim()}>
           Add a passkey
         </button>
       </form>
@@ -371,7 +383,7 @@ export function Passkeys({
         takes one touch that approves exactly that sign-off.
       </p>
       {!hasPasskeySupport() &&
-        (embedded() ? (
+        (embedded() || device() ? (
           <NoPasskeysHere />
         ) : (
           <FailureView failure={{ kind: "browser", words: NO_SUPPORT }} />

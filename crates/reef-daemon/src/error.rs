@@ -471,7 +471,7 @@ fn remote_reason(error: &RemoteError) -> Option<(&'static str, BTreeMap<String, 
             reason::REMOTE_TOKEN_NOT_FOUND,
             meta(&[("name", name.clone())]),
         ),
-        RemoteError::TokenExists { name } => {
+        RemoteError::TokenExists { name, .. } => {
             (reason::REMOTE_TOKEN_EXISTS, meta(&[("name", name.clone())]))
         }
         RemoteError::TooManyTokens { limit } => (
@@ -482,6 +482,25 @@ fn remote_reason(error: &RemoteError) -> Option<(&'static str, BTreeMap<String, 
             reason::INVALID_REMOTE_TOKEN_NAME,
             meta(&[("name", name.clone())]),
         ),
+        RemoteError::PairingCodeInvalid => (reason::PAIRING_CODE_INVALID, BTreeMap::new()),
+        RemoteError::OriginRequired { .. } => (reason::REMOTE_ORIGIN_REQUIRED, BTreeMap::new()),
+        RemoteError::OriginChanged {
+            device_origin,
+            origin,
+        } => (
+            reason::REMOTE_ORIGIN_CHANGED,
+            meta(&[
+                ("device_origin", device_origin.clone()),
+                ("origin", origin.clone()),
+            ]),
+        ),
+        RemoteError::TooManyPairings { limit } => (
+            reason::TOO_MANY_PAIRINGS,
+            meta(&[("limit", limit.to_string())]),
+        ),
+        RemoteError::DeviceRotate { name } => {
+            (reason::DEVICE_TOKEN_ROTATE, meta(&[("name", name.clone())]))
+        }
         _ => return None,
     })
 }

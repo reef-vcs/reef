@@ -53,6 +53,7 @@ pub(crate) mod proposal;
 pub(crate) mod provenance;
 mod provider;
 pub(crate) mod publish;
+mod qr;
 mod rebase;
 mod remote;
 mod render;

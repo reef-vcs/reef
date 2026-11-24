@@ -118,6 +118,18 @@ pub(crate) async fn run(global: &Global, out: &Out, args: Args) -> Result<(), Cl
                     status.version, status.api, reef_client::VERSION
                 ));
             }
+            if let Some(days) = status
+                .remote
+                .as_ref()
+                .and_then(|remote| remote.certificate.as_ref())
+                .and_then(|cert| cert.days_left)
+                .filter(|days| *days < super::remote::CERTIFICATE_WARN_DAYS)
+            {
+                out.note(&format!(
+                    "reef: the remote listener's certificate has {}",
+                    super::remote::days_left(days)
+                ));
+            }
             out.object(&status)
         }
     }

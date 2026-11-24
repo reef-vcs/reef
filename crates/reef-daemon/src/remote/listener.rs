@@ -13,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::failures::Failures;
 use super::gate::Gate;
+use super::pairing::Pairings;
 use super::tls::{CertInfo, Resolver, Source};
 use super::tokens::Tokens;
 use super::{Limits, RemoteError};
@@ -44,7 +45,10 @@ pub struct RemoteListener {
     enabled_by: Option<EnabledBy>,
     /// `[remote] names`, or the host name.
     names: Vec<String>,
+    /// `[remote] origin` (R3.40).
+    origin: Option<reef_policy::Origin>,
     tokens: Arc<Tokens>,
+    pairings: Arc<Pairings>,
     status: Mutex<Status>,
 }
 
@@ -73,7 +77,9 @@ impl RemoteListener {
         Ok(RemoteListener {
             enabled_by,
             names,
+            origin: remote.origin(),
             tokens: Arc::new(Tokens::load(db, config.remote_limits)?),
+            pairings: Arc::new(Pairings::new(&config.remote_limits)),
             status: Mutex::new(Status::default()),
         })
     }
@@ -85,6 +91,16 @@ impl RemoteListener {
     /// The tokens.
     pub fn tokens(&self) -> &Arc<Tokens> {
         &self.tokens
+    }
+
+    /// The pairing codes waiting (R3.40).
+    pub(crate) fn pairings(&self) -> &Pairings {
+        &self.pairings
+    }
+
+    /// `[remote] origin` (R3.40).
+    pub(crate) fn origin(&self) -> Option<&reef_policy::Origin> {
+        self.origin.as_ref()
     }
 
     /// The bound address, once listening.
@@ -134,6 +150,11 @@ impl RemoteListener {
             certificate,
             error: status.error.clone().or(cert_error).unwrap_or_default(),
             live_token_count: u32::try_from(self.tokens.live_count()).unwrap_or(u32::MAX),
+            origin: self
+                .origin
+                .as_ref()
+                .map(|origin| origin.as_str().to_owned())
+                .unwrap_or_default(),
         }
     }
 
@@ -256,7 +277,9 @@ async fn serve(state: Arc<AppState>) {
     let local = listener.local_addr().ok();
     let gate = Arc::new(Gate {
         names: state.remote.names.clone(),
+        origin: state.remote.origin.clone(),
         tokens: Arc::clone(&state.remote.tokens),
+        pairings: Arc::clone(&state.remote.pairings),
         failures: Arc::new(Failures::new(&limits)),
     });
     let incoming = super::incoming::incoming(

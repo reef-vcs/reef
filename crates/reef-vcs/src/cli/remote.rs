@@ -2,12 +2,13 @@
 //!
 //! On the daemon's machine, `remote token create|list|rotate|revoke` issue
 //! and end the tokens its remote listener accepts, and `remote show` says
-//! what the listener presents. On the other machine, `remote add|list|
+//! what the listener presents; `remote pair` gives a phone a code to type
+//! (R3.40, ADR 0095). On the other machine, `remote add|list|
 //! remove` keep profiles in `<state>/remotes.toml` (`0600`), the token in
 //! the file and never on a command line, and `--remote <name>` (or
 //! `REEF_REMOTE`) points any command at one.
 
-use std::io::{self, BufRead as _, Write};
+use std::io::{self, BufRead as _, IsTerminal as _, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -20,6 +21,9 @@ use serde::Serialize;
 
 use super::out::{TextRender, TextRow, block};
 use super::{CliError, Ctx, Global, Out};
+
+/// A certificate with fewer days left is warned about.
+pub(super) const CERTIFICATE_WARN_DAYS: i64 = 14;
 
 /// `reef remote`.
 #[derive(Debug, clap::Args)]
@@ -58,6 +62,18 @@ enum RemoteCommand {
     },
     /// Show the remote listener: its state, address, and the fingerprint clients pin.
     Show,
+    /// Pair a phone: prints the address to open on it and a code to type there once.
+    #[command(after_help = "Example: reef remote pair iphone")]
+    Pair {
+        /// The device's name, such as iphone; a paired device of that name ends once the new one is paired.
+        name: String,
+        /// The person it is for [default: the daemon's default person].
+        #[arg(long, value_name = "NAME")]
+        identity: Option<String>,
+        /// How long it stays paired (90d, 2w) [default: 90d].
+        #[arg(long, value_name = "DURATION", value_parser = humantime::parse_duration)]
+        expires: Option<Duration>,
+    },
     /// Issue, list, rotate and revoke the tokens this daemon's remote listener accepts.
     #[command(subcommand)]
     Token(TokenCommand),
@@ -112,6 +128,7 @@ impl Args {
     pub(crate) fn local_only(&self) -> Option<&'static str> {
         match self.command {
             RemoteCommand::Token(_) => Some("remote token"),
+            RemoteCommand::Pair { .. } => Some("remote pair"),
             _ => None,
         }
     }
@@ -142,6 +159,14 @@ pub(crate) async fn run(global: &Global, out: &Out, args: Args) -> Result<(), Cl
         RemoteCommand::Show => {
             let ctx = super::connect(global, out).await?;
             show(&ctx).await
+        }
+        RemoteCommand::Pair {
+            name,
+            identity,
+            expires,
+        } => {
+            let ctx = super::connect(global, out).await?;
+            pair(&ctx, &name, identity.as_deref(), expires).await
         }
         RemoteCommand::Token(command) => {
             let ctx = super::connect(global, out).await?;
@@ -471,10 +496,20 @@ impl TextRender for RemoteListener {
             ("address", self.address.clone()),
             ("names", self.names.join(", ")),
         ];
+        if let Some(origin) = &self.origin {
+            pairs.push(("origin", origin.clone()));
+        }
         if let Some(cert) = &self.certificate {
             pairs.push(("fingerprint", cert.fingerprint.clone()));
             pairs.push(("certificate", cert.source.clone()));
-            pairs.push(("expires", cert.not_after.clone().unwrap_or_default()));
+            let expires = cert.not_after.clone().unwrap_or_default();
+            pairs.push((
+                "expires",
+                match cert.days_left {
+                    Some(days) => format!("{expires} ({})", days_left(days)),
+                    None => expires,
+                },
+            ));
         }
         pairs.push(("live_tokens", self.live_tokens.to_string()));
         if let Some(error) = &self.error {
@@ -482,6 +517,143 @@ impl TextRender for RemoteListener {
         }
         block(w, &pairs)
     }
+}
+
+/// A pairing code, as `remote pair` prints it.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+#[schemars(rename = "cli.PairingCode")]
+pub(crate) struct PairingCode {
+    /// The device's name.
+    name: String,
+    /// The address to open on the phone.
+    url: String,
+    /// What to type there: a credential until it is used or expires.
+    code: String,
+    /// When it stops working.
+    expires_at: Option<String>,
+    /// What keeps the phone from pairing or from opening the app, if anything.
+    warnings: Vec<String>,
+}
+
+impl TextRender for PairingCode {
+    fn render(&self, w: &mut dyn Write) -> io::Result<()> {
+        writeln!(w, "Open   {}", self.url)?;
+        writeln!(w, "Code   {:<18} good for 10 minutes, once", self.code)?;
+        writeln!(w)?;
+        writeln!(
+            w,
+            "On the phone: open the address in Safari, Share, Add to Home Screen, open Reef\nfrom the Home Screen, and type the code."
+        )
+    }
+}
+
+/// A certificate's days left in words.
+pub(super) fn days_left(days: i64) -> String {
+    match days {
+        ..=-1 => "expired".to_owned(),
+        1 => "1 day left".to_owned(),
+        days => format!("{days} days left"),
+    }
+}
+
+/// Whether the certificate name `presented` is for the DNS name `host`, as
+/// TLS clients match them: the whole name, or `*` for the first label of at
+/// least three.
+fn covers(presented: &str, host: &str) -> bool {
+    let presented = presented.trim_end_matches('.');
+    match presented.strip_prefix("*.") {
+        Some(under) => {
+            under.contains('.')
+                && host
+                    .split_once('.')
+                    .is_some_and(|(_, rest)| rest.eq_ignore_ascii_case(under))
+        }
+        None => presented.eq_ignore_ascii_case(host),
+    }
+}
+
+/// What in the listener's state keeps a phone out.
+fn pair_warnings(remote: Option<&RemoteListener>) -> Vec<String> {
+    let Some(remote) = remote else {
+        return Vec::new();
+    };
+    let mut warnings = Vec::new();
+    match remote.state.as_str() {
+        "off" => warnings.push(
+            "the remote listener is off: set `[remote] enabled = true` and restart the daemon"
+                .to_owned(),
+        ),
+        "failed" => warnings.push(format!(
+            "the remote listener is not listening: {}",
+            remote.error.as_deref().unwrap_or("it did not start")
+        )),
+        _ => {}
+    }
+    if let Some(cert) = &remote.certificate {
+        if cert.source == "generated" {
+            warnings.push(
+                "the certificate is generated, and no phone trusts it: an exception made in Safari does not reach the Home Screen app. docs/phone.md names three certificates a phone trusts"
+                    .to_owned(),
+            );
+        }
+        if let Some(days) = cert.days_left.filter(|days| *days < CERTIFICATE_WARN_DAYS) {
+            warnings.push(format!("the certificate has {}", days_left(days)));
+        }
+        if let Some(host) = remote
+            .origin
+            .as_deref()
+            .and_then(RemoteUrl::parse)
+            .map(|url| url.host)
+            && !cert.subject_names.iter().any(|name| covers(name, &host))
+        {
+            warnings.push(format!(
+                "the certificate is not for {host} (it names {}), so the phone will not open the app",
+                cert.subject_names.join(", ")
+            ));
+        }
+    }
+    warnings
+}
+
+async fn pair(
+    ctx: &Ctx,
+    name: &str,
+    identity: Option<&str>,
+    expires: Option<Duration>,
+) -> Result<(), CliError> {
+    // Before the code is drawn, so that a failure here loses none.
+    let status = ctx.call(ctx.client.daemon_status(true)).await?;
+    let started = ctx
+        .call(
+            ctx.client
+                .start_pairing(name, identity.unwrap_or_default(), expires),
+        )
+        .await?;
+    let remote = status.remote.as_ref().map(RemoteListener::from);
+    let code = match started.code.split_at_checked(4) {
+        Some((first, second)) => format!("{first}-{second}"),
+        None => started.code,
+    };
+    let code = PairingCode {
+        name: name.to_owned(),
+        url: format!("{}/", started.origin),
+        code,
+        expires_at: started.expires_at.as_ref().map(reef_client::json::rfc3339),
+        warnings: pair_warnings(remote.as_ref()),
+    };
+    for warning in &code.warnings {
+        ctx.out.note(&format!("reef: {warning}"));
+    }
+    ctx.out.object(&code)?;
+    // The address alone: a code in it would pair Safari, whose storage the
+    // Home Screen app does not share.
+    if !ctx.out.is_json()
+        && io::stdout().is_terminal()
+        && let Some(qr) = super::qr::terminal(&code.url)
+    {
+        ctx.out.raw(format!("\n{qr}").as_bytes())?;
+    }
+    Ok(())
 }
 
 async fn show(ctx: &Ctx) -> Result<(), CliError> {
@@ -678,6 +850,84 @@ async fn token(ctx: &Ctx, command: TokenCommand) -> Result<(), CliError> {
             let response = ctx.call(ctx.client.revoke_remote_token(&name)).await?;
             let token = RemoteToken::from(&response.token.unwrap_or_default());
             ctx.out.done(&token, &format!("revoked {name}"))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use reef_client::json::RemoteCertificate;
+
+    use super::*;
+
+    #[test]
+    fn certificate_names_cover_hosts_as_tls_clients_match_them() {
+        for (presented, host) in [
+            ("mac.example.ts.net", "mac.example.ts.net"),
+            ("MAC.example.ts.net.", "mac.example.ts.net"),
+            ("*.example.ts.net", "mac.example.ts.net"),
+            ("*.Example.TS.net", "mac.example.ts.net"),
+            ("*.example.com", "mac.example.com"),
+        ] {
+            assert!(covers(presented, host), "{presented} for {host}");
+        }
+        for (presented, host) in [
+            ("wrong.example", "mac.example"),
+            ("example.ts.net", "mac.example.ts.net"),
+            ("*.example.ts.net", "example.ts.net"),
+            ("*.example.ts.net", "a.mac.example.ts.net"),
+            ("*.net", "mac.net"),
+            ("m*.example.ts.net", "mac.example.ts.net"),
+            ("*", "mac"),
+            ("10.0.0.1", "mac.example.ts.net"),
+            ("", "mac.example.ts.net"),
+        ] {
+            assert!(!covers(presented, host), "{presented} for {host}");
+        }
+    }
+
+    fn listener(names: &[&str], days_left: i64) -> RemoteListener {
+        RemoteListener {
+            state: "listening".to_owned(),
+            enabled_by: Some("config".to_owned()),
+            address: "0.0.0.0:7470".to_owned(),
+            names: vec!["mac.example.ts.net".to_owned()],
+            certificate: Some(RemoteCertificate {
+                source: "file".to_owned(),
+                fingerprint: "sha256:00".to_owned(),
+                not_after: None,
+                days_left: Some(days_left),
+                subject_names: names.iter().map(|name| (*name).to_owned()).collect(),
+            }),
+            error: None,
+            live_tokens: 0,
+            origin: Some("https://mac.example.ts.net:7470".to_owned()),
+        }
+    }
+
+    #[test]
+    fn pairing_warns_of_a_certificate_the_phone_refuses() {
+        let warned = |names: &[&str], days| pair_warnings(Some(&listener(names, days)));
+        for names in [
+            &["mac.example.ts.net"][..],
+            &["10.0.0.1", "*.example.ts.net"],
+        ] {
+            assert_eq!(warned(names, 14), [""; 0]);
+        }
+        let wrong = warned(&["wrong.example", "10.0.0.1"], 90);
+        assert_eq!(wrong.len(), 1);
+        assert!(
+            wrong[0].contains("not for mac.example.ts.net (it names wrong.example, 10.0.0.1)"),
+            "{wrong:?}"
+        );
+        for (days, said) in [
+            (13, "13 days left"),
+            (1, "1 day left"),
+            (0, "0 days left"),
+            (-4, "expired"),
+        ] {
+            let warnings = warned(&["mac.example.ts.net"], days);
+            assert_eq!(warnings, [format!("the certificate has {said}")]);
         }
     }
 }

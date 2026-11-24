@@ -18,8 +18,10 @@ use crate::model::{RepoId, Timestamp};
 
 /// Items and keys one frame holds at most.
 pub(crate) const FRAME_ENTRIES: usize = 1_000;
-/// Encoded bytes one frame holds at most; one item is never split.
-pub(crate) const FRAME_BYTES: usize = 1 << 20;
+/// Encoded bytes one frame holds at most; one item is never split. Small
+/// enough that a slow link (R3.40) has a whole frame before the web UI calls
+/// the stream silent, 20 s at the least.
+pub(crate) const FRAME_BYTES: usize = 128 << 10;
 
 /// One repository's inbox as its last read left it, without the digest,
 /// which depends on the viewer.
@@ -159,7 +161,8 @@ pub(crate) fn diff(sent: Option<&RepoBoard>, now: &RepoBoard) -> (Vec<v1::InboxI
 
 /// `changes` as frames of at most [`FRAME_ENTRIES`] items and keys and
 /// [`FRAME_BYTES`]. A change too large for one frame continues in the next
-/// with its state repeated, so every frame's sections read alike.
+/// with its state repeated, so every frame's sections read alike. A frame
+/// takes at least one item or key, so a state over the bound still ends.
 pub(crate) fn frames(changes: Vec<v1::InboxSectionChange>) -> Vec<Vec<v1::InboxSectionChange>> {
     let mut frames: Vec<Vec<v1::InboxSectionChange>> = Vec::new();
     let mut frame: Vec<v1::InboxSectionChange> = Vec::new();
@@ -195,7 +198,8 @@ pub(crate) fn frames(changes: Vec<v1::InboxSectionChange>) -> Vec<Vec<v1::InboxS
             if rest.items.is_empty() {
                 while let Some(key) = left.peek() {
                     let size = key.len() + 4;
-                    if entries >= FRAME_ENTRIES || bytes + size > FRAME_BYTES {
+                    let first = frame.is_empty() && part.items.is_empty() && part.left.is_empty();
+                    if !first && (entries >= FRAME_ENTRIES || bytes + size > FRAME_BYTES) {
                         break;
                     }
                     bytes += size;
@@ -436,6 +440,58 @@ mod tests {
         let left: usize = all.iter().map(|s| s.left.len()).sum();
         assert_eq!((items, left), (2_500, 11));
         assert_eq!(frames[2].last().map(|s| s.repo_id.as_str()), Some("s"));
+    }
+
+    #[test]
+    fn a_state_over_the_bound_still_ends() {
+        for len in [127 << 10, 129 << 10, 2 << 20] {
+            let change = v1::InboxSectionChange {
+                repo_id: "r".to_owned(),
+                items: (0..3)
+                    .map(|n| item(&format!("help:r:{n}"), NeedsYouNow, n, "asks"))
+                    .collect(),
+                left: (0..3).map(|n| format!("gone:{n}")).collect(),
+                error: Some(v1::InboxError {
+                    message: "ö".repeat(len / 2),
+                    ..v1::InboxError::default()
+                }),
+                ..v1::InboxSectionChange::default()
+            };
+            for items in [change.items.clone(), Vec::new()] {
+                let frames = frames(vec![v1::InboxSectionChange {
+                    items: items.clone(),
+                    ..change.clone()
+                }]);
+                assert!(frames.len() <= 6, "{len}: {}", frames.len());
+                let parts: Vec<_> = frames.into_iter().flatten().collect();
+                let sent: Vec<_> = parts.iter().flat_map(|p| p.items.clone()).collect();
+                let left: Vec<_> = parts.iter().flat_map(|p| p.left.clone()).collect();
+                assert_eq!((sent, left), (items, change.left.clone()));
+            }
+        }
+    }
+
+    #[test]
+    fn a_slow_link_has_a_frame_in_time() {
+        let words = "why ".repeat(1_000);
+        let items: Vec<v1::InboxItem> = (0..200)
+            .map(|n| item(&format!("help:r:{n:04}"), NeedsYouNow, n, &words))
+            .collect();
+        let frames = frames(vec![v1::InboxSectionChange {
+            repo_id: "r".to_owned(),
+            items,
+            ..v1::InboxSectionChange::default()
+        }]);
+        for sections in &frames {
+            let frame = v1::WatchInboxResponse {
+                sections: sections.clone(),
+                ..v1::WatchInboxResponse::default()
+            };
+            // 20 s at 6.6 kB/s.
+            assert!(frame.encoded_len() <= 132_000, "{}", frame.encoded_len());
+        }
+        let items: usize = frames.iter().flatten().map(|s| s.items.len()).sum();
+        assert_eq!(items, 200);
     }
 
     #[test]

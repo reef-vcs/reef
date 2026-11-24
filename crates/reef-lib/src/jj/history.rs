@@ -81,7 +81,7 @@ pub async fn change_states(
 
 /// The first line of `description`, cut at a character boundary to at most
 /// [`MAX_SUBJECT`] bytes.
-fn subject(description: &str) -> String {
+pub fn subject(description: &str) -> String {
     let line = description.lines().next().unwrap_or("");
     let mut end = line.len().min(MAX_SUBJECT);
     while !line.is_char_boundary(end) {

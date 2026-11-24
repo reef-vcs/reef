@@ -46,7 +46,7 @@ pub use reef::daemon::v0;
 /// The revision of `reef.api.v1` this build serves. It increases by one with
 /// every change to the schema, and [`API_DIGEST`] changes with it; v1 only
 /// grows (ADR 0029). `GetDaemonStatus` reports it.
-pub const API_REVISION: u32 = 47;
+pub const API_REVISION: u32 = 48;
 
 /// blake3 of the v1 descriptors without comments, one per revision, oldest
 /// first: entry `n - 1` is revision `n`'s. A schema change appends one entry
@@ -218,6 +218,10 @@ pub const API_DIGESTS: &[&str] = &[
     // `unpinned`, `WebUiStatus`, `WebUiState` and
     // `GetDaemonStatusResponse.web_ui`.
     "c0d877ace4c586d5c55809b87ef9e4b80e2528a421ad77198ceb88353853397f",
+    // R3.40: `RemoteService.StartPairing` and `RedeemPairing`,
+    // `REMOTE_SCOPE_DEVICE`, `RemoteToken.device_origin` and
+    // `RemoteListener.origin`.
+    "839d4aff0edfd17d5117ef992c58f6db7eca2b33a265cbce07d4d163b7ed1f68",
 ];
 
 /// blake3 of the v1 descriptors without comments, as of [`API_REVISION`]:
@@ -491,6 +495,21 @@ pub mod error {
     /// A remote token name that is not `[a-z0-9][a-z0-9._-]{0,62}` (R2.08).
     /// Metadata: `name`.
     pub const INVALID_REMOTE_TOKEN_NAME: &str = "INVALID_REMOTE_TOKEN_NAME";
+    /// A pairing on a daemon with no `[remote] origin` (R3.40).
+    pub const REMOTE_ORIGIN_REQUIRED: &str = "REMOTE_ORIGIN_REQUIRED";
+    /// A device's token (R3.40) used at another address than the one it was
+    /// paired at, or after `[remote] origin` became another. Metadata:
+    /// `device_origin`, and `origin` (`[remote] origin`; empty when not set).
+    pub const REMOTE_ORIGIN_CHANGED: &str = "REMOTE_ORIGIN_CHANGED";
+    /// A pairing code that is wrong, used or expired, or sent to another
+    /// address than `[remote] origin` (R3.40).
+    pub const PAIRING_CODE_INVALID: &str = "PAIRING_CODE_INVALID";
+    /// The daemon holds its limit of pairing codes not yet used (R3.40).
+    /// Metadata: `limit`.
+    pub const TOO_MANY_PAIRINGS: &str = "TOO_MANY_PAIRINGS";
+    /// A rotation of a device's token (R3.40): pair it again instead.
+    /// Metadata: `name`.
+    pub const DEVICE_TOKEN_ROTATE: &str = "DEVICE_TOKEN_ROTATE";
 
     /// An envelope that is not Reef evidence (R3.01). Metadata: `check`,
     /// one of `size`, `envelope`, `payload_type`, `signatures`,
@@ -1262,8 +1281,9 @@ mod tests {
         // session key's registration, which changes no jj view either; and,
         // as ADR 0085 amends it, passkeys and approvals, which are identity
         // records and memory, not jj state; and, as ADR 0088 amends it, the
-        // inbox's marks, a person's reading position.
-        const EXCEPT: [&str; 19] = [
+        // inbox's marks, a person's reading position; and, as ADR 0095 amends
+        // it, a pairing's redeem, whose token is an access record.
+        const EXCEPT: [&str; 20] = [
             "RenewLease",
             "ReportPresence",
             "ClearPresence",
@@ -1283,6 +1303,7 @@ mod tests {
             "RequestApproval",
             "ResolveApproval",
             "MarkInboxSeen",
+            "RedeemPairing",
         ];
         for method in methods_of(&pool()) {
             if access(&path(&method)) != Some(v1::Access::Write) || EXCEPT.contains(&method.name())

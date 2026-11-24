@@ -8,6 +8,7 @@ import type {
   RegisterPasskeyRequestSchema,
   StartPasskeyRegistrationResponse,
 } from "../gen/reef/api/v1/identity_pb";
+import { device } from "../device";
 import { embedded } from "../session";
 import { buffer, utf8 } from "./bytes";
 
@@ -46,6 +47,8 @@ export function failure(thrown: unknown): Failure {
 }
 
 export function hasPasskeySupport(): boolean {
+  // A paired phone's passkey ceremonies are refused by the daemon.
+  if (device()) return false;
   return !embedded() && typeof PublicKeyCredential !== "undefined" && "credentials" in navigator;
 }
 

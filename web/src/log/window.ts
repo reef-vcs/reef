@@ -137,7 +137,7 @@ export class OperationWindow {
   /** Live operations not yet applied: applied in order, one parent check at a time. */
   private queue: OpRecord[] = [];
   private checking = false;
-  private readonly backoff = new Backoff();
+  private readonly backoff = new Backoff(Backoff.PAGE_MS);
   private retry: Cancel | undefined;
   private readonly points = new Map<string, Point>();
   private readonly locating = new Set<string>();

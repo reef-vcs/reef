@@ -11,7 +11,7 @@
 // marked a digest seen (`markSeen`, after it was on screen), what it showed
 // stays for the rest of the visit and later landings add to it.
 import { client, type Connection } from "../api/connection";
-import { isSessionInvalid, reefError, type ReefError } from "../api/errors";
+import { isPassing, isSessionInvalid, reefError, type ReefError } from "../api/errors";
 import {
   InboxBucket,
   InboxService,
@@ -21,6 +21,7 @@ import {
 import { RepositoryService } from "../gen/reef/api/v1/repositories_pb";
 import { holdDigest, shown, type VisitDigest } from "../inbox/digest";
 import { holdRead, showNew, type HeldBucket } from "../inbox/held";
+import { after, Backoff, type Cancel } from "../live/backoff";
 import { FrameNotifier, type FrameScheduler } from "../live/frame";
 import type { InboxStore, SectionState } from "../live/inbox";
 
@@ -96,6 +97,8 @@ export class InboxModel {
   private stopped = false;
   /** The daemon keeps no mark for this caller. */
   private markRefused = false;
+  private readonly backoff = new Backoff(Backoff.PAGE_MS);
+  private retry: Cancel | undefined;
 
   constructor(
     private readonly connection: Connection,
@@ -121,6 +124,7 @@ export class InboxModel {
     return () => {
       this.stopped = true;
       unsubscribe();
+      this.retry?.();
     };
   }
 
@@ -168,7 +172,8 @@ export class InboxModel {
         this.markRefused = true;
         return;
       }
-      if (!this.stopped) this.fail(thrown);
+      // The render that follows marks again.
+      if (!this.stopped && !isPassing(error)) this.fail(thrown);
     }
   }
 
@@ -177,9 +182,14 @@ export class InboxModel {
       const response = await client(this.connection, RepositoryService).getRepository({ repo });
       if (this.stopped) return;
       this.repoId = response.repository?.id ?? repo;
+      this.snapshot = { ...this.snapshot, error: null };
       this.project();
     } catch (thrown) {
-      if (!this.stopped) this.fail(thrown);
+      if (this.stopped) return;
+      this.fail(thrown);
+      if (isPassing(reefError(thrown))) {
+        this.retry = after(this.backoff.next(), () => void this.resolve(repo));
+      }
     }
   }
 

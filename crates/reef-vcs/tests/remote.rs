@@ -108,10 +108,16 @@ fn short_tempdir() -> tempfile::TempDir {
 /// A daemon with its remote listener on, a registered repository, and
 /// what a client needs: the URL and the fingerprint.
 async fn remote_daemon() -> (TestDaemon, SyntheticRepo, String, String) {
+    remote_daemon_at("").await
+}
+
+/// [`remote_daemon`] with `[remote] origin`.
+async fn remote_daemon_at(origin: &str) -> (TestDaemon, SyntheticRepo, String, String) {
     let (daemon, repo) = TestDaemon::with_synthetic_repo_and(Preset::Small, |config| {
         config.file.remote.enabled = true;
         "127.0.0.1:0".clone_into(&mut config.file.remote.listen);
         config.file.remote.names = vec!["localhost".to_owned()];
+        origin.clone_into(&mut config.file.remote.origin);
         no_automatic_snapshots(config);
     })
     .await;
@@ -351,6 +357,7 @@ async fn local_only_commands() {
         &["config", "show"],
         &["store", "build", "x"],
         &["remote", "token", "create", "x"],
+        &["remote", "pair", "phone"],
         &["repo", "register", "/tmp"],
         &["ws", "gc"],
         &["backup", "/tmp/b"],
@@ -782,4 +789,90 @@ async fn executor_run_through_a_linked_token() {
         assert_eq!(identity.key.as_ref().unwrap().identity, "ci-exec");
     }
     daemon.stop().await;
+}
+
+// R3.40 15: `remote pair`, as text and as JSON; the generated certificate
+// warns, and nothing but `-o` JSON and the person's own terminal has the code.
+#[tokio::test(flavor = "multi_thread")]
+async fn remote_pair() {
+    let (daemon, _repo, _url, _fingerprint) = remote_daemon_at("https://localhost:7470").await;
+    let on_socket = || reef_in(daemon.state_dir());
+    let paired = json(
+        &run(
+            on_socket(),
+            &["-o", "json", "remote", "pair", "iphone"],
+            None,
+        )
+        .await,
+    );
+    assert_eq!(paired["name"], "iphone");
+    assert_eq!(paired["url"], "https://localhost:7470/");
+    let code = paired["code"].as_str().unwrap();
+    assert_eq!((code.len(), &code[4..5]), (9, "-"), "{code}");
+    assert!(paired["expires_at"].is_string(), "{paired}");
+    let warnings = paired["warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 1, "{paired}");
+    assert!(
+        warnings[0].as_str().unwrap().contains("docs/phone.md"),
+        "{paired}"
+    );
+
+    let output = run(
+        on_socket(),
+        &["-o", "text", "remote", "pair", "iphone", "--expires", "2w"],
+        None,
+    )
+    .await;
+    let text = stdout(&output);
+    let mut lines = text.lines();
+    assert_eq!(lines.next(), Some("Open   https://localhost:7470/"));
+    let line = lines.next().unwrap();
+    assert!(
+        line.starts_with("Code   ") && line.ends_with("good for 10 minutes, once"),
+        "{line}"
+    );
+    assert!(text.contains("Add to Home Screen"), "{text}");
+    // Not a terminal: no QR code, and no escapes.
+    assert!(!text.contains('\u{1b}'), "{text}");
+    assert!(
+        stderr(&output).contains("the certificate is generated"),
+        "{}",
+        stderr(&output)
+    );
+
+    let shown = json(&run(on_socket(), &["-o", "json", "remote", "show"], None).await);
+    assert_eq!(shown["origin"], "https://localhost:7470");
+    assert!(
+        shown["certificate"]["days_left"].as_i64().unwrap() > 300,
+        "{shown}"
+    );
+    let text = stdout(&run(on_socket(), &["-o", "text", "remote", "show"], None).await);
+    assert!(text.contains(" days left)"), "{text}");
+
+    for args in [
+        &["remote", "pair", "Phone"][..],
+        &["remote", "pair", "phone", "--expires", "0s"],
+    ] {
+        let mut all = vec!["-o", "json"];
+        all.extend_from_slice(args);
+        failed(&run(on_socket(), &all, None).await, 2);
+    }
+    drop(daemon);
+
+    let (daemon, _repo, _url, _fingerprint) = remote_daemon().await;
+    let output = run(
+        reef_in(daemon.state_dir()),
+        &["-o", "json", "remote", "pair", "iphone"],
+        None,
+    )
+    .await;
+    let error = failed(&output, 5);
+    assert_eq!(error["reason"], "REMOTE_ORIGIN_REQUIRED");
+    assert!(
+        error["hint"]
+            .as_str()
+            .unwrap()
+            .contains("origin = \"https://localhost:"),
+        "{error}"
+    );
 }

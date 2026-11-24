@@ -64,7 +64,7 @@ service InboxService {
   // slowly misses intermediate states, never the latest: each frame is the
   // difference between what this stream sent and the inbox now. There is no
   // cursor: a new stream's first frames replace what the client held. A
-  // frame holds at most 1,000 items and keys and 1 MiB; an empty frame
+  // frame holds at most 1,000 items and keys and 128 KiB; an empty frame
   // follows 15 seconds without one. Read every stream opened on a
   // connection, since they share its flow control window.
   //
@@ -247,7 +247,7 @@ message InboxAgentCount {
 message InboxLanding {
   // The change, in hex.
   string change_id = 1;
-  // Its description's first line, as written.
+  // Its description's first line, at most 200 bytes of it.
   string subject = 2;
   // The agent that proposed it; empty for none.
   string agent = 3;

@@ -662,7 +662,7 @@ fn deep_file(root: &Path) -> PathBuf {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "manual measurement on the medium preset; prints its numbers"]
 async fn medium_thousand_snapshots_then_gc() {
-    let (after_first, after_gc) = thousand_snapshots_then_gc(Duration::ZERO).await;
+    let (after_first, after_gc) = Box::pin(thousand_snapshots_then_gc(Duration::ZERO)).await;
     assert!(
         after_gc * 10 <= after_first * 11,
         "{after_gc} is not within 10% of {after_first}"
@@ -675,7 +675,7 @@ async fn medium_thousand_snapshots_then_gc() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "manual measurement on the medium preset; prints its numbers"]
 async fn medium_thousand_snapshots_then_gc_control() {
-    thousand_snapshots_then_gc(Duration::from_hours(1)).await;
+    Box::pin(thousand_snapshots_then_gc(Duration::from_hours(1))).await;
 }
 
 /// 1,000 snapshots of one edited file on the medium preset, then a GC with

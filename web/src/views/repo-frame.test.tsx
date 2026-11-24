@@ -6,12 +6,16 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Connection } from "../api/connection";
 import { OperationService } from "../gen/reef/api/v1/operations_pb";
 import { RepositoryService } from "../gen/reef/api/v1/repositories_pb";
+import { InboxReason } from "../gen/reef/api/v1/inbox_pb";
+import { InboxStore } from "../live/inbox";
 import { OperationStore } from "../live/operations";
 import { PresenceStore } from "../live/presence";
 import type { Live } from "../live/share";
 import { immediateFrames, operationsFrame, presenceFrame, settle } from "../test/fakes";
 import { FakeFleetDaemon, workspace } from "../test/fleet-daemon";
 import { FakeOplog, REPO, T } from "../test/oplog-daemon";
+import { InboxDaemon, proposalItem, section } from "../test/inbox-daemon";
+import { narrow } from "../test/narrow";
 import { act, cleanup, render, screen, within } from "../test/testing-library";
 import { navigate, usePath, useSearch } from "../ui/router";
 import type { RepoPage } from "../ui/RepoNav";
@@ -55,7 +59,18 @@ function setup() {
   const presence = new PresenceStore(immediateFrames);
   presence.beginResync();
   presence.applyFrame(presenceFrame([], true));
+  const inbox = new InboxStore(immediateFrames);
+  const needs = new InboxDaemon();
+  needs.sections = [
+    section(REPO, {
+      needsYouNow: [proposalItem("d".repeat(32), InboxReason.SIGNOFF, 1_000, "Needs a sign-off")],
+      needsYouNowTotal: 1,
+    }),
+  ];
+  inbox.beginResync();
+  inbox.applyFrame(needs.frame());
   const live = {
+    inbox,
     operations,
     presence,
     state: "live",
@@ -94,7 +109,7 @@ describe("RepoFrame", () => {
       "Smartlog",
       "Workspaces",
       "Activity",
-      "Inbox",
+      "Inbox 1",
     ]);
     expect(links.map((l) => l.getAttribute("aria-current"))).toEqual([null, null, "page", null]);
     expect(screen.getByRole("slider")).toBeTruthy();
@@ -123,6 +138,32 @@ describe("RepoFrame", () => {
     });
     expect(await screen.findByRole("table", { name: "Activity" })).toBeTruthy();
     expect(oplog.listCalls.filter((c) => !c.atOperation)).toHaveLength(1);
+  });
+
+  it("has no scrubber on the pages read live", async () => {
+    window.history.replaceState(null, "", `/repos/${REPO}/inbox`);
+    setup();
+    await flush();
+    expect(await screen.findByRole("heading", { name: /^Needs you now/ })).toBeTruthy();
+    expect(screen.queryByRole("slider")).toBeNull();
+    await act(async () => {
+      navigate(`/repos/${REPO}/proposal`);
+      await settle(300);
+    });
+    expect(screen.queryByRole("slider")).toBeNull();
+  });
+
+  it("on a phone, puts the inbox first", async () => {
+    narrow();
+    setup();
+    await flush();
+    const links = within(nav()).getAllByRole("link");
+    expect(links.map((l) => l.textContent)).toEqual([
+      "Inbox 1",
+      "Smartlog",
+      "Workspaces",
+      "Activity",
+    ]);
   });
 
   it("replaces the window when the repository changes", async () => {

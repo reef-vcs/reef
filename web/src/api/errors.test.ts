@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { DaemonService } from "../gen/reef/api/v1/daemon_pb";
 import { ErrorKind } from "../gen/reef/api/v1/error_pb";
 import { daemonError } from "../test/fakes";
-import { isSessionInvalid, reefError } from "./errors";
+import { isPassing, isSessionInvalid, isUnanswered, reefError } from "./errors";
 
 const detail = {
   kind: ErrorKind.PERMISSION_DENIED,
@@ -72,5 +72,26 @@ describe("reefError", () => {
     const error = reefError(new TypeError("Failed to fetch"));
     expect(error.code).toBe(Code.Unknown);
     expect(error.message).toBe("Failed to fetch");
+  });
+});
+
+describe("what another try may not meet", () => {
+  it.each([
+    ["the browser's failure", new TypeError("Load failed"), true, true],
+    ["no whole answer", new ConnectError("missing trailer", Code.Unknown), true, true],
+    ["a proxy's 502", new ConnectError("HTTP 502", Code.Unavailable), true, true],
+    ["a deadline", new ConnectError("late", Code.DeadlineExceeded), true, true],
+    [
+      "a busy daemon",
+      daemonError(Code.Unavailable, { kind: ErrorKind.UNAVAILABLE, reason: "REMOTE_BUSY" }),
+      false,
+      true,
+    ],
+    ["a stop on the page's side", new ConnectError("left", Code.Canceled), false, false],
+    ["a refusal", daemonError(Code.NotFound, { reason: "REPOSITORY_NOT_FOUND" }), false, false],
+    ["a refusal with no reason", new ConnectError("bad", Code.InvalidArgument), false, false],
+  ])("%s", (_, thrown, unanswered, passing) => {
+    const error = reefError(thrown);
+    expect([isUnanswered(error), isPassing(error)]).toEqual([unanswered, passing]);
   });
 });

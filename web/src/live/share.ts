@@ -11,9 +11,16 @@
 // its operation stream's position. When the leader closes, the lock passes to
 // another tab, which resumes from the last cursor it saw and resubscribes to
 // presence and the inbox. Without `navigator.locks`, every tab leads alone.
+//
+// Over https, the remote listener, every tab leads alone too: HTTP/2 carries
+// its streams on one connection, so there is nothing to share, and a tab its
+// browser suspended holds no other's streams. There each stream is cut and
+// opened again when it falls silent (live/silence.ts).
 import { fromBinary, toBinary } from "@bufbuild/protobuf";
+import { Code } from "@connectrpc/connect";
 import { client, type Connection } from "../api/connection";
-import { isSessionInvalid, reefError } from "../api/errors";
+import { isSessionInvalid, reefError, type ReefError } from "../api/errors";
+import { streamsOf } from "../api/streams";
 import { DaemonService } from "../gen/reef/api/v1/daemon_pb";
 import { InboxService, WatchInboxResponseSchema } from "../gen/reef/api/v1/inbox_pb";
 import {
@@ -26,6 +33,7 @@ import { animationFrame, FrameNotifier, type FrameScheduler } from "./frame";
 import { InboxStore, runInbox } from "./inbox";
 import { OperationStore, positionFrame, runOperations } from "./operations";
 import { PresenceStore, runPresence } from "./presence";
+import { line, type Line } from "./silence";
 
 export const LIVE_NAME = "reef-live";
 
@@ -65,15 +73,24 @@ export interface LiveEnvironment {
   channel: ((name: string) => Channel) | undefined;
   frame: FrameScheduler;
   sleep: (ms: number, signal: AbortSignal) => Promise<void>;
+  /** What a stream is read through; each stream's own. */
+  line: () => Line;
 }
 
-export function browserEnvironment(): LiveEnvironment {
+/** A stream read as it comes. */
+export const direct: Line = (signal, open) => open(signal);
+
+export function browserEnvironment(remote = location.protocol === "https:"): LiveEnvironment {
+  if (remote) {
+    return { locks: undefined, channel: undefined, frame: animationFrame, sleep, line };
+  }
   return {
     locks: typeof navigator !== "undefined" ? navigator.locks : undefined,
     channel:
       typeof BroadcastChannel !== "undefined" ? (name) => new BroadcastChannel(name) : undefined,
     frame: animationFrame,
     sleep,
+    line: () => direct,
   };
 }
 
@@ -82,6 +99,8 @@ export class Live {
   readonly presence: PresenceStore;
   readonly inbox: InboxStore;
   state: ConnectionState = "connecting";
+  /** Why the daemon refuses this tab's streams for now, as a sixth tab's (`REMOTE_BUSY`). */
+  refusal: ReefError | null = null;
   /** This tab holds the lock and the streams. */
   leading = false;
   private readonly stateNotifier: FrameNotifier;
@@ -168,6 +187,11 @@ export class Live {
     const operations = client(this.connection, OperationService);
     const presence = client(this.connection, PresenceService);
     const inbox = client(this.connection, InboxService);
+    const lines = {
+      operations: this.env.line(),
+      presence: this.env.line(),
+      inbox: this.env.line(),
+    };
     const shared = {
       signal,
       sleep: this.env.sleep,
@@ -177,9 +201,11 @@ export class Live {
     };
     void runOperations(
       (cursor, signal) =>
-        operations.subscribeOperations(
-          cursor === undefined ? {} : { start: { case: "cursor", value: cursor } },
-          { signal },
+        lines.operations(signal, (signal) =>
+          operations.subscribeOperations(
+            cursor === undefined ? {} : { start: { case: "cursor", value: cursor } },
+            { signal },
+          ),
         ),
       this.operations,
       {
@@ -190,8 +216,9 @@ export class Live {
           this.post({ t: "operations", frame: toBinary(SubscribeOperationsResponseSchema, frame) });
           this.updateState();
         },
-        onRetry: () => {
+        onRetry: (error) => {
           this.operationsFailing = true;
+          this.refused(error);
           this.updateState();
         },
       },
@@ -199,7 +226,9 @@ export class Live {
         this.post({ t: "reset" });
       },
     );
-    void runPresence((signal) => presence.subscribePresence({}, { signal }), this.presence, {
+    const openPresence = (signal: AbortSignal) =>
+      lines.presence(signal, (signal) => presence.subscribePresence({}, { signal }));
+    void runPresence(openPresence, this.presence, {
       ...shared,
       backoff: new Backoff(),
       onResync: () => {
@@ -211,12 +240,15 @@ export class Live {
         this.post({ t: "presence", frame: toBinary(SubscribePresenceResponseSchema, frame) });
         this.updateState();
       },
-      onRetry: () => {
+      onRetry: (error) => {
         this.presenceFailing = true;
+        this.refused(error);
         this.updateState();
       },
     });
-    void runInbox((signal) => inbox.watchInbox({}, { signal }), this.inbox, {
+    const openInbox = (signal: AbortSignal) =>
+      lines.inbox(signal, (signal) => inbox.watchInbox({}, { signal }));
+    void runInbox(openInbox, this.inbox, {
       ...shared,
       backoff: new Backoff(),
       onResync: () => {
@@ -228,8 +260,9 @@ export class Live {
         this.post({ t: "inbox", frame: toBinary(WatchInboxResponseSchema, frame) });
         this.updateState();
       },
-      onRetry: () => {
+      onRetry: (error) => {
         this.inboxFailing = true;
+        this.refused(error);
         this.updateState();
       },
     });
@@ -331,6 +364,7 @@ export class Live {
       this.operations.live &&
       this.presence.synced &&
       this.inbox.synced &&
+      !this.inbox.resyncing &&
       !this.operationsFailing &&
       !this.presenceFailing &&
       !this.inboxFailing;
@@ -338,9 +372,16 @@ export class Live {
     this.setState(live ? "live" : this.everLive ? "reconnecting" : "connecting");
   }
 
+  private refused(error: ReefError) {
+    this.refusal = error.code === Code.Unavailable && error.reason ? error : null;
+    this.stateNotifier.notify();
+  }
+
   private setState(state: ConnectionState) {
     if (this.state === state || this.state === "ended") return;
     this.state = state;
+    if (state === "live") this.refusal = null;
+    streamsOf(this.connection).change(state === "live");
     if (this.leading) this.post({ t: "state", state });
     this.stateNotifier.notify();
   }

@@ -68,6 +68,11 @@ export class InboxStore {
     return this.notifier.subscribe(listener);
   }
 
+  /** A newer stream's inbox is under way, and what is held is an older one's. */
+  get resyncing(): boolean {
+    return this.next !== null;
+  }
+
   beginResync() {
     if (this.synced) this.next = new Map();
     else this.sections = new Map();

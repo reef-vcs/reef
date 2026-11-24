@@ -442,6 +442,7 @@ pub(crate) const OUTPUTS: &[OutputRow] = &[
     row(&["remote", "list"], list::<remote::Listed>),
     row(&["remote", "remove"], removed),
     row(&["remote", "show"], object::<RemoteListener>),
+    row(&["remote", "pair"], object::<remote::PairingCode>),
     row(&["remote", "token", "create"], object::<CreatedRemoteToken>),
     row(&["remote", "token", "list"], list::<RemoteToken>),
     row(&["remote", "token", "rotate"], object::<CreatedRemoteToken>),
