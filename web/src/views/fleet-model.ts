@@ -56,6 +56,8 @@ import { stateSignature } from "../live/kinds";
 import type { PresenceStore } from "../live/presence";
 
 export const REPOSITORY_NOT_FOUND = "REPOSITORY_NOT_FOUND";
+/** Ended workspaces read for their final state at once. */
+const FINALS_AT_ONCE = 8;
 /** Workspaces read at most; past it the page says so. */
 export const WORKSPACES_SHOWN = 1000;
 
@@ -130,6 +132,8 @@ export class FleetModel {
   /** Re-reads the workspaces listed as releasing until one is not (#212). */
   private readonly settling: Paced;
   private readonly status: Paced;
+  /** The error that the last read of the status left. */
+  private statusError: ReefError | null = null;
   /** As the route gave it. */
   private readonly repo: string;
   /** The full id, once `GetRepository` answered. */
@@ -447,9 +451,15 @@ export class FleetModel {
       this.uptimeReadAt = this.now();
       this.windowDecided = false;
       this.decideWindow();
+      if (this.statusError && this.statusError === this.snapshot.error) {
+        this.update({ error: null });
+      }
       return true;
     } catch (thrown) {
-      return this.fail(thrown);
+      const before = this.snapshot.error;
+      const answered = this.fail(thrown);
+      this.statusError = this.snapshot.error === before ? null : this.snapshot.error;
+      return answered;
     }
   }
 
@@ -559,8 +569,12 @@ export class FleetModel {
     const gone = live
       ? [...this.listed.keys()].filter((id) => !listed.has(id) && !this.ended.has(id))
       : [];
-    const finals = await Promise.all(gone.map((id) => this.readFinal(id)));
-    if (this.isStopped()) return;
+    const finals: (GetWorkspaceResponse | undefined)[] = [];
+    while (finals.length < gone.length) {
+      const some = gone.slice(finals.length, finals.length + FINALS_AT_ONCE);
+      finals.push(...(await Promise.all(some.map((id) => this.readFinal(id)))));
+      if (this.isStopped()) return;
+    }
     for (const [i, id] of gone.entries()) {
       const final = finals[i];
       const last = this.listed.get(id);

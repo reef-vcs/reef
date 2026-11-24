@@ -160,7 +160,7 @@ describe("the approval page", () => {
         vi.advanceTimersByTime(1_000);
       });
     }
-    expect(screen.getByRole("timer").textContent).toBe("Expired. Nothing was approved.");
+    expect(screen.getByRole("timer").textContent).toBe("Its time is over.");
     expect(button("Approve").disabled).toBe(true);
     expect(button("Decline").disabled).toBe(true);
     daemon.expire(approval.id);

@@ -21,7 +21,7 @@ const clients = new WeakMap<Transport, Map<DescService, Client<DescService>>>();
 
 /**
  * `service`'s client over `connection`, made once per transport. Callers
- * import the services they call, so a page's bundle holds only their schemas
+ * import the services they call, so the app holds only their schemas
  * (#252).
  */
 export function client<S extends DescService>(connection: Connection, service: S): Client<S> {

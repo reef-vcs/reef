@@ -610,6 +610,9 @@ test("an app whose script does not come says so, and its link opens the page", a
     await pairBrowser(page, reef);
     await openProposal(page);
     await expect(page.getByText("Loading Reef.")).toHaveCount(0);
+    const proposal = page.url();
+    // One tab at a time: WebKitGTK answers no more calls beside the streams of two.
+    await page.close();
     for (const how of ["hangs", "fails"]) {
       await test.step(`one that ${how}`, async () => {
         const cold = await context.newPage();
@@ -618,7 +621,7 @@ test("an app whose script does not come says so, and its link opens the page", a
           if (asked++ > 0) return route.continue();
           return how === "hangs" ? undefined : route.abort();
         });
-        await cold.goto(page.url(), { waitUntil: "commit" });
+        await cold.goto(proposal, { waitUntil: "commit" });
         await expect.poll(() => asked).toBe(1);
         await expect(cold.getByText("Loading Reef.")).toBeHidden();
         await expect(cold.getByText("Loading Reef.")).toBeVisible({ timeout: 15_000 });

@@ -424,8 +424,11 @@ describe("Overview", () => {
     await pass(5 * 60_000);
     expect(asked - before).toBeLessThanOrEqual(22);
     gone.delete("cccccccc33");
-    await pass(31_000);
+    asked = 0;
+    for (let s = 0; s < 70; s++) await pass(1_000);
     expect(screen.getByRole("alert").textContent).toContain("bbbbbbbb22");
+    // One that was read does not start the backoff over for the other.
+    expect(asked).toBeLessThanOrEqual(5);
     gone.delete("bbbbbbbb22");
     await pass(31_000);
     expect(screen.queryByRole("alert")).toBeNull();

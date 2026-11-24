@@ -113,6 +113,7 @@ export class FakeFleetDaemon {
   pageCap = Number.POSITIVE_INFINITY;
   failList: Error | undefined;
   failRepository: Error | undefined;
+  failStatus: Error | undefined;
   failGetWorkspace: Error | undefined;
   /** Holds each `ListWorkspaces` answer until it resolves. */
   hold: Promise<void> | undefined;
@@ -142,6 +143,7 @@ export class FakeFleetDaemon {
         getDaemonStatus: async (request) => {
           this.statusCalls.push(request);
           await this.holdStatus;
+          if (this.failStatus) throw this.failStatus;
           return create(GetDaemonStatusResponseSchema, {
             version: "0.2.0",
             uptimeMs: BigInt(this.uptimeMs),

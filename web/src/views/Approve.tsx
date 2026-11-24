@@ -75,7 +75,7 @@ function useApproval(connection: Connection, id: string, onSessionInvalid: () =>
       controller.abort();
     };
   }, [connection, again, over, id, onSessionInvalid]);
-  return [load, setLoad] as const;
+  return [load, setLoad, over ? null : error] as const;
 }
 
 /** The change the approval is for, for its description and author. */
@@ -326,7 +326,7 @@ export function Approve({
   id: string;
   onSessionInvalid: () => void;
 }) {
-  const [load, setLoad] = useApproval(connection, id, onSessionInvalid);
+  const [load, setLoad, error] = useApproval(connection, id, onSessionInvalid);
   const approval = load.kind === "loaded" ? load.approval : null;
   const change = useChange(connection, approval);
   const below = useBelow(connection, approval);
@@ -375,13 +375,14 @@ export function Approve({
         One passkey touch approves exactly this sign-off, on this tree of this change, and nothing
         else.
       </p>
+      {error && <ErrorView error={error} />}
       <Facts approval={shown} change={change} below={below} />
       {pending ? (
         <>
           <p role="timer">
             {open
               ? `${timeLeft(left)} left, until ${clock(shown.expiresAt).text}`
-              : "Expired. Nothing was approved."}
+              : "Its time is over."}
           </p>
           <p className="actions">
             <button

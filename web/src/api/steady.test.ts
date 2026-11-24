@@ -242,31 +242,37 @@ describe("a read that hangs", () => {
     expect(held.listeners).toBe(0);
   });
 
-  it("is held with 31 others at most, the oldest failing for one more", async () => {
-    const { read, sent, held, streams } = page();
-    streams.change(false);
-    const ends = Array.from({ length: MOST + 10 }, () => read());
-    await flush();
-    expect(ends.map(({ code }) => code !== undefined)).toEqual([
-      ...Array.from({ length: 10 }, () => true),
-      ...Array.from({ length: MOST }, () => false),
-    ]);
-    expect(sent.filter(({ signal }) => !signal.aborted)).toHaveLength(MOST);
-    for (const { answer: reply } of sent) reply(answer());
-    await flush();
-    expect(ends.filter(({ version }) => version)).toHaveLength(MOST);
-    expect(vi.getTimerCount()).toBe(0);
-    expect(held.listeners).toBe(0);
-    // What was answered, refused or left is held no more.
-    const left = new AbortController();
-    for (let i = 0; i < MOST; i++) read(left.signal);
-    await flush();
-    left.abort();
-    await flush();
-    const more = Array.from({ length: MOST }, () => read());
-    await flush();
-    expect(more.map(({ code }) => code)).toEqual(Array.from({ length: MOST }, () => undefined));
-  });
+  it.each([
+    ["live", true],
+    ["lost", false],
+  ])(
+    "is held with 31 others at most, the streams %s, the oldest failing for one more",
+    async (_, live) => {
+      const { read, sent, held, streams } = page();
+      streams.change(live);
+      const ends = Array.from({ length: MOST + 10 }, () => read());
+      await flush();
+      expect(ends.map(({ code }) => code !== undefined)).toEqual([
+        ...Array.from({ length: 10 }, () => true),
+        ...Array.from({ length: MOST }, () => false),
+      ]);
+      expect(sent.filter(({ signal }) => !signal.aborted)).toHaveLength(MOST);
+      for (const { answer: reply } of sent) reply(answer());
+      await flush();
+      expect(ends.filter(({ version }) => version)).toHaveLength(MOST);
+      expect(vi.getTimerCount()).toBe(0);
+      expect(held.listeners).toBe(0);
+      // What was answered, refused or left is held no more.
+      const left = new AbortController();
+      for (let i = 0; i < MOST; i++) read(left.signal);
+      await flush();
+      left.abort();
+      await flush();
+      const more = Array.from({ length: MOST }, () => read());
+      await flush();
+      expect(more.map(({ code }) => code)).toEqual(Array.from({ length: MOST }, () => undefined));
+    },
+  );
 
   it.each([
     ["answered", () => Promise.resolve(answer())],

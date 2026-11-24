@@ -211,16 +211,24 @@ describe("Paced", () => {
     vi.setSystemTime(Date.now() + 5_000);
     await finish(false);
     paced.request();
+    vi.advanceTimersByTime(MAX_SPACING_MS - 1);
+    expect(state.starts, "no sooner than after one that was answered").toBe(before);
+    vi.advanceTimersByTime(1);
     expect(state.starts).toBe(before + 1);
     await finish();
     vi.advanceTimersByTime(60_000);
     expect(state.starts).toBe(before + 1);
     // Asked for during one that no answer comes to: spaced, not backed off.
     paced.request();
+    for (let i = 0; i < 12; i++) {
+      await finish(false);
+      vi.advanceTimersByTime(Backoff.PAGE_MS);
+    }
+    const asked = state.starts;
     paced.request();
     await finish(false);
     vi.advanceTimersByTime(MIN_SPACING_MS);
-    expect(state.starts).toBe(before + 3);
+    expect(state.starts).toBe(asked + 1);
   });
 
   it("runs at once when asked to after a run no answer came to, and once", async () => {

@@ -495,6 +495,76 @@ describe("FleetModel", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it("tries a status that no answer came for again, and clears its error, and only its own", async () => {
+    const daemon = withTwo();
+    const t = setup({ daemon });
+    await flush();
+    daemon.failStatus = daemonError(Code.Unavailable, { reason: "BUSY" }, "status");
+    t.presence.beginResync();
+    await flush();
+    expect(t.model.getSnapshot().error?.message).toBe("status");
+    const before = daemon.statusCalls.length;
+    for (let i = 0; i < 5; i++) await flush(1_000);
+    expect(daemon.statusCalls.length).toBeGreaterThan(before + 2);
+    daemon.failStatus = undefined;
+    for (let i = 0; i < 10; i++) await flush(1_000);
+    expect(t.model.getSnapshot().error).toBeNull();
+    daemon.failList = daemonError(Code.Internal, { reason: "BROKEN" }, "list");
+    t.push(operation("o9", REPO, T));
+    await flush(MIN_SPACING_MS);
+    t.presence.beginResync();
+    await flush(1_000);
+    expect(t.model.getSnapshot().error?.message).toBe("list");
+    t.stop();
+  });
+
+  it("reads the last of many ended workspaces 8 at a time", async () => {
+    const daemon = new FakeFleetDaemon();
+    const many = Array.from({ length: 45 }, (_, i) => `w${String(i)}`);
+    daemon.workspaces = many.map((id) => workspace(id, C1));
+    daemon.changes = [change(C1)];
+    const line = new Dying(daemon.connection());
+    let under = 0;
+    let most = 0;
+    const { transport } = line.connection;
+    const unary = transport.unary.bind(transport);
+    transport.unary = async (...args) => {
+      if (args[0].localName !== "getWorkspace") return unary(...args);
+      most = Math.max(most, ++under);
+      try {
+        return await unary(...args);
+      } finally {
+        under -= 1;
+      }
+    };
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    const operations = new OperationStore(immediateFrames);
+    operations.applyFrame(operationsFrame({ live: true, cursor: "c0" }));
+    const model = new FleetModel(
+      line.connection,
+      operations,
+      new PresenceStore(immediateFrames),
+      immediateFrames,
+      vi.fn(),
+      { repo: REPO },
+    );
+    const stop = model.start();
+    await flush();
+    daemon.workspaces = [];
+    for (const id of many) {
+      daemon.finals.set(id, workspace(id, C1, { state: WorkspaceState.RELEASED }));
+    }
+    operations.applyFrame(
+      operationsFrame({ operations: [operation("o1", REPO, T)], live: true, cursor: "c1" }),
+    );
+    for (let i = 0; i < 10; i++) await flush(1_000);
+    expect(model.getSnapshot().rows?.map((row) => row.ended?.word)).toEqual(
+      many.map(() => "released"),
+    );
+    expect(most).toBe(8);
+    stop();
+  });
+
   it("at an operation, reads again once at a time", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
     const daemon = withTwo();

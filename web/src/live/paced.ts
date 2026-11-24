@@ -118,7 +118,7 @@ export class Paced {
       answered = await work;
     } finally {
       this.loading = false;
-      this.lastDuration = answered ? this.now() - started : 0;
+      this.lastDuration = this.now() - started;
       if (answered) this.backoff.reset();
       const now = this.againNow;
       const again = this.again;

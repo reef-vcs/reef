@@ -40,6 +40,7 @@ import {
   PolicyEvaluationSchema,
   PolicyService,
   type PolicyEvaluation,
+  type StackMemberEvaluation,
 } from "../gen/reef/api/v1/policy_pb";
 import { ProvenanceService } from "../gen/reef/api/v1/provenance_pb";
 import { RepositoryService } from "../gen/reef/api/v1/repositories_pb";
@@ -84,6 +85,8 @@ export class ProposalDaemon extends IdentityDaemon {
   ];
   transitions: ChangeTransition[] = [];
   comments: Comment[] = [];
+  /** The stack as the gate judges it, when it stops below the proposal. */
+  members: StackMemberEvaluation[] = [];
   evaluation: PolicyEvaluation = create(PolicyEvaluationSchema, {});
   /** The symbol diff `GetDiff` answers with, and the hunks an expansion gets. */
   diff: GetDiffResponse = create(GetDiffResponseSchema, {});
@@ -103,11 +106,16 @@ export class ProposalDaemon extends IdentityDaemon {
       });
       router.service(PolicyService, {
         evaluatePolicy: () => ({
-          evaluation: create(PolicyEvaluationSchema, {
-            decision: this.evaluation.decision,
-            rules: this.evaluation.rules,
-            verified: this.verified,
-          }),
+          members: this.members,
+          ...(this.members.length > 0
+            ? {}
+            : {
+                evaluation: create(PolicyEvaluationSchema, {
+                  decision: this.evaluation.decision,
+                  rules: this.evaluation.rules,
+                  verified: this.verified,
+                }),
+              }),
         }),
       });
       router.service(ProvenanceService, { listProvenance: () => ({ records: [] }) });

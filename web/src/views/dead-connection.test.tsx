@@ -6,14 +6,14 @@ import { Code, ConnectError } from "@connectrpc/connect";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../App";
 import type { Connection } from "../api/connection";
-import { ChangeSchema } from "../gen/reef/api/v1/changes_pb";
+import { AutomaticState, AutomaticStatusSchema, ChangeSchema } from "../gen/reef/api/v1/changes_pb";
 import {
   InboxService,
   WatchInboxResponseSchema,
   type WatchInboxResponse,
 } from "../gen/reef/api/v1/inbox_pb";
 import { OperationService } from "../gen/reef/api/v1/operations_pb";
-import { PolicyDecision } from "../gen/reef/api/v1/policy_pb";
+import { PolicyDecision, StackMemberEvaluationSchema } from "../gen/reef/api/v1/policy_pb";
 import { RepositoryService } from "../gen/reef/api/v1/repositories_pb";
 import { sleep } from "../live/backoff";
 import { InboxStore } from "../live/inbox";
@@ -829,7 +829,7 @@ describe("while the streams are live, what the daemon is too busy to answer", ()
     expect(screen.getByText("bad policy")).toBeTruthy();
   });
 
-  it("an approval that is shown stays, and is read again", async () => {
+  it("an approval that is shown stays, with why it was not read, and is read again", async () => {
     const daemon = new IdentityDaemon();
     const approval = await daemon.pending();
     const line = busy(daemon.connection());
@@ -840,10 +840,82 @@ describe("while the streams are live, what the daemon is too busy to answer", ()
     line.back();
     await flush();
     expect(screen.getByRole("button", { name: "Approve" })).toBeTruthy();
+    expect(screen.getByText("too many open")).toBeTruthy();
     line.calls.length = 0;
     await pass(10_000);
     expect(line.calls.length).toBeGreaterThan(3);
     expect(screen.getByRole("button", { name: "Approve" })).toBeTruthy();
+    line.state = "alive";
+    await pass(31_000);
+    expect(screen.queryByText("too many open")).toBeNull();
+    // One that ended has no error of a read.
+    line.state = "failing";
+    line.back();
+    await flush();
+    await act(() => {
+      screen.getByRole("button", { name: "Decline" }).click();
+    });
+    await flush();
+    expect(screen.getByText("Declined. Nothing was approved.")).toBeTruthy();
+    expect(screen.queryByText("too many open")).toBeNull();
+  });
+
+  it.each(["getApproval", "getChange", "listChanges"])(
+    "%s starts its backoff over once it was answered",
+    async (method) => {
+      const daemon = new IdentityDaemon();
+      const approval = await daemon.pending();
+      const line = busy(daemon.connection());
+      line.only = method;
+      render(<Approve connection={line.connection} id={approval.id} onSessionInvalid={ended} />);
+      await flush();
+      line.state = "failing";
+      line.back();
+      await pass(60_000);
+      line.state = "alive";
+      await pass(31_000);
+      line.state = "failing";
+      line.back();
+      await flush();
+      line.calls.length = 0;
+      await pass(3_000);
+      expect(line.calls.filter((call) => call === method).length).toBeGreaterThan(2);
+    },
+  );
+
+  it("a stack's verdict stays too, and a policy that is refused is asked for no more", async () => {
+    const daemon = new ProposalDaemon();
+    const [entry] = daemon.entries;
+    if (!entry) throw new Error("no entry");
+    // Judged, so that the page reads it on no timer.
+    entry.automatic = create(AutomaticStatusSchema, { state: AutomaticState.NEEDS });
+    daemon.members = [
+      create(StackMemberEvaluationSchema, { changeId: "b".repeat(32), message: "wrong clock" }),
+    ];
+    const line = busy(daemon.connection());
+    line.only = "evaluatePolicy";
+    render(
+      <Proposal
+        repo={REPO}
+        change={CHANGE}
+        connection={line.connection}
+        live={liveStores() as unknown as Live}
+        {...common}
+      />,
+    );
+    await flush();
+    const stops = () => /stops below this change.*wrong clock/.test(document.body.textContent);
+    expect(stops()).toBe(true);
+    line.state = "failing";
+    line.back();
+    await flush();
+    expect(stops()).toBe(true);
+    line.error = daemonError(Code.FailedPrecondition, { reason: "INVALID_POLICY" }, "bad policy");
+    await flush(1_000);
+    expect(stops()).toBe(false);
+    line.calls.length = 0;
+    await pass(5 * 60_000);
+    expect(line.calls).toEqual([]);
   });
 
   it.each(["proposal", "smartlog", "workspaces"])(
