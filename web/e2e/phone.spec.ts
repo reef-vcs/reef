@@ -390,6 +390,7 @@ async function withMortalConnection(
   browser: Browser,
   reef: Reef,
   run: (page: Page, proxy: FreezingProxy) => Promise<void>,
+  before: (page: Page) => unknown = () => undefined,
 ) {
   const proxy = new FreezingProxy();
   const through = await proxy.listen();
@@ -404,6 +405,7 @@ async function withMortalConnection(
   try {
     const page = await context.newPage();
     await page.clock.install();
+    await before(page);
     await pairBrowser(page, reef);
     await expect(page.locator(".connection")).toHaveText("Live");
     await run(page, proxy);
@@ -554,6 +556,24 @@ test("a proposal changed while the phone slept is shown when it wakes", async ({
   });
 });
 
+/** Shown again on a connection that died, and the proposal's row tapped. */
+async function tapDead(page: Page, proxy: FreezingProxy) {
+  await rowsAreTappable(page);
+  await die(proxy);
+  await page.clock.fastForward(25_000);
+  await shown(page);
+  await expect(page.locator(".connection")).toHaveText("Reconnecting");
+  await needs(page)
+    .getByRole("link", { name: /^Add a_very_long/ })
+    .click();
+}
+
+async function proposalIsShown(page: Page) {
+  await expect(page.getByRole("heading", { name: "Evidence" })).toBeVisible({ timeout: 30_000 });
+  await expect(page.locator(".diff-file").first()).toBeVisible();
+  await expect(page.locator(".connection")).toHaveText("Live");
+}
+
 test("a row tapped on a dead connection opens its proposal with no second tap", async ({
   browser,
   browserName,
@@ -561,32 +581,50 @@ test("a row tapped on a dead connection opens its proposal with no second tap", 
 }) => {
   test.skip(browserName === "firefox", NOT_FIREFOX);
   await needYou(reef);
-  await withMortalConnection(browser, reef, async (page, proxy) => {
-    // Once with the page's code not loaded yet, and then as a phone that was used before.
-    for (const code of ["not loaded", "loaded"]) {
-      await test.step(`its code ${code}`, async () => {
-        await rowsAreTappable(page);
-        await die(proxy);
-        await page.clock.fastForward(25_000);
-        await shown(page);
-        await expect(page.locator(".connection")).toHaveText("Reconnecting");
-        if (code === "not loaded") {
-          // Some browsers leave a script's request on the dead connection for good (WebKitGTK).
-          let asked = 0;
-          await page.route(/\/assets\/RepoFrame/, (route) =>
-            asked++ === 0 ? undefined : route.continue(),
-          );
-        }
-        await needs(page)
-          .getByRole("link", { name: /^Add a_very_long/ })
-          .click();
-        await expect(page.getByRole("heading", { name: "Evidence" })).toBeVisible({
-          timeout: 30_000,
-        });
-        await expect(page.locator(".diff-file").first()).toBeVisible();
-        await expect(page.locator(".connection")).toHaveText("Live");
-        await page.getByRole("link", { name: "Reef", exact: true }).click();
+  const loaded: string[] = [];
+  await withMortalConnection(
+    browser,
+    reef,
+    async (page, proxy) => {
+      await test.step("its code here ahead, and never shown", async () => {
+        await expect.poll(() => loaded.join(" ")).toContain("/Proposal-");
+        await tapDead(page, proxy);
+        await proposalIsShown(page);
       });
-    }
-  });
+      await test.step("again", async () => {
+        await page.getByRole("link", { name: "Reef", exact: true }).click();
+        await tapDead(page, proxy);
+        await proposalIsShown(page);
+      });
+    },
+    (page) => {
+      page.on("requestfinished", (request) => loaded.push(request.url()));
+    },
+  );
+});
+
+test("a page whose code hangs on a dead connection offers a reload, and opens with it", async ({
+  browser,
+  browserName,
+  reef,
+}) => {
+  test.skip(browserName === "firefox", NOT_FIREFOX);
+  await needYou(reef);
+  let asked = 0;
+  await withMortalConnection(
+    browser,
+    reef,
+    async (page, proxy) => {
+      // Loading ahead asked for it, and it never comes.
+      await expect.poll(() => asked).toBe(1);
+      await tapDead(page, proxy);
+      const reload = page.getByRole("main").getByRole("button", { name: "Reload" });
+      await expect(reload).toBeVisible({ timeout: 12_000 });
+      await noSidewaysScroll(page, "a page that takes long to load");
+      await reload.click();
+      await proposalIsShown(page);
+    },
+    (page) =>
+      page.route(/\/assets\/RepoFrame/, (route) => (asked++ === 0 ? undefined : route.continue())),
+  );
 });

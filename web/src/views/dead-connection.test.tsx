@@ -73,6 +73,11 @@ async function flush(ms = 0) {
   });
 }
 
+/** Time in which effects set timers: they run between its steps. */
+async function pass(ms: number) {
+  for (let at = 0; at < ms; at += 500) await flush(500);
+}
+
 function liveStores() {
   const operations = new OperationStore(immediateFrames);
   operations.applyFrame(operationsFrame({ live: true, cursor: "c0" }));
@@ -93,8 +98,6 @@ interface Page {
   has: RegExp;
   /** What it reads again. */
   reads: string[];
-  /** Its first read is an effect's, which api/steady.ts tries again. */
-  once?: boolean;
 }
 
 const common = { frame: immediateFrames, onSessionInvalid: ended };
@@ -201,7 +204,6 @@ const pages: Record<string, () => Page> = {
       show: (connection) => render(<Passkeys connection={connection} onSessionInvalid={ended} />),
       has: /MacBook Touch ID/,
       reads: ["listIdentities", "listPasskeys", "getDaemonStatus"],
-      once: true,
     };
   },
   "repository's inbox": () => ({
@@ -232,7 +234,7 @@ const pages: Record<string, () => Page> = {
 };
 
 describe.each(Object.entries(pages))("the %s page", (_, made) => {
-  it("reads until it is answered, and once the streams are live again holds no failed read", async () => {
+  it("reads until it is answered, and holds no failed read then", async () => {
     const page = made();
     const line = new Dying(page.connection);
     line.state = "failing";
@@ -240,14 +242,9 @@ describe.each(Object.entries(pages))("the %s page", (_, made) => {
     await flush();
     await flush(10_000);
     expect(document.body.textContent).not.toMatch(page.has);
-    if (!page.once) expect(line.calls.length).toBeGreaterThan(5);
+    expect(line.calls.length).toBeGreaterThan(5);
     line.state = "alive";
-    if (!page.once) {
-      await flush(2_000);
-      expect(document.body.textContent).toMatch(page.has);
-    }
-    line.back();
-    await flush();
+    await flush(30_000);
     expect(document.body.textContent).toMatch(page.has);
     expect(screen.queryByText("Load failed")).toBeNull();
   });
@@ -570,6 +567,162 @@ describe("a page that failed and holds that", () => {
   });
 });
 
+describe("while the streams are live, what the daemon is too busy to answer", () => {
+  /** Answers UNAVAILABLE for a while, as a token with too many calls does. */
+  function busy(connection: Connection) {
+    const line = new Dying(connection);
+    line.error = daemonError(Code.Unavailable, { reason: "REMOTE_BUSY" }, "too many open");
+    return line;
+  }
+
+  it("is read again, less and less often, and what is held stays", async () => {
+    const daemon = new IdentityDaemon();
+    daemon.passkeys = [passkey(daemon.arsood, "MacBook Touch ID", 1)];
+    const line = busy(daemon.connection());
+    render(<Passkeys connection={line.connection} onSessionInvalid={ended} />);
+    await flush();
+    expect(screen.getByText("MacBook Touch ID")).toBeTruthy();
+    line.state = "failing";
+    line.back();
+    await flush();
+    line.calls.length = 0;
+    await pass(60_000);
+    expect(screen.getByText("MacBook Touch ID")).toBeTruthy();
+    expect(screen.queryByText("too many open")).toBeNull();
+    const minute = line.calls.length / 3;
+    expect(minute).toBeGreaterThan(5);
+    expect(minute).toBeLessThan(12);
+    daemon.passkeys = [passkey(daemon.arsood, "YubiKey", 1)];
+    line.state = "alive";
+    await pass(31_000);
+    expect(screen.getByText("YubiKey")).toBeTruthy();
+    line.calls.length = 0;
+    await flush(HOUR);
+    expect(line.calls).toEqual([]);
+    // Nothing held, and a refusal: both are said.
+    line.state = "failing";
+    line.error = daemonError(
+      Code.PermissionDenied,
+      { reason: "REMOTE_ACCESS_DENIED" },
+      "not yours",
+    );
+    line.back();
+    await flush();
+    expect(screen.getByText("not yours")).toBeTruthy();
+    expect(screen.queryByText("YubiKey")).toBeNull();
+    line.calls.length = 0;
+    await flush(HOUR);
+    expect(line.calls).toEqual([]);
+  });
+
+  it.each([
+    ["a proposal's diff", "getDiff", () => pages.proposal?.()],
+    ["a proposal's signer", "getIdentity", () => pages.proposal?.()],
+    ["a change's files", "getDiff", () => pages.smartlog?.()],
+    ["a change's history", "queryChanges", () => pages.smartlog?.()],
+    ["a change's sign-offs", "listEvidence", () => pages.smartlog?.()],
+  ])("%s, is read again until it is answered, and then not", async (_, method, made) => {
+    const page = made();
+    if (!page) throw new Error("no page");
+    const line = busy(page.connection);
+    line.state = "failing";
+    line.only = method;
+    page.show(line.connection);
+    await flush();
+    expect(screen.getAllByText("too many open").length).toBeGreaterThan(0);
+    const reads = () => line.calls.filter((call) => call === method).length;
+    await pass(60_000);
+    expect(reads()).toBeGreaterThan(4);
+    line.state = "alive";
+    await pass(31_000);
+    expect(screen.queryByText("too many open")).toBeNull();
+    const answered = reads();
+    await flush(HOUR);
+    expect(reads()).toBe(answered);
+    line.state = "failing";
+    line.back();
+    await flush();
+    cleanup();
+    expect(vi.getTimerCount(), "a page left reads nothing").toBe(0);
+  });
+
+  it("the sign-offs that are shown stay, and the daemon's status is read again", async () => {
+    const daemon = new IdentityDaemon();
+    daemon.passkeys = [passkey(daemon.arsood, "MacBook Touch ID", 1)];
+    const line = busy(daemon.connection());
+    render(
+      <SignOff
+        connection={line.connection}
+        repo={REPO}
+        change={create(ChangeSchema, { changeId: CHANGE, commitId: COMMIT, treeId: TREE })}
+        onSessionInvalid={ended}
+      />,
+    );
+    await flush();
+    expect(screen.getByText("No sign-offs yet.")).toBeTruthy();
+    line.state = "failing";
+    line.back();
+    await flush();
+    expect(screen.getByText("No sign-offs yet.")).toBeTruthy();
+    expect(screen.queryByText("too many open")).toBeNull();
+    cleanup();
+
+    const app = busy(new FakeStreams().connection());
+    app.state = "failing";
+    app.only = "getDaemonStatus";
+    render(
+      <App
+        session={{ connection: app.connection, token: "tok" }}
+        environment={environment(immediateFrames)}
+      />,
+    );
+    await flush();
+    expect(screen.getByText("too many open")).toBeTruthy();
+    app.state = "alive";
+    await pass(2_000);
+    expect(screen.queryByText("too many open")).toBeNull();
+  });
+
+  it("an approval that is shown stays, and is read again", async () => {
+    const daemon = new IdentityDaemon();
+    const approval = await daemon.pending();
+    const line = busy(daemon.connection());
+    render(<Approve connection={line.connection} id={approval.id} onSessionInvalid={ended} />);
+    await flush();
+    line.state = "failing";
+    line.only = "getApproval";
+    line.back();
+    await flush();
+    expect(screen.getByRole("button", { name: "Approve" })).toBeTruthy();
+    line.calls.length = 0;
+    await pass(10_000);
+    expect(line.calls.length).toBeGreaterThan(3);
+    expect(screen.getByRole("button", { name: "Approve" })).toBeTruthy();
+  });
+
+  it.each(["proposal", "smartlog", "workspaces"])(
+    "a %s page of a repository that is not open is read every 30 s, and says so all along",
+    async (name) => {
+      const page = pages[name]?.();
+      if (!page) throw new Error("no page");
+      const line = busy(page.connection);
+      line.error = daemonError(Code.Unavailable, { reason: "" }, "it is not open");
+      line.state = "failing";
+      page.show(line.connection);
+      await flush();
+      for (let i = 0; i < 60; i++) {
+        await flush(1_000);
+        expect(screen.getAllByText("it is not open").length).toBeGreaterThan(0);
+      }
+      line.calls.length = 0;
+      await pass(5 * 60_000);
+      // At most four things read on their own, each every 30 s.
+      expect(line.calls.length).toBeLessThanOrEqual(44);
+      expect(line.calls.length).toBeGreaterThan(5);
+    },
+  );
+});
+
 describe("the app", () => {
   it("shows why the daemon refuses its streams, until they are live", async () => {
     const streams = new FakeStreams();
@@ -614,11 +767,36 @@ describe("the app", () => {
     await flush(5_000);
     expect(document.querySelector(".connection")?.textContent).toBe("Live");
     expect(screen.queryByRole("alert")).toBeNull();
+    // Nor has one that is refused for good, or starts over: it is asked for again at once.
+    streams
+      .lastOperations()
+      .fail(daemonError(Code.FailedPrecondition, { reason: "TOO_FAR_BEHIND" }, "too far behind"));
+    await flush();
+    expect(screen.queryByRole("alert")).toBeNull();
     // A stream that fails as connections do has no words of the daemon's.
     inbox.at(-1)?.fail(new ConnectError("down", Code.Unavailable));
     await flush();
     expect(document.querySelector(".connection")?.textContent).toBe("Reconnecting");
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it.each([
+    ["http:", 0],
+    ["https:", 1],
+  ])("over %s loads its pages ahead, or not", async (protocol, ahead) => {
+    vi.stubGlobal("location", { protocol, pathname: "/states", search: "", hash: "" });
+    const line = new Dying(new FakeStreams().connection());
+    const before = line.held;
+    render(
+      <App
+        session={{ connection: line.connection, token: "tok" }}
+        environment={environment(immediateFrames)}
+      />,
+    );
+    await flush();
+    expect(line.held - before).toBe(1 + ahead);
+    cleanup();
+    vi.unstubAllGlobals();
   });
 
   it("reads the daemon's status again when the streams are live again", async () => {

@@ -381,12 +381,14 @@ describe("the inbox", () => {
         stop();
         expect(vi.getTimerCount()).toBe(0);
       }
+      let asks = 0;
       const gone = new InboxModel(
         {
           label: "test",
           transport: fakeTransport({
             [RepositoryService.typeName]: {
               getRepository: () => {
+                asks += 1;
                 throw new ConnectError("Load failed", Code.Unknown);
               },
             },
@@ -400,6 +402,10 @@ describe("the inbox", () => {
       const stop = gone.start();
       await settle(60);
       expect(vi.getTimerCount()).toBe(1);
+      await vi.advanceTimersByTimeAsync(60_000);
+      asks = 0;
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      expect(asks).toBeLessThanOrEqual(21);
       stop();
       expect(vi.getTimerCount()).toBe(0);
     } finally {

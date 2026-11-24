@@ -5,8 +5,8 @@
 // touch runs under (#346), which this page's is.
 import { useEffect, useState, type SubmitEvent } from "react";
 import { client, type Connection } from "../api/connection";
-import { isSessionInvalid, reefError, type ReefError } from "../api/errors";
-import { useResumes } from "../api/streams";
+import { isPassing, isSessionInvalid, reefError, type ReefError } from "../api/errors";
+import { useAgain } from "../api/streams";
 import { DaemonService } from "../gen/reef/api/v1/daemon_pb";
 import {
   IdentityKind,
@@ -66,7 +66,8 @@ export function policySnippet({ identity, passkeys }: Person, origin: string): s
 
 function usePeople(connection: Connection, version: number, onSessionInvalid: () => void) {
   const [load, setLoad] = useState<Load>({ kind: "loading" });
-  const resumes = useResumes(connection);
+  const [error, setError] = useState<ReefError | null>(null);
+  const again = useAgain(connection, error, true);
   useEffect(() => {
     let current = true;
     const identities = client(connection, IdentityService);
@@ -84,19 +85,26 @@ function usePeople(connection: Connection, version: number, onSessionInvalid: ()
             passkeys: keys.passkeys.filter((passkey) => passkey.identityId === identity.id),
           }))
           .sort((a, b) => Number(b.identity.isDefault) - Number(a.identity.isDefault));
+        setError(null);
         setLoad({ kind: "loaded", people, site: daemon.webUi?.site ?? "" });
       },
       (thrown: unknown) => {
         if (!current) return;
         const error = reefError(thrown);
-        if (isSessionInvalid(error)) onSessionInvalid();
-        else setLoad({ kind: "failed", error });
+        if (isSessionInvalid(error)) {
+          onSessionInvalid();
+          return;
+        }
+        setError(error);
+        setLoad((held) =>
+          held.kind === "loaded" && isPassing(error) ? held : { kind: "failed", error },
+        );
       },
     );
     return () => {
       current = false;
     };
-  }, [connection, resumes, version, onSessionInvalid]);
+  }, [connection, again, version, onSessionInvalid]);
   return load;
 }
 

@@ -9,6 +9,8 @@ export class Dying {
   calls: string[] = [];
   /** What becomes of a call: on a dead connection it hangs, until the browser gives that up. */
   state: "alive" | "hung" | "failing" = "alive";
+  /** What a call that fails fails with. */
+  error = new ConnectError("Load failed", Code.Unknown);
   /** The one method that the state is for, if not every one. */
   only: string | undefined;
   /** What waits to hear that the streams are live again. */
@@ -25,22 +27,24 @@ export class Dying {
           this.calls.push(args[0].localName);
           if (this.only && args[0].localName !== this.only) return inner.transport.unary(...args);
           if (this.state === "hung") await new Promise<void>((give) => this.hung.push(give));
-          if (this.state !== "alive") throw new ConnectError("Load failed", Code.Unknown);
+          if (this.state !== "alive") throw this.error;
           return inner.transport.unary(...args);
         },
       },
     };
     const streams = streamsOf(this.connection);
     streams.change(true);
-    const { onResume } = streams;
-    streams.onResume = (run) => {
-      this.held += 1;
-      const stop = onResume(run);
-      return () => {
-        this.held -= 1;
-        stop();
+    for (const on of ["onLive", "onResume"] as const) {
+      const listen = streams[on];
+      streams[on] = (run) => {
+        this.held += 1;
+        const stop = listen(run);
+        return () => {
+          this.held -= 1;
+          stop();
+        };
       };
-    };
+    }
   }
 
   /** The browser gives the dead connection up, and what hung on it fails. */

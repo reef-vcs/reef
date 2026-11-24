@@ -7,7 +7,7 @@
 import { useEffect, useState } from "react";
 import { client, type Connection } from "../api/connection";
 import { isSessionInvalid, reefError, type ReefError } from "../api/errors";
-import { useRetries } from "../api/streams";
+import { useAgain } from "../api/streams";
 import { LineSide } from "../gen/reef/api/v1/comments_pb";
 import {
   DiffFormat,
@@ -55,7 +55,7 @@ function useSymbolDiff(
   const [error, setError] = useState<{ commit: string; error: ReefError } | null>(null);
   const [page, setPage] = useState({ commit, token: "" });
   const token = page.commit === commit ? page.token : "";
-  const retries = useRetries(connection, error !== null);
+  const again = useAgain(connection, error?.commit === commit ? error.error : null, false);
   useEffect(() => {
     let current = true;
     client(connection, DiffService)
@@ -89,7 +89,7 @@ function useSymbolDiff(
     return () => {
       current = false;
     };
-  }, [connection, retries, repo, commit, token, onSessionInvalid]);
+  }, [connection, again, repo, commit, token, onSessionInvalid]);
   const responses = pages?.commit === commit ? pages.responses : null;
   const next = responses?.at(-1)?.nextPageToken ?? "";
   return {

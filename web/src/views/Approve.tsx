@@ -6,8 +6,8 @@
 import { durationFromMs, timestampMs } from "@bufbuild/protobuf/wkt";
 import { useEffect, useState } from "react";
 import { client, type Connection } from "../api/connection";
-import { isSessionInvalid, reefError, type ReefError } from "../api/errors";
-import { useResumes } from "../api/streams";
+import { isPassing, isSessionInvalid, reefError, type ReefError } from "../api/errors";
+import { useAgain } from "../api/streams";
 import { device } from "../device";
 import { after } from "../live/backoff";
 import { ChangeService, type Change } from "../gen/reef/api/v1/changes_pb";
@@ -38,7 +38,8 @@ type Action =
 /** The approval, then each change of its state, by long polls until it is no longer pending. */
 function useApproval(connection: Connection, id: string, onSessionInvalid: () => void) {
   const [load, setLoad] = useState<Load>({ kind: "loading" });
-  const resumes = useResumes(connection);
+  const [error, setError] = useState<ReefError | null>(null);
+  const again = useAgain(connection, error, true);
   useEffect(() => {
     const controller = new AbortController();
     const identities = client(connection, IdentityService);
@@ -50,6 +51,7 @@ function useApproval(connection: Connection, id: string, onSessionInvalid: () =>
           { signal: controller.signal },
         );
         if (controller.signal.aborted || !approval) return;
+        setError(null);
         setLoad({ kind: "loaded", approval });
         if (approval.state !== ApprovalState.PENDING) return;
         wait = Math.max(1_000, msLeft(approval, Date.now()));
@@ -59,12 +61,17 @@ function useApproval(connection: Connection, id: string, onSessionInvalid: () =>
       const error = reefError(thrown);
       if (isSessionInvalid(error)) onSessionInvalid();
       else if (error.reason === APPROVAL_NOT_FOUND) setLoad({ kind: "missing" });
-      else setLoad({ kind: "failed", error });
+      else {
+        setError(error);
+        setLoad((held) =>
+          held.kind === "loaded" && isPassing(error) ? held : { kind: "failed", error },
+        );
+      }
     });
     return () => {
       controller.abort();
     };
-  }, [connection, resumes, id, onSessionInvalid]);
+  }, [connection, again, id, onSessionInvalid]);
   return [load, setLoad] as const;
 }
 
@@ -73,7 +80,7 @@ function useChange(connection: Connection, approval: Approval | null) {
   const repo = approval?.repoId ?? "";
   const commit = approval?.commitId ?? "";
   const [change, setChange] = useState<{ commit: string; change: Change | null } | null>(null);
-  const resumes = useResumes(connection);
+  const again = useAgain(connection, null, true);
   useEffect(() => {
     if (!commit) return;
     let current = true;
@@ -90,7 +97,7 @@ function useChange(connection: Connection, approval: Approval | null) {
     return () => {
       current = false;
     };
-  }, [connection, resumes, repo, commit]);
+  }, [connection, again, repo, commit]);
   return change?.commit === commit ? change.change : undefined;
 }
 
@@ -106,7 +113,7 @@ function useBelow(connection: Connection, approval: Approval | null) {
   const repo = approval?.repoId ?? "";
   const commit = approval?.commitId ?? "";
   const [below, setBelow] = useState<{ commit: string; changes: Change[] | null } | null>(null);
-  const resumes = useResumes(connection);
+  const again = useAgain(connection, null, true);
   useEffect(() => {
     if (!commit) return;
     let current = true;
@@ -129,7 +136,7 @@ function useBelow(connection: Connection, approval: Approval | null) {
     return () => {
       current = false;
     };
-  }, [connection, resumes, repo, commit]);
+  }, [connection, again, repo, commit]);
   return below?.commit === commit ? below.changes : undefined;
 }
 

@@ -3,8 +3,8 @@
 // the default identity, approved by one passkey touch in this tab.
 import { useEffect, useState } from "react";
 import { client, type Connection } from "../api/connection";
-import { isSessionInvalid, reefError, type ReefError } from "../api/errors";
-import { useResumes } from "../api/streams";
+import { isPassing, isSessionInvalid, reefError, type ReefError } from "../api/errors";
+import { useAgain } from "../api/streams";
 import type { Change } from "../gen/reef/api/v1/changes_pb";
 import { EvidenceResult, EvidenceService, type Evidence } from "../gen/reef/api/v1/evidence_pb";
 import { PolicyService, type PolicyVerifiedSigner } from "../gen/reef/api/v1/policy_pb";
@@ -55,7 +55,8 @@ const STATUS_WORDS: Partial<Record<IdentityStatus, string>> = {
 /** The default identity, who Sign off signs as, and how many live passkeys it has. */
 export function useSigner(connection: Connection, onSessionInvalid: () => void): Signer {
   const [signer, setSigner] = useState<Signer>({ kind: "loading" });
-  const resumes = useResumes(connection);
+  const [error, setError] = useState<ReefError | null>(null);
+  const again = useAgain(connection, error, true);
   useEffect(() => {
     let current = true;
     const identities = client(connection, IdentityService);
@@ -64,18 +65,26 @@ export function useSigner(connection: Connection, onSessionInvalid: () => void):
       .then(async ({ identity }) => {
         if (!identity) throw new Error("The daemon returned no identity.");
         const { passkeys } = await identities.listPasskeys({ identity: identity.id });
-        if (current) setSigner({ kind: "loaded", identity, passkeys: passkeys.length });
+        if (!current) return;
+        setError(null);
+        setSigner({ kind: "loaded", identity, passkeys: passkeys.length });
       })
       .catch((thrown: unknown) => {
         if (!current) return;
         const error = reefError(thrown);
-        if (isSessionInvalid(error)) onSessionInvalid();
-        else setSigner({ kind: "failed", error });
+        if (isSessionInvalid(error)) {
+          onSessionInvalid();
+          return;
+        }
+        setError(error);
+        setSigner((held) =>
+          held.kind === "loaded" && isPassing(error) ? held : { kind: "failed", error },
+        );
       });
     return () => {
       current = false;
     };
-  }, [connection, resumes, onSessionInvalid]);
+  }, [connection, again, onSessionInvalid]);
   return signer;
 }
 
@@ -94,7 +103,8 @@ function useSignOffs(
   onSessionInvalid: () => void,
 ) {
   const [state, setState] = useState<SignOffs | { error: ReefError } | null>(null);
-  const resumes = useResumes(connection);
+  const [error, setError] = useState<ReefError | null>(null);
+  const again = useAgain(connection, error, true);
   const { changeId, commitId } = change;
   useEffect(() => {
     let current = true;
@@ -112,19 +122,25 @@ function useSignOffs(
       .then(
         async ({ evidence }) => {
           const pinned = await pins;
-          if (current) setState({ evidence, pins: pinned });
+          if (!current) return;
+          setError(null);
+          setState({ evidence, pins: pinned });
         },
         (thrown: unknown) => {
           if (!current) return;
           const error = reefError(thrown);
-          if (isSessionInvalid(error)) onSessionInvalid();
-          else setState({ error });
+          if (isSessionInvalid(error)) {
+            onSessionInvalid();
+            return;
+          }
+          setError(error);
+          setState((held) => (held && "evidence" in held && isPassing(error) ? held : { error }));
         },
       );
     return () => {
       current = false;
     };
-  }, [connection, resumes, repo, changeId, commitId, version, onSessionInvalid]);
+  }, [connection, again, repo, changeId, commitId, version, onSessionInvalid]);
   return state;
 }
 

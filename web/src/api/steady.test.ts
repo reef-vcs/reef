@@ -232,6 +232,28 @@ describe("a read the connection failed", () => {
 });
 
 describe("a read that hangs", () => {
+  it("is not sent for a page that wants it no more already", async () => {
+    const { read, sent, connection, held } = page();
+    const ended = read(AbortSignal.abort());
+    await flush();
+    expect(sent.filter(({ signal }) => !signal.aborted)).toEqual([]);
+    await pass(60 * SECOND);
+    expect(ended.code).toBeDefined();
+    expect(streamsOf(connection).reads).toBe(0);
+    expect(held.listeners).toBe(0);
+  });
+
+  it("is counted while it is under way", async () => {
+    const { read, sent, connection } = page();
+    read();
+    read();
+    await flush();
+    expect(streamsOf(connection).reads).toBe(2);
+    for (const { answer: reply } of sent) reply(answer());
+    await flush();
+    expect(streamsOf(connection).reads).toBe(0);
+  });
+
   it("ends with the page that wants it", async () => {
     const { read, sent, held } = page();
     const left = new AbortController();

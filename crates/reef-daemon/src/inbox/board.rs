@@ -161,7 +161,8 @@ pub(crate) fn diff(sent: Option<&RepoBoard>, now: &RepoBoard) -> (Vec<v1::InboxI
 
 /// `changes` as frames of at most [`FRAME_ENTRIES`] items and keys and
 /// [`FRAME_BYTES`]. A change too large for one frame continues in the next
-/// with its state repeated, so every frame's sections read alike.
+/// with its state repeated, so every frame's sections read alike. A frame
+/// takes at least one item or key, so a state over the bound still ends.
 pub(crate) fn frames(changes: Vec<v1::InboxSectionChange>) -> Vec<Vec<v1::InboxSectionChange>> {
     let mut frames: Vec<Vec<v1::InboxSectionChange>> = Vec::new();
     let mut frame: Vec<v1::InboxSectionChange> = Vec::new();
@@ -197,7 +198,8 @@ pub(crate) fn frames(changes: Vec<v1::InboxSectionChange>) -> Vec<Vec<v1::InboxS
             if rest.items.is_empty() {
                 while let Some(key) = left.peek() {
                     let size = key.len() + 4;
-                    if entries >= FRAME_ENTRIES || bytes + size > FRAME_BYTES {
+                    let first = frame.is_empty() && part.items.is_empty() && part.left.is_empty();
+                    if !first && (entries >= FRAME_ENTRIES || bytes + size > FRAME_BYTES) {
                         break;
                     }
                     bytes += size;
@@ -438,6 +440,35 @@ mod tests {
         let left: usize = all.iter().map(|s| s.left.len()).sum();
         assert_eq!((items, left), (2_500, 11));
         assert_eq!(frames[2].last().map(|s| s.repo_id.as_str()), Some("s"));
+    }
+
+    #[test]
+    fn a_state_over_the_bound_still_ends() {
+        for len in [127 << 10, 129 << 10, 2 << 20] {
+            let change = v1::InboxSectionChange {
+                repo_id: "r".to_owned(),
+                items: (0..3)
+                    .map(|n| item(&format!("help:r:{n}"), NeedsYouNow, n, "asks"))
+                    .collect(),
+                left: (0..3).map(|n| format!("gone:{n}")).collect(),
+                error: Some(v1::InboxError {
+                    message: "ö".repeat(len / 2),
+                    ..v1::InboxError::default()
+                }),
+                ..v1::InboxSectionChange::default()
+            };
+            for items in [change.items.clone(), Vec::new()] {
+                let frames = frames(vec![v1::InboxSectionChange {
+                    items: items.clone(),
+                    ..change.clone()
+                }]);
+                assert!(frames.len() <= 6, "{len}: {}", frames.len());
+                let parts: Vec<_> = frames.into_iter().flatten().collect();
+                let sent: Vec<_> = parts.iter().flat_map(|p| p.items.clone()).collect();
+                let left: Vec<_> = parts.iter().flat_map(|p| p.left.clone()).collect();
+                assert_eq!((sent, left), (items, change.left.clone()));
+            }
+        }
     }
 
     #[test]

@@ -1,33 +1,53 @@
 // Whether a connection's streams are live (live/share.ts says), for what
 // reads over it: what was read before the streams were lost may be old once
-// they are back, and is read again.
-import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
+// they are back, and is read again. A page that is hidden then reads once it
+// is shown.
+import { useEffect, useState } from "react";
+import { after, Backoff } from "../live/backoff";
 import type { Connection } from "./connection";
+import { isPassing, type ReefError } from "./errors";
+
+type Listeners = Set<() => void>;
+
+function listen(listeners: Listeners, run: () => void): () => void {
+  listeners.add(run);
+  return () => {
+    listeners.delete(run);
+  };
+}
 
 export class Streams {
   live = false;
+  /** Calls under way that api/steady.ts holds. */
+  reads = 0;
   private before = false;
-  /** How often they were live again after they were lost. */
-  resumes = 0;
-  private readonly listeners = new Set<() => void>();
+  private owed = false;
+  private readonly lives: Listeners = new Set();
+  private readonly resumes: Listeners = new Set();
 
-  /** Calls `run` whenever they are live again. */
-  onResume = (run: () => void): (() => void) => {
-    this.listeners.add(run);
-    return () => {
-      this.listeners.delete(run);
-    };
-  };
+  /** Calls `run` whenever they are live, the first time too. */
+  onLive = (run: () => void) => listen(this.lives, run);
+
+  /** Calls `run` whenever they are live again and the page is shown. */
+  onResume = (run: () => void) => listen(this.resumes, run);
 
   change(live: boolean) {
     this.live = live;
     if (!live) return;
-    const again = this.before;
+    this.owed = this.before;
     this.before = true;
-    if (!again) return;
-    this.resumes += 1;
-    for (const listener of [...this.listeners]) listener();
+    for (const run of [...this.lives]) run();
+    this.resume();
   }
+
+  private resume = () => {
+    if (!this.owed || !this.live) return;
+    if (document.visibilityState === "hidden") {
+      document.addEventListener("visibilitychange", this.resume, { once: true });
+      return;
+    }
+    for (const run of [...this.resumes]) run();
+  };
 }
 
 const made = new WeakMap<Connection, Streams>();
@@ -38,23 +58,29 @@ export function streamsOf(connection: Connection): Streams {
   return streams;
 }
 
-/** How often the streams were live again: an effect depends on it whose answer can change. */
-export function useResumes(connection: Connection): number {
-  const streams = streamsOf(connection);
-  return useSyncExternalStore(
-    streams.onResume,
-    useCallback(() => streams.resumes, [streams]),
-  );
-}
-
-/** As `useResumes`, counting only while `failed`: for an answer that never changes, once it came. */
-export function useRetries(connection: Connection, failed: boolean): number {
-  const [retries, setRetries] = useState(0);
+/**
+ * A number that an effect that reads depends on, as `error` is how its last
+ * read failed: it reads again after a backoff while another try may not meet
+ * the error, and when the streams are live again if it failed or what it
+ * reads can `change`.
+ */
+export function useAgain(connection: Connection, error: ReefError | null, change: boolean): number {
+  const [again, setAgain] = useState(0);
+  const [backoff] = useState(() => new Backoff(Backoff.PAGE_MS));
+  const failed = error !== null;
   useEffect(() => {
-    if (!failed) return;
+    if (!change && !failed) return;
     return streamsOf(connection).onResume(() => {
-      setRetries((before) => before + 1);
+      setAgain((before) => before + 1);
     });
-  }, [connection, failed]);
-  return retries;
+  }, [connection, change, failed]);
+  useEffect(() => {
+    if (!error) backoff.reset();
+    else if (isPassing(error)) {
+      return after(backoff.next(), () => {
+        setAgain((before) => before + 1);
+      });
+    }
+  }, [error, backoff]);
+  return again;
 }

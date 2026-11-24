@@ -7,9 +7,13 @@ export function ItemLink({ live, repo, itemKey }: { live: Live; repo: string; it
   const store = live.inbox;
   const subscribe = useCallback((listener: () => void) => store.subscribe(listener), [store]);
   useSyncExternalStore(subscribe, () => store.version);
-  const section = store.sections.get(repo);
-  const item = section?.items.get(itemKey);
-  const gone = !item && (store.synced || section?.listed === true);
+  const state = useSyncExternalStore(
+    (listener) => live.subscribeState(listener),
+    () => live.state,
+  );
+  const item = store.sections.get(repo)?.items.get(itemKey);
+  // What a lost stream's inbox does not hold may have arrived since.
+  const gone = !item && state === "live" && store.synced && !store.resyncing;
   const to = item ? openedAt(item) : null;
   useEffect(() => {
     if (to) navigate(to, { replace: true });

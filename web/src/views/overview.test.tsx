@@ -311,45 +311,108 @@ describe("Overview", () => {
     expect(screen.getByText("reef daemon start")).toBeTruthy();
   });
 
-  it("lists again, once a second, what no answer came for, and a refusal not", async () => {
+  it("reads a repository whose folder is gone every 30 s, and says so all along", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
-    const t = setup({ repositories: [repo("aaaaaaaa11", "/src/alpha")] });
-    let refusal: Error | null = new ConnectError("Load failed", Code.Unknown);
-    t.state.listOperations = async () => {
-      await settle(1);
-      if (refusal) throw refusal;
-    };
-    await flush();
-    expect(screen.getByRole("alert").textContent).toContain("Load failed");
-    expect(t.state.listLoads).toBe(1);
-    const pass = async () => {
+    let gone = true;
+    let asked = 0;
+    const t = setup({
+      repositories: [repo("aaaaaaaa11", "/src/alpha"), repo("bbbbbbbb22", "/src/gone")],
+      listOperations: async (id) => {
+        await settle(1);
+        if (id !== "bbbbbbbb22") return;
+        asked += 1;
+        if (gone) throw daemonError(Code.Unavailable, { reason: "" }, "it is not open");
+      },
+    });
+    const pass = async (ms: number) => {
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(RELOAD_EVERY_MS);
+        await vi.advanceTimersByTimeAsync(ms);
         await settle(60);
       });
     };
-    await pass();
-    expect(t.state.listLoads).toBe(2);
-    refusal = null;
-    await pass();
+    await pass(0);
+    for (let s = 0; s < 60; s++) {
+      await pass(1_000);
+      expect(screen.getByRole("alert").textContent).toContain("it is not open");
+    }
+    const minute = asked;
+    expect(minute).toBeLessThan(12);
+    await pass(9 * 60_000);
+    expect(asked - minute).toBeLessThanOrEqual(18);
+    expect(t.state.listLoads, "the repositories are not read for it").toBe(1);
+    gone = false;
+    await pass(30_000);
     expect(screen.queryByRole("alert")).toBeNull();
-    const loads = t.state.listLoads;
-    await pass();
-    expect(t.state.listLoads).toBe(loads);
+    const healed = asked;
+    await pass(10 * 60_000);
+    expect(asked).toBe(healed);
+    expect(t.state.listLoads).toBe(1);
     cleanup();
-    let asked = 0;
-    Object.defineProperty(setup().state, "failRepositories", {
-      get: () => {
-        asked += 1;
-        return daemonError(Code.Internal, { reason: "BROKEN" }, "broken");
+    setup({
+      repositories: [repo("bbbbbbbb22", "/src/gone")],
+      listOperations: () => Promise.reject(daemonError(Code.Unavailable, { reason: "" })),
+    });
+    await pass(1_000);
+    cleanup();
+    expect(vi.getTimerCount(), "a page left reads nothing").toBe(0);
+  });
+
+  it("says that a repository could not be read until it was, though the list is", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    const t = setup({
+      repositories: [repo("aaaaaaaa11", "/src/alpha")],
+      listOperations: async () => {
+        await settle(1);
+        throw daemonError(Code.Internal, { reason: "BROKEN" }, "broken");
       },
     });
     await flush();
-    const once = asked;
-    await pass();
-    await pass();
-    expect(screen.getByRole("alert").textContent).toContain("broken");
-    expect(asked).toBe(once);
+    t.operations.applyFrame(
+      operationsFrame({ operations: [operation("o1", "unknown", 1)], live: true, cursor: "c1" }),
+    );
+    for (let i = 0; i < 10; i++) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(RELOAD_EVERY_MS / 5);
+        await settle(5);
+      });
+      expect(screen.getByRole("alert").textContent).toContain("broken");
+    }
+    expect(t.state.listLoads).toBe(2);
+    const loads = t.state.listLoads;
+    // One that is forgotten is no error.
+    t.state.repositories = [];
+    t.operations.applyFrame(
+      operationsFrame({ operations: [operation("o2", "other", 2)], live: true, cursor: "c2" }),
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(RELOAD_EVERY_MS);
+      await settle(60);
+    });
+    await flush();
+    expect(t.state.listLoads).toBe(loads + 1);
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("lists the repositories again after no answer, and not after a refusal", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    for (const [thrown, again] of [
+      [new ConnectError("Load failed", Code.Unknown), true],
+      [daemonError(Code.Internal, { reason: "BROKEN" }, "broken"), false],
+    ] as const) {
+      const t = setup({ repositories: [repo("aaaaaaaa11", "/src/alpha")] });
+      t.state.failRepositories = thrown;
+      await flush();
+      expect(screen.getByRole("alert")).toBeTruthy();
+      delete t.state.failRepositories;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60_000);
+        await settle(60);
+      });
+      expect(t.state.listLoads).toBe(again ? 1 : 0);
+      expect(screen.queryByRole("alert") === null).toBe(again);
+      cleanup();
+      expect(vi.getTimerCount()).toBe(0);
+    }
   });
 
   it("waits a second at most to list again when the clock was set back", async () => {

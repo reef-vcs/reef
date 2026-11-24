@@ -7,7 +7,7 @@
 import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { client, type Connection } from "./api/connection";
 import { isSessionInvalid, REMOTE_ORIGIN_CHANGED, reefError, type ReefError } from "./api/errors";
-import { useResumes } from "./api/streams";
+import { useAgain } from "./api/streams";
 import { device, endDevice } from "./device";
 import { DaemonService, type GetDaemonStatusResponse } from "./gen/reef/api/v1/daemon_pb";
 import { animationFrame, type FrameScheduler } from "./live/frame";
@@ -16,7 +16,7 @@ import { endSession, SESSION_KEY, storedSession } from "./session";
 import { AppBar } from "./ui/AppBar";
 import { ErrorView } from "./ui/ErrorView";
 import { HeaderSlots } from "./ui/header-slots";
-import { lazyRoute } from "./ui/lazy-route";
+import { lazyRoute, loadAhead } from "./ui/lazy-route";
 import type { RepoPage } from "./ui/RepoNav";
 import { match, navigate, usePath, useSearch } from "./ui/router";
 import { inboxHref } from "./views/inbox-route";
@@ -56,7 +56,7 @@ function repoRoute(path: string): { repo: string; page: RepoPage; change: string
 function useDaemonStatus(connection: Connection, onSessionInvalid: () => void) {
   const [status, setStatus] = useState<GetDaemonStatusResponse | null>(null);
   const [error, setError] = useState<ReefError | null>(null);
-  const resumes = useResumes(connection);
+  const again = useAgain(connection, error, true);
   useEffect(() => {
     let current = true;
     client(connection, DaemonService)
@@ -77,7 +77,7 @@ function useDaemonStatus(connection: Connection, onSessionInvalid: () => void) {
     return () => {
       current = false;
     };
-  }, [connection, resumes, onSessionInvalid]);
+  }, [connection, again, onSessionInvalid]);
   return { status, error };
 }
 
@@ -114,6 +114,11 @@ function Shell({
   useEffect(() => {
     if (oldTab) navigate(inboxHref({ repo: oldTab }), { replace: true });
   }, [oldTab]);
+  // The remote listener's page: a phone's connection may be dead when it is tapped.
+  useEffect(
+    () => (location.protocol === "https:" ? loadAhead(connection) : undefined),
+    [connection],
+  );
   // The app bar's slots, for the repository frame's portals (ui/header-slots).
   const [crumb, setCrumb] = useState<HTMLElement | null>(null);
   const [tabs, setTabs] = useState<HTMLElement | null>(null);

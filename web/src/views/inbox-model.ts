@@ -97,7 +97,7 @@ export class InboxModel {
   private stopped = false;
   /** The daemon keeps no mark for this caller. */
   private markRefused = false;
-  private readonly backoff = new Backoff();
+  private readonly backoff = new Backoff(Backoff.PAGE_MS);
   private retry: Cancel | undefined;
 
   constructor(

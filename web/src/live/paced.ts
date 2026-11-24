@@ -39,7 +39,7 @@ export class Paced {
   private stopped = false;
   private lastStart = Number.NEGATIVE_INFINITY;
   private lastDuration = 0;
-  private readonly backoff = new Backoff();
+  private readonly backoff = new Backoff(Backoff.PAGE_MS);
 
   constructor(
     private readonly run: Run,

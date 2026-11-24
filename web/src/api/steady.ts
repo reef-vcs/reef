@@ -29,6 +29,7 @@ export function steady(streams: () => Streams): {
     let failures = 0;
     let unheard = 0;
     for (;;) {
+      streams().reads += 1;
       const attempt = new AbortController();
       const cut = () => {
         attempt.abort();
@@ -45,6 +46,7 @@ export function steady(streams: () => Streams): {
         cancel = after(SILENT_MS, cut);
       });
       request.signal.addEventListener("abort", cut, { once: true });
+      if (ended()) cut();
       const stop = streams().onResume(() => {
         failures = 0;
         if (!alive) cut();
@@ -58,6 +60,7 @@ export function steady(streams: () => Streams): {
         await sleep(backoff.next(), attempt.signal);
         if (ended()) throw thrown;
       } finally {
+        streams().reads -= 1;
         cancel();
         stop();
         request.signal.removeEventListener("abort", cut);

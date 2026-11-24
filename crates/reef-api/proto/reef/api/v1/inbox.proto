@@ -247,7 +247,7 @@ message InboxAgentCount {
 message InboxLanding {
   // The change, in hex.
   string change_id = 1;
-  // Its description's first line, as written.
+  // Its description's first line, at most 200 bytes of it.
   string subject = 2;
   // The agent that proposed it; empty for none.
   string agent = 3;

@@ -11,7 +11,7 @@ import { streamsOf } from "../api/streams";
 import { isPassing, isSessionInvalid, reefError, type ReefError } from "../api/errors";
 import { type Operation, OperationService } from "../gen/reef/api/v1/operations_pb";
 import { type Repository, RepositoryService } from "../gen/reef/api/v1/repositories_pb";
-import { after, type Cancel } from "../live/backoff";
+import { after, Backoff, type Cancel } from "../live/backoff";
 import { FrameNotifier, type FrameScheduler } from "../live/frame";
 import type { OperationBatch, OperationStore } from "../live/operations";
 
@@ -42,7 +42,11 @@ export class OverviewModel {
   private snapshot: OverviewSnapshot = { repositories: null, latest: new Map(), error: null };
   private readonly latest = new Map<string, Operation>();
   private repositories: Repository[] | null = null;
+  /** Why the repositories, and the newest operation of each, were not read last. */
   private error: ReefError | null = null;
+  private readonly latestErrors = new Map<string, ReefError>();
+  private readonly backoff = new Backoff(Backoff.PAGE_MS);
+  private retry: Cancel | undefined;
   /** Repositories whose newest operation has been listed since the last reset. */
   private readonly listed = new Set<string>();
   /** Bumped by a reset, so answers to earlier reads are dropped. */
@@ -86,6 +90,7 @@ export class OverviewModel {
       this.stopped = true;
       unsubscribe();
       unsubscribeResume();
+      this.retry?.();
       this.pendingReload?.();
     };
   }
@@ -153,9 +158,12 @@ export class OverviewModel {
       if (this.isStopped()) return;
       this.repositories = repositories;
       this.error = null;
+      const ids = new Set(repositories.map((r) => r.id));
+      for (const id of this.latestErrors.keys()) if (!ids.has(id)) this.latestErrors.delete(id);
       if (generation === this.generation) this.listLatest();
     } catch (thrown) {
-      if (this.fail(thrown)) this.reloadAgain = true;
+      this.error = this.failed(thrown);
+      this.later(this.error);
     } finally {
       this.loading = false;
       if (this.reloadAgain) {
@@ -181,9 +189,14 @@ export class OverviewModel {
           });
           if (this.isStopped() || generation !== this.generation) return;
           for (const operation of page.operations) this.fold(operation);
+          this.latestErrors.delete(repo);
         } catch (thrown) {
-          if (generation === this.generation) this.listed.delete(repo);
-          if (this.fail(thrown)) this.requestReload();
+          if (this.isStopped() || generation !== this.generation) return;
+          this.listed.delete(repo);
+          if (!this.repositories?.some((r) => r.id === repo)) continue;
+          const error = this.failed(thrown);
+          if (error) this.latestErrors.set(repo, error);
+          this.later(error);
         }
         this.changed();
       }
@@ -196,22 +209,29 @@ export class OverviewModel {
     return this.stopped;
   }
 
-  /** Whether another try may not meet the error. */
-  private fail(thrown: unknown): boolean {
+  /** Why a read failed; an invalid session ends the page. */
+  private failed(thrown: unknown): ReefError | null {
     const error = reefError(thrown);
-    if (isSessionInvalid(error)) {
-      this.onSessionInvalid();
-      return false;
-    }
-    this.error = error;
-    return isPassing(error);
+    if (!isSessionInvalid(error)) return error;
+    this.onSessionInvalid();
+    return null;
+  }
+
+  /** Reads what failed again after the backoff, if another try may not meet `error`. */
+  private later(error: ReefError | null) {
+    if (this.retry || this.stopped || !error || !isPassing(error)) return;
+    this.retry = after(this.backoff.next(), () => {
+      this.retry = undefined;
+      if (this.error) this.requestReload();
+      else this.listLatest();
+    });
   }
 
   private changed() {
     this.snapshot = {
       repositories: this.repositories,
       latest: new Map(this.latest),
-      error: this.error,
+      error: this.error ?? [...this.latestErrors.values()][0] ?? null,
     };
     this.notifier.notify();
   }

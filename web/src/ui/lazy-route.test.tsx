@@ -2,16 +2,17 @@
 // when the connection that failed it is back (R3.40).
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Connection } from "../api/connection";
+import { streamsOf } from "../api/streams";
 import { Dying } from "../test/dying";
 import { fakeTransport, settle } from "../test/fakes";
 import { act, cleanup, render, screen } from "../test/testing-library";
-import { lazyRoute } from "./lazy-route";
+import { lazyRoute, loadAhead, LONG_MS } from "./lazy-route";
 
 const reload = vi.fn();
 
 beforeEach(() => {
   reload.mockReset();
-  vi.stubGlobal("location", { reload, protocol: "https:" });
+  vi.stubGlobal("location", { reload });
 });
 
 afterEach(() => {
@@ -82,7 +83,7 @@ describe("lazyRoute", () => {
       await settle(10);
     });
     expect(screen.getByRole("alert").textContent).toContain(
-      "If the daemon was updated, reload the page.",
+      "could not be loaded. Reload to try again.",
     );
     expect(screen.getByRole("button", { name: "Reload" })).toBeTruthy();
     expect(screen.getByText("the header")).toBeTruthy();
@@ -119,6 +120,25 @@ describe("lazyRoute", () => {
     expect(asked).toBe(3);
   });
 
+  it("asks again for what the connection failed when the streams are live the first time", async () => {
+    let asked = 0;
+    const connection: Connection = { transport: fakeTransport({}), label: "test" };
+    const Route = lazyRoute<PageProps>(() => {
+      asked += 1;
+      return asked < 3 ? Promise.reject(new TypeError("Load failed")) : Promise.resolve(Page);
+    });
+    render(<Route name="smartlog" connection={connection} />);
+    await act(async () => {
+      await settle(10);
+    });
+    expect(screen.getByRole("button", { name: "Reload" })).toBeTruthy();
+    await act(async () => {
+      streamsOf(connection).change(true);
+      await settle(10);
+    });
+    expect(screen.getByText("the smartlog page")).toBeTruthy();
+  });
+
   it("asks again for what the connection failed when the streams are live again", async () => {
     let asked = 0;
     const { dying, show, back } = line(() => {
@@ -140,16 +160,15 @@ describe("lazyRoute", () => {
     expect(dying.held).toBe(0);
   });
 
-  describe("still loading when the streams are live again", () => {
-    let resolve: (page: typeof Page) => void = () => undefined;
-    const hung = () =>
-      line(
-        () =>
-          new Promise<typeof Page>((r) => {
-            resolve = r;
-          }),
-      );
-    const served = vi.fn<(url: string) => Promise<Response>>();
+  describe("that takes long", () => {
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
     const pass = async (ms: number) => {
       await act(async () => {
         await vi.advanceTimersByTimeAsync(ms);
@@ -157,121 +176,97 @@ describe("lazyRoute", () => {
       });
     };
 
-    beforeEach(() => {
-      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-      vi.stubGlobal("fetch", served);
-      served.mockClear();
-      served.mockImplementation(() => Promise.resolve(new Response("code")));
-      document.head.innerHTML =
-        '<link rel="modulepreload" href="/assets/a.js"><link rel="modulepreload" href="/assets/b.js">';
-    });
-
-    afterEach(() => {
-      vi.useRealTimers();
-      document.head.innerHTML = "";
-    });
-
-    it("reloads once its files are here and it is not, a second later", async () => {
-      const { dying, show, back } = hung();
+    it("offers a reload after 10 s, and shows the page when it comes after all", async () => {
+      let resolve: (page: typeof Page) => void = () => undefined;
+      const { show, back } = line(
+        () =>
+          new Promise<typeof Page>((r) => {
+            resolve = r;
+          }),
+      );
       show();
-      await pass(60 * 60_000);
-      expect(served).not.toHaveBeenCalled();
-      back();
-      await pass(999);
-      expect(served.mock.calls.map(([url]) => new URL(url).pathname)).toEqual([
-        "/assets/a.js",
-        "/assets/b.js",
-      ]);
-      expect(reload).not.toHaveBeenCalled();
+      await pass(LONG_MS - 1);
+      expect(screen.queryByRole("button")).toBeNull();
+      expect(screen.getByText("Loading the page.")).toBeTruthy();
       await pass(1);
-      expect(reload).toHaveBeenCalledOnce();
+      back();
       await pass(60 * 60_000);
-      expect(reload, "nothing is on a timer").toHaveBeenCalledOnce();
+      expect(reload, "nothing reloads on its own").not.toHaveBeenCalled();
+      screen.getByRole("button", { name: "Reload" }).click();
+      expect(reload).toHaveBeenCalledOnce();
       await act(async () => {
         resolve(Page);
         await settle(10);
       });
       expect(screen.getByText("the smartlog page")).toBeTruthy();
-      expect(dying.held).toBe(0);
-      back();
-      await pass(10_000);
-      expect(reload).toHaveBeenCalledOnce();
+      expect(screen.queryByRole("button")).toBeNull();
+      expect(vi.getTimerCount()).toBe(0);
     });
 
-    it("does not once it is shown, as over a slow link", async () => {
-      const { show, back } = hung();
-      show();
-      back();
-      await pass(500);
-      await act(async () => {
-        resolve(Page);
-        await settle(10);
+    it("loads every page ahead while the streams are live, one at a time, and nothing else is read", async () => {
+      const dying = new Dying({ transport: fakeTransport({}), label: "test" });
+      const streams = streamsOf(dying.connection);
+      streams.change(false);
+      let under = 0;
+      let most = 0;
+      const asked: string[] = [];
+      const gives: (() => void)[] = [];
+      const route = (name: string, then = () => {}) =>
+        lazyRoute<PageProps>(async () => {
+          asked.push(name);
+          most = Math.max(most, ++under);
+          await new Promise<void>((give) => gives.push(give));
+          under -= 1;
+          then();
+          if (name === "gone") throw new TypeError("Load failed");
+          return Page;
+        });
+      // Those of the tests before resolve, reject or hang; each is passed.
+      route("frame", () => {
+        route("nested");
       });
+      route("gone");
+      route("last");
+      const stop = loadAhead(dying.connection);
+      await pass(60 * 60_000);
+      expect(asked, "not before the streams are live").toEqual([]);
+      streams.change(true);
+      const until = async (names: string[]) => {
+        for (let i = 0; i < 400 && asked.length < names.length; i++) await pass(1_000);
+        expect(asked).toEqual(names);
+      };
+      await until(["frame"]);
+      streams.reads = 1;
+      gives.shift()?.();
       await pass(60_000);
-      expect(reload).not.toHaveBeenCalled();
-    });
-
-    it.each([
-      ["is not answered", () => new Promise<Response>(() => {})],
-      ["fails", () => Promise.reject(new TypeError("Load failed"))],
-      ["is gone", () => Promise.resolve(new Response("", { status: 404 }))],
-      [
-        "breaks off",
-        () =>
-          Promise.resolve(
-            new Response(
-              new ReadableStream({
-                start(body) {
-                  body.error(new TypeError("Load failed"));
-                },
-              }),
-            ),
-          ),
-      ],
-    ])("does not when a file %s, however often the streams are lost", async (_, answer) => {
-      const { show, back } = hung();
-      served.mockImplementation((url) =>
-        url.endsWith("b.js") ? answer() : Promise.resolve(new Response("code")),
-      );
-      show();
-      for (let i = 0; i < 20; i++) {
-        back();
-        await pass(2_000);
-      }
-      expect(reload).not.toHaveBeenCalled();
-    });
-
-    it("does not on the local page, or with nothing to go by", async () => {
-      const { show, back } = hung();
-      show();
-      vi.stubGlobal("location", { reload, protocol: "http:" });
-      back();
-      await pass(10_000);
-      expect(served).not.toHaveBeenCalled();
-      vi.stubGlobal("location", { reload, protocol: "https:" });
-      document.head.innerHTML = "";
-      back();
-      await pass(10_000);
-      expect(reload).not.toHaveBeenCalled();
-    });
-
-    it("loses nothing a person typed", async () => {
-      const { show, back } = hung();
-      show();
-      const field = document.createElement("input");
-      field.type = "datetime-local";
-      field.value = "2026-11-23T17:00";
-      const slider = document.createElement("input");
-      slider.type = "range";
-      document.body.append(field, slider);
-      back();
-      await pass(10_000);
-      expect(reload).not.toHaveBeenCalled();
-      field.remove();
-      back();
-      await pass(10_000);
-      expect(reload).toHaveBeenCalledOnce();
-      slider.remove();
+      expect(asked, "not while the page reads").toEqual(["frame"]);
+      streams.reads = 0;
+      streams.change(false);
+      await pass(60_000);
+      expect(asked, "not while the streams are lost").toEqual(["frame"]);
+      asked.length = 0;
+      for (let i = 0; i < 3; i++) streams.change(true);
+      await until(["frame"]);
+      gives.shift()?.();
+      await until(["frame", "gone"]);
+      gives.shift()?.();
+      await until(["frame", "gone", "last"]);
+      // One that hangs holds back the next for 40 s, not for good.
+      await until(["frame", "gone", "last", "nested"]);
+      gives.shift()?.();
+      streams.change(false);
+      await pass(60 * 60_000);
+      expect(asked).toHaveLength(4);
+      expect(most).toBe(2);
+      asked.length = 0;
+      streams.change(true);
+      await until(["frame", "gone"]);
+      stop();
+      gives.shift()?.();
+      await pass(60 * 60_000);
+      expect(asked, "and not once the page is left").toEqual(["frame", "gone"]);
+      expect(vi.getTimerCount()).toBe(0);
+      expect(dying.held).toBe(0);
     });
   });
 });

@@ -169,7 +169,7 @@ describe("Paced", () => {
     const paced = new Paced(run);
     paced.request();
     vi.setSystemTime(Date.now() + 3_600_000);
-    for (const wait of [100, 200, 400, 800, 1_600, Backoff.MAX_MS, Backoff.MAX_MS]) {
+    for (const wait of [100, 200, 400, 800, 1_600, 3_200, 6_400, 12_800, 25_600, 30_000, 30_000]) {
       const before = state.starts;
       paced.request();
       await finish(false);
@@ -181,12 +181,12 @@ describe("Paced", () => {
     }
     await finish();
     vi.advanceTimersByTime(60_000);
-    expect(state.starts).toBe(8);
+    expect(state.starts).toBe(12);
     // And backs off from the start the next time.
     paced.request();
     await finish(false);
     vi.advanceTimersByTime(Backoff.FIRST_MS);
-    expect(state.starts).toBe(10);
+    expect(state.starts).toBe(14);
   });
 
   it("runs at once when asked to after a run no answer came to, and once", async () => {

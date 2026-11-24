@@ -15,11 +15,11 @@ import { activityParams } from "./activity-route";
 import { fleetParams } from "./fleet-route";
 import { smartlogParams } from "./smartlog-route";
 
+const Proposal = lazyRoute(() => import("./Proposal").then((m) => m.Proposal));
 const Smartlog = lazyRoute(() => import("./Smartlog").then((m) => m.Smartlog));
 const Fleet = lazyRoute(() => import("./Fleet").then((m) => m.Fleet));
 const Activity = lazyRoute(() => import("./Activity").then((m) => m.Activity));
 const Inbox = lazyRoute(() => import("./Inbox").then((m) => m.Inbox));
-const Proposal = lazyRoute(() => import("./Proposal").then((m) => m.Proposal));
 
 export function RepoFrame({
   repo,

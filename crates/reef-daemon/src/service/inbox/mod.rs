@@ -32,6 +32,9 @@ const MAX_REPOS: usize = 256;
 /// bucket's total counts every item.
 const PAGE: i32 = 1000;
 
+/// Bytes of an error's message that a section carries, in every frame of it.
+const MAX_ERROR: usize = 1 << 10;
+
 /// Who reads or marks, resolved at the boundary: the default person on the
 /// socket and through the web UI, as every web write records it
 /// (`lifecycle::identity_for`); the identity a remote token links.
@@ -473,9 +476,10 @@ pub(crate) fn raise_epoch(state: &AppState) -> Result<String, Status> {
 
 /// A read failure as a section carries it.
 pub(crate) fn inbox_error(error: &Status) -> v1::InboxError {
+    let message = error.message();
     v1::InboxError {
         reason: error_reason(error),
-        message: error.message().to_owned(),
+        message: message[..message.floor_char_boundary(MAX_ERROR)].to_owned(),
     }
 }
 
