@@ -8,8 +8,8 @@
 //
 // A first frame may take longer: the daemon may wait to read, or the link be
 // slow. An opening that is cut before it doubles the next one's limit, but a
-// page that is shown, or whose network is back, waits for no more than the
-// first limit: what it opened before may be on a dead connection.
+// page that is shown, or whose network is back, gives what it opened before
+// no more than the first limit: it may be on a dead connection.
 import { Code, ConnectError } from "@connectrpc/connect";
 import { after, type Cancel } from "./backoff";
 
@@ -74,9 +74,10 @@ export function line({ clock, after, onWake }: SilenceEnvironment = browserSilen
     signal.addEventListener("abort", cut, { once: true });
     let last = { mono: clock.mono(), wall: clock.wall() };
     let heard = false;
+    let woken = false;
     let cancel: Cancel = () => undefined;
     const elapsed = () => Math.max(clock.mono() - last.mono, clock.wall() - last.wall);
-    const limit = () => SILENT_MS * 2 ** Math.min(unheard, MAX_DOUBLINGS);
+    const limit = () => SILENT_MS * 2 ** (woken ? 0 : Math.min(unheard, MAX_DOUBLINGS));
     const check = (most: number) => {
       if (controller.signal.aborted) return;
       if (elapsed() < most) {
@@ -93,7 +94,8 @@ export function line({ clock, after, onWake }: SilenceEnvironment = browserSilen
       });
     };
     const stopWaking = onWake(() => {
-      check(heard ? SILENT_ON_WAKE_MS : SILENT_MS);
+      woken = true;
+      check(heard ? SILENT_ON_WAKE_MS : limit());
     });
     try {
       if (signal.aborted) return;

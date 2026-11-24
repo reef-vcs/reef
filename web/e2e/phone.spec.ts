@@ -570,6 +570,13 @@ test("a row tapped on a dead connection opens its proposal with no second tap", 
         await page.clock.fastForward(25_000);
         await shown(page);
         await expect(page.locator(".connection")).toHaveText("Reconnecting");
+        if (code === "not loaded") {
+          // Some browsers leave a script's request on the dead connection for good (WebKitGTK).
+          let asked = 0;
+          await page.route(/\/assets\/RepoFrame/, (route) =>
+            asked++ === 0 ? undefined : route.continue(),
+          );
+        }
         await needs(page)
           .getByRole("link", { name: /^Add a_very_long/ })
           .click();

@@ -268,6 +268,27 @@ describe("a first frame that takes long", () => {
     live.close();
   });
 
+  it("is given 40 s in all once the page woke, however soon after its start that was", async () => {
+    const { time, live, say, opened } = await silentInbox(320 * SECOND);
+    const before = opened().inbox;
+    const pass = async (ms: number) => {
+      await time.pass(ms);
+      say.operations();
+      say.presence();
+      await settle(30);
+    };
+    await pass(10 * SECOND);
+    await time.wake();
+    await pass(SILENT_MS - 10 * SECOND - 1);
+    expect(opened().inbox).toBe(before);
+    await pass(1);
+    expect(opened().inbox).toBe(before + 1);
+    // The next has the longer limit again.
+    for (let at = 0; at < 310; at += 10) await pass(10 * SECOND);
+    expect(opened().inbox).toBe(before + 1);
+    live.close();
+  });
+
   it("is cut on a wake past its limit, when no timer ran", async () => {
     const { time, live, opened } = await page();
     await time.pass(SILENT_MS);
