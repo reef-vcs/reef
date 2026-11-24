@@ -30,7 +30,8 @@
 // once, both reads are made at it, and neither stream is consulted.
 import { Code, ConnectError } from "@connectrpc/connect";
 import { client, type Connection } from "../api/connection";
-import { isSessionInvalid, reefError, type ReefError } from "../api/errors";
+import { isPassing, isSessionInvalid, reefError, type ReefError } from "../api/errors";
+import { streamsOf } from "../api/streams";
 import { type Change, ChangeService } from "../gen/reef/api/v1/changes_pb";
 import { DaemonService } from "../gen/reef/api/v1/daemon_pb";
 import { type Operation, OperationKind, OperationService } from "../gen/reef/api/v1/operations_pb";
@@ -210,8 +211,12 @@ export class FleetModel {
   start(): () => void {
     if (this.frozen) {
       void this.readAt();
+      const unsubscribeResume = streamsOf(this.connection).onResume(() => {
+        if (this.snapshot.error) void this.readAt();
+      });
       return () => {
         this.stopped = true;
+        unsubscribeResume();
       };
     }
     const unsubscribeOperations = this.operations.subscribe((batch) => {
@@ -220,11 +225,17 @@ export class FleetModel {
     const unsubscribePresence = this.presence.subscribe(() => {
       this.onPresence();
     });
+    const unsubscribeResume = streamsOf(this.connection).onResume(() => {
+      if (!this.requested) return;
+      this.paced.requestNow();
+      this.disk.readAgain();
+    });
     if (this.operations.live) this.requestFirst();
     this.onPresence();
     return () => {
       this.stopped = true;
       unsubscribeOperations();
+      unsubscribeResume();
       unsubscribePresence();
       this.paced.stop();
       this.settling.stop();
@@ -336,7 +347,7 @@ export class FleetModel {
     }
   }
 
-  private refresh(): Promise<void> | undefined {
+  private refresh(): Promise<boolean> | undefined {
     if (this.stopped) return undefined;
     if (!this.operations.live) {
       this.waiting = true;
@@ -345,30 +356,31 @@ export class FleetModel {
     return this.readLive();
   }
 
-  private async readLive() {
+  private async readLive(): Promise<boolean> {
     try {
       if (!this.started) {
         const { repository } = await client(this.connection, RepositoryService).getRepository({
           repo: this.repo,
         });
-        if (this.isStopped()) return;
+        if (this.isStopped()) return true;
         this.repoId = repository?.id || this.repo;
         this.started = true;
         this.update({ repository });
         this.onPresence();
         await this.readStatus();
-        if (this.isStopped()) return;
+        if (this.isStopped()) return true;
       }
       const repo = this.repoId ?? this.repo;
       const [workspaces, changes] = await Promise.all([
         this.listWorkspaces(repo, ""),
         this.listChanges(repo, ""),
       ]);
-      if (this.isStopped()) return;
+      if (this.isStopped()) return true;
       this.update({ diskStatus: workspaces.diskStatus });
       await this.apply(workspaces.workspaces, workspaces.more, changes, true);
+      return true;
     } catch (thrown) {
-      this.fail(thrown);
+      return this.fail(thrown);
     }
   }
 
@@ -380,7 +392,7 @@ export class FleetModel {
    * retried, not turned into a refresh, which costs a repository read and may
    * fail too. An invalid session stops it.
    */
-  private settle(): Promise<void> | undefined {
+  private settle(): Promise<boolean> | undefined {
     if (this.stopped) return undefined;
     if (!this.operations.live) {
       // As for a refresh: the next live frame refreshes, which asks again.
@@ -394,11 +406,12 @@ export class FleetModel {
     return this.readReleasing(releasing);
   }
 
-  private async readReleasing(ids: string[]) {
+  private async readReleasing(ids: string[]): Promise<boolean> {
     const answers = await Promise.all(ids.map((id) => this.readSettling(id)));
-    if (this.isStopped() || answers.includes("invalid")) return;
+    if (this.isStopped() || answers.includes("invalid")) return true;
     if (answers.includes("settled")) this.paced.request();
     else this.settling.request();
+    return true;
   }
 
   private async readSettling(id: string): Promise<"releasing" | "settled" | "failed" | "invalid"> {
@@ -569,7 +582,7 @@ export class FleetModel {
       this.settling.request();
     }
     this.decideWindow();
-    this.update({ more, error: null, lastRefreshAt: live ? this.now() : undefined });
+    this.update({ more, error: null, fatal: null, lastRefreshAt: live ? this.now() : undefined });
     this.publishRows();
   }
 
@@ -610,19 +623,21 @@ export class FleetModel {
     return this.stopped;
   }
 
-  private fail(thrown: unknown) {
-    if (this.isStopped()) return;
+  /** Whether the daemon answered: false for a failure another try may not meet. */
+  private fail(thrown: unknown): boolean {
+    if (this.isStopped()) return true;
     const error = reefError(thrown);
     if (isSessionInvalid(error)) {
       this.onSessionInvalid();
-      return;
+      return true;
     }
     if (error.reason === REPOSITORY_NOT_FOUND && this.snapshot.rows === null) {
       this.update({ fatal: error });
-      return;
+      return true;
     }
     // The last good rows stay; the error shows above them.
     this.update({ error });
+    return !isPassing(error);
   }
 
   private update(change: Partial<FleetSnapshot>) {

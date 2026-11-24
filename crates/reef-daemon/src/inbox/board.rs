@@ -18,8 +18,10 @@ use crate::model::{RepoId, Timestamp};
 
 /// Items and keys one frame holds at most.
 pub(crate) const FRAME_ENTRIES: usize = 1_000;
-/// Encoded bytes one frame holds at most; one item is never split.
-pub(crate) const FRAME_BYTES: usize = 1 << 20;
+/// Encoded bytes one frame holds at most; one item is never split. Small
+/// enough that a slow link (R3.40) has a whole frame before the web UI calls
+/// the stream silent, 20 s at the least.
+pub(crate) const FRAME_BYTES: usize = 128 << 10;
 
 /// One repository's inbox as its last read left it, without the digest,
 /// which depends on the viewer.
@@ -436,6 +438,29 @@ mod tests {
         let left: usize = all.iter().map(|s| s.left.len()).sum();
         assert_eq!((items, left), (2_500, 11));
         assert_eq!(frames[2].last().map(|s| s.repo_id.as_str()), Some("s"));
+    }
+
+    #[test]
+    fn a_slow_link_has_a_frame_in_time() {
+        let words = "why ".repeat(1_000);
+        let items: Vec<v1::InboxItem> = (0..200)
+            .map(|n| item(&format!("help:r:{n:04}"), NeedsYouNow, n, &words))
+            .collect();
+        let frames = frames(vec![v1::InboxSectionChange {
+            repo_id: "r".to_owned(),
+            items,
+            ..v1::InboxSectionChange::default()
+        }]);
+        for sections in &frames {
+            let frame = v1::WatchInboxResponse {
+                sections: sections.clone(),
+                ..v1::WatchInboxResponse::default()
+            };
+            // 20 s at 6.6 kB/s.
+            assert!(frame.encoded_len() <= 132_000, "{}", frame.encoded_len());
+        }
+        let items: usize = frames.iter().flatten().map(|s| s.items.len()).sum();
+        assert_eq!(items, 200);
     }
 
     #[test]

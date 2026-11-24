@@ -1,7 +1,7 @@
 // W7: the overview over an in-memory daemon (Connect's router transport) and
 // stores the test feeds.
 import { create } from "@bufbuild/protobuf";
-import { Code, createRouterTransport } from "@connectrpc/connect";
+import { Code, ConnectError, createRouterTransport } from "@connectrpc/connect";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ListOperationsResponseSchema,
@@ -309,6 +309,62 @@ describe("Overview", () => {
     expect(screen.getByRole("alert").textContent).toContain("the daemon is not running");
     expect(screen.getByText("Start the daemon.")).toBeTruthy();
     expect(screen.getByText("reef daemon start")).toBeTruthy();
+  });
+
+  it("lists again, once a second, what no answer came for, and a refusal not", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    const t = setup({ repositories: [repo("aaaaaaaa11", "/src/alpha")] });
+    let refusal: Error | null = new ConnectError("Load failed", Code.Unknown);
+    t.state.listOperations = async () => {
+      await settle(1);
+      if (refusal) throw refusal;
+    };
+    await flush();
+    expect(screen.getByRole("alert").textContent).toContain("Load failed");
+    expect(t.state.listLoads).toBe(1);
+    const pass = async () => {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(RELOAD_EVERY_MS);
+        await settle(60);
+      });
+    };
+    await pass();
+    expect(t.state.listLoads).toBe(2);
+    refusal = null;
+    await pass();
+    expect(screen.queryByRole("alert")).toBeNull();
+    const loads = t.state.listLoads;
+    await pass();
+    expect(t.state.listLoads).toBe(loads);
+    cleanup();
+    let asked = 0;
+    Object.defineProperty(setup().state, "failRepositories", {
+      get: () => {
+        asked += 1;
+        return daemonError(Code.Internal, { reason: "BROKEN" }, "broken");
+      },
+    });
+    await flush();
+    const once = asked;
+    await pass();
+    await pass();
+    expect(screen.getByRole("alert").textContent).toContain("broken");
+    expect(asked).toBe(once);
+  });
+
+  it("waits a second at most to list again when the clock was set back", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    const t = setup({ repositories: [repo("aaaaaaaa11", "/src/alpha")] });
+    await flush();
+    vi.setSystemTime(Date.now() - 3_600_000);
+    t.operations.applyFrame(
+      operationsFrame({ operations: [operation("o1", "unknown", 1)], live: true, cursor: "c1" }),
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(RELOAD_EVERY_MS);
+      await settle(60);
+    });
+    expect(t.state.listLoads).toBe(2);
   });
 
   it("ends the session when a read is refused", async () => {

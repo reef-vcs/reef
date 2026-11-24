@@ -4,7 +4,7 @@
 // request opens its answer. The second is a person's phone: paired by the
 // code `reef remote pair` prints, at the remote listener's address, it shows
 // the inbox, a proposal and its diff, writes nothing, and ends when told.
-import type { Page } from "@playwright/test";
+import type { Browser, Page } from "@playwright/test";
 import { FreezingProxy } from "./freeze";
 import { expect, freePort, test, type Reef } from "./reef";
 
@@ -383,12 +383,14 @@ test("a paired phone reads, and ends when told", async ({ browser, reef }) => {
   }
 });
 
-test("a phone whose connection died says so, and catches up", async ({
-  browser,
-  browserName,
-  reef,
-}) => {
-  test.skip(browserName === "firefox", "a phone's Home Screen app is WebKit's or Chromium's");
+const NOT_FIREFOX = "a phone's Home Screen app is WebKit's or Chromium's";
+
+/** A paired phone, live, whose connections can die, and whose time flows as it does and can be moved on. */
+async function withMortalConnection(
+  browser: Browser,
+  reef: Reef,
+  run: (page: Page, proxy: FreezingProxy) => Promise<void>,
+) {
   const proxy = new FreezingProxy();
   const through = await proxy.listen();
   const listen = await freePort();
@@ -401,11 +403,36 @@ test("a phone whose connection died says so, and catches up", async ({
   });
   try {
     const page = await context.newPage();
-    // Time flows as it does, and can be moved on.
     await page.clock.install();
     await pairBrowser(page, reef);
+    await expect(page.locator(".connection")).toHaveText("Live");
+    await run(page, proxy);
+  } finally {
+    await context.close();
+    proxy.close();
+  }
+}
+
+/**
+ * The phone's connections die, long enough ago that Chromium doubts one it
+ * sends on: it asks the other side of a connection that is silent for 10 s.
+ */
+async function die(proxy: FreezingProxy) {
+  proxy.freeze();
+  await expect.poll(() => proxy.deadMs, { timeout: 20_000 }).toBeGreaterThan(11_000);
+}
+
+const shown = (page: Page) =>
+  page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+
+test("a phone whose connection died says so, and catches up", async ({
+  browser,
+  browserName,
+  reef,
+}) => {
+  test.skip(browserName === "firefox", NOT_FIREFOX);
+  await withMortalConnection(browser, reef, async (page, proxy) => {
     const connection = page.locator(".connection");
-    await expect(connection).toHaveText("Live");
     await expect(needs(page).getByText("Nothing needs you now.")).toBeVisible();
 
     /** What each stream was asked for, as its requests go out. */
@@ -439,7 +466,7 @@ test("a phone whose connection died says so, and catches up", async ({
       for (const event of ["pageshow", "online"]) {
         await page.evaluate((name) => window.dispatchEvent(new Event(name)), event);
       }
-      await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+      await shown(page);
       await page.clock.fastForward(10_000);
       await expect(connection).toHaveText("Live");
       expect(opens).toEqual([]);
@@ -477,12 +504,82 @@ test("a phone whose connection died says so, and catches up", async ({
       proxy.freeze();
       await page.clock.fastForward(25_000);
       await expect(connection).toHaveText("Live");
-      await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+      await shown(page);
       // At once, and not once 40 s have passed.
       await expect(connection).toHaveText("Reconnecting", { timeout: 2_000 });
     });
-  } finally {
-    await context.close();
-    proxy.close();
-  }
+  });
+});
+
+test("a proposal changed while the phone slept is shown when it wakes", async ({
+  browser,
+  browserName,
+  reef,
+}) => {
+  test.skip(browserName === "firefox", NOT_FIREFOX);
+  await needYou(reef);
+  const [, proposing] = reef.workspaces;
+  if (!proposing) throw new Error("setup made two workspaces");
+  await withMortalConnection(browser, reef, async (page, proxy) => {
+    await openProposal(page);
+    const changed = page.getByText("The agent changed this proposal since you opened it.");
+    const change = async (file: string) => {
+      await reef.edit(proposing, { [file]: `pub fn ${file.slice(0, -3)}() {}\n` });
+      const { commit_id } = (await reef.reef(["ws", "snapshot", proposing.id])) as {
+        commit_id: string;
+      };
+      await reef.reef(["propose", commit_id, "--repo", reef.repo, "-m", file], { agent: AGENT });
+    };
+    await expect(changed).toHaveCount(0);
+    await die(proxy);
+    // A read that hangs: the page reads an open proposal every 10 s.
+    const hung = page.waitForRequest(/ListProposals$/);
+    await page.clock.fastForward(11_000);
+    await hung;
+    // Asleep for an hour: no timer runs.
+    await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1_000));
+    await change("more.rs");
+    await page.clock.fastForward(60 * 60_000);
+    await page.clock.resume();
+    await shown(page);
+    await expect(changed).toBeVisible({ timeout: 20_000 });
+    await expect(page.locator(".connection")).toHaveText("Live");
+    await expect(page.getByRole("alert")).toHaveCount(0);
+    await page.getByRole("button", { name: "Review the new version" }).click();
+    await expect(page.locator(".diff-file")).toHaveCount(2);
+    await expect(changed).toHaveCount(0);
+    // And the next change too: the hour is in nothing the page waits for.
+    await change("again.rs");
+    await expect(changed).toBeVisible({ timeout: 20_000 });
+  });
+});
+
+test("a row tapped on a dead connection opens its proposal with no second tap", async ({
+  browser,
+  browserName,
+  reef,
+}) => {
+  test.skip(browserName === "firefox", NOT_FIREFOX);
+  await needYou(reef);
+  await withMortalConnection(browser, reef, async (page, proxy) => {
+    // Once with the page's code not loaded yet, and then as a phone that was used before.
+    for (const code of ["not loaded", "loaded"]) {
+      await test.step(`its code ${code}`, async () => {
+        await rowsAreTappable(page);
+        await die(proxy);
+        await page.clock.fastForward(25_000);
+        await shown(page);
+        await expect(page.locator(".connection")).toHaveText("Reconnecting");
+        await needs(page)
+          .getByRole("link", { name: /^Add a_very_long/ })
+          .click();
+        await expect(page.getByRole("heading", { name: "Evidence" })).toBeVisible({
+          timeout: 30_000,
+        });
+        await expect(page.locator(".diff-file").first()).toBeVisible();
+        await expect(page.locator(".connection")).toHaveText("Live");
+        await page.getByRole("link", { name: "Reef", exact: true }).click();
+      });
+    }
+  });
 });

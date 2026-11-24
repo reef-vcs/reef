@@ -3,8 +3,11 @@
 // Chunk names are content hashes served `immutable`, so a tab older than
 // the daemon (one upgraded since the tab loaded) asks for chunks the daemon
 // no longer embeds: the failure is shown, with a reload, never a blank page.
-// Nothing reloads on its own, which could loop.
-import { lazy, Suspense, type ComponentType } from "react";
+// Nothing reloads on its own, which could loop. A chunk the connection failed
+// (R3.40) is asked for once more, and again when the page is shown or the
+// network is back.
+import { lazy, Suspense, useEffect, useState, type ComponentType } from "react";
+import { onWake } from "../live/silence";
 
 function ChunkError() {
   return (
@@ -26,10 +29,29 @@ function ChunkError() {
 export function lazyRoute<P extends object>(
   load: () => Promise<ComponentType<P>>,
 ): ComponentType<P> {
+  let loaded: ComponentType<P> | null = null;
+  function Failed(props: P) {
+    const [Page, setPage] = useState(() => loaded);
+    useEffect(() => {
+      if (Page) return;
+      const again = () => {
+        load().then(
+          (component) => {
+            loaded = component;
+            setPage(() => component);
+          },
+          () => undefined,
+        );
+      };
+      again();
+      return onWake(again);
+    }, [Page]);
+    return Page ? <Page {...props} /> : <ChunkError />;
+  }
   const Lazy = lazy(() =>
     load().then(
       (component) => ({ default: component }),
-      () => ({ default: ChunkError as ComponentType<P> }),
+      () => ({ default: Failed as ComponentType<P> }),
     ),
   );
   function Route(props: P) {

@@ -86,7 +86,9 @@ Set `listen` to the machine's tailnet IPv4 address (`tailscale ip -4`), so that 
 ## Limits
 
 - **Your computer asleep answers nothing.** A daemon on a machine that stays up is the answer.
-- **The app notices a dead connection** and opens another: when the app comes back to the screen or to the network after 20 s of silence, or after 40 s of it. It then says **Reconnecting** until the inbox is current, and shows what it had. In Chromium and WebKit on a Mac the browser took 10 to 13 s more to give a dead connection up.
+- **The app notices a dead connection** and opens another: after 40 s of silence, or when the app comes back to the screen or to the network after 20 s of it. It then says **Reconnecting** until the inbox is current, and shows what it had. In Chromium and WebKit on a Mac the browser took 10 to 13 s more to give a dead connection up.
+- **Until a new connection has said something, it is given longer**, since a slow link may need it: 40 s, and twice as long each time up to 320 s. After an outage of minutes with the app on screen all along, it can stay on **Reconnecting** for up to 320 s after the network is back, unless the phone tells the app that it is. Leave the app and come back: what waited for over 40 s is then tried again at once.
+- **A page reads again what it shows** when the app is live again, and a read that its connection failed is sent again by itself. A read in which no byte arrives for 40 s is cut and sent again, with the same longer limits, so a large diff loads over a slow link. The inbox comes in frames of 128 KiB, so at 3.3 kB/s or more each arrives in time (6.6 kB/s if you come back to the app meanwhile).
 - **Five tabs at once**, if you read in a browser: each has three live streams, and a token may hold 16.
 - **Nothing is readable offline**, on purpose: the phone keeps no copy of your code. It keeps the token, its name and its end.
 - **A program that runs as you** can read the TLS key, stop the daemon and serve its own page at the phone's address, which the app then opens with its token ([threat model](threat-model.md), S-281). A daemon on another machine, or under another user, closes that.

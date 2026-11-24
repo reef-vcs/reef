@@ -7,7 +7,8 @@
 // one ended last. An operation recorded between the two calls arrives on the
 // stream, so none is missed in either order.
 import { client, type Connection } from "../api/connection";
-import { isSessionInvalid, reefError, type ReefError } from "../api/errors";
+import { streamsOf } from "../api/streams";
+import { isPassing, isSessionInvalid, reefError, type ReefError } from "../api/errors";
 import { type Operation, OperationService } from "../gen/reef/api/v1/operations_pb";
 import { type Repository, RepositoryService } from "../gen/reef/api/v1/repositories_pb";
 import { after, type Cancel } from "../live/backoff";
@@ -76,9 +77,15 @@ export class OverviewModel {
     // Nothing is read before the stream is live (a follower tab may already
     // be), so an operation recorded after the read arrives on the stream.
     if (this.operations.live) this.requestFirst();
+    const unsubscribeResume = streamsOf(this.connection).onResume(() => {
+      if (!this.requested) return;
+      this.lastLoad = Number.NEGATIVE_INFINITY;
+      this.requestReload();
+    });
     return () => {
       this.stopped = true;
       unsubscribe();
+      unsubscribeResume();
       this.pendingReload?.();
     };
   }
@@ -117,7 +124,7 @@ export class OverviewModel {
       return;
     }
     if (this.pendingReload) return;
-    const wait = this.lastLoad + RELOAD_EVERY_MS - Date.now();
+    const wait = Math.min(this.lastLoad + RELOAD_EVERY_MS - Date.now(), RELOAD_EVERY_MS);
     if (wait <= 0) {
       void this.load();
       return;
@@ -148,7 +155,7 @@ export class OverviewModel {
       this.error = null;
       if (generation === this.generation) this.listLatest();
     } catch (thrown) {
-      this.fail(thrown);
+      if (this.fail(thrown)) this.reloadAgain = true;
     } finally {
       this.loading = false;
       if (this.reloadAgain) {
@@ -176,7 +183,7 @@ export class OverviewModel {
           for (const operation of page.operations) this.fold(operation);
         } catch (thrown) {
           if (generation === this.generation) this.listed.delete(repo);
-          this.fail(thrown);
+          if (this.fail(thrown)) this.requestReload();
         }
         this.changed();
       }
@@ -189,13 +196,15 @@ export class OverviewModel {
     return this.stopped;
   }
 
-  private fail(thrown: unknown) {
+  /** Whether another try may not meet the error. */
+  private fail(thrown: unknown): boolean {
     const error = reefError(thrown);
     if (isSessionInvalid(error)) {
       this.onSessionInvalid();
-      return;
+      return false;
     }
     this.error = error;
+    return isPassing(error);
   }
 
   private changed() {

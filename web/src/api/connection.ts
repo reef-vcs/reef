@@ -6,6 +6,8 @@ import type { DescService } from "@bufbuild/protobuf";
 import { createClient, type Client, type Interceptor, type Transport } from "@connectrpc/connect";
 import { createGrpcWebTransport } from "@connectrpc/connect-web";
 import { isSessionInvalid, reefError, type ReefError } from "./errors";
+import { steady } from "./steady";
+import { streamsOf } from "./streams";
 
 export interface Connection {
   transport: Transport;
@@ -64,13 +66,22 @@ export function noteRefusals(connection: () => Connection | undefined): Intercep
   };
 }
 
-/** gRPC-web, binary only, to `baseUrl` (this page's origin by default). */
-export function browserConnection(token: string, baseUrl: string = location.origin): Connection {
-  let made: Connection | undefined = undefined;
+/**
+ * gRPC-web, binary only, to `baseUrl` (this page's origin by default). Over
+ * https, the remote listener, what reads survives a connection that dies.
+ */
+export function browserConnection(
+  token: string,
+  baseUrl: string = location.origin,
+  remote = location.protocol === "https:",
+): Connection {
+  const reads = remote ? steady(() => streamsOf(made)) : undefined;
   const transport = createGrpcWebTransport({
     baseUrl,
     useBinaryFormat: true,
-    interceptors: [noteRefusals(() => made), bearer(token)],
+    interceptors: [...(reads ? [reads.interceptor] : []), noteRefusals(() => made), bearer(token)],
+    ...(reads ? { fetch: reads.fetch } : {}),
   });
-  return (made = { transport, label: baseUrl });
+  const made: Connection = { transport, label: baseUrl };
+  return made;
 }

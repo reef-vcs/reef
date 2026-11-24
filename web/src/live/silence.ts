@@ -7,13 +7,15 @@
 // and WebKit, measured on a Mac).
 //
 // A first frame may take longer: the daemon may wait to read, or the link be
-// slow. An opening that is cut before it doubles the next one's limit.
+// slow. An opening that is cut before it doubles the next one's limit, but a
+// page that is shown, or whose network is back, waits for no more than the
+// first limit: what it opened before may be on a dead connection.
 import { Code, ConnectError } from "@connectrpc/connect";
 import { after, type Cancel } from "./backoff";
 
 /** Silence that cuts a stream. */
 export const SILENT_MS = 40_000;
-/** Silence that cuts it when the page is shown or the network is back. */
+/** Silence that cuts it when the page is shown or the network is back, once it has sent a frame. */
 export const SILENT_ON_WAKE_MS = 20_000;
 /** Up to 320 s for a first frame, in which a frame of 1 MiB arrives at 3.3 kB/s. */
 export const MAX_DOUBLINGS = 3;
@@ -91,7 +93,7 @@ export function line({ clock, after, onWake }: SilenceEnvironment = browserSilen
       });
     };
     const stopWaking = onWake(() => {
-      check(heard ? SILENT_ON_WAKE_MS : limit());
+      check(heard ? SILENT_ON_WAKE_MS : SILENT_MS);
     });
     try {
       if (signal.aborted) return;
@@ -117,11 +119,16 @@ export function line({ clock, after, onWake }: SilenceEnvironment = browserSilen
 }
 
 /** `step`, or a refusal as soon as `signal` aborts, whatever `step` then does. */
-function orAborted<T>(step: Promise<T>, signal: AbortSignal): Promise<T> {
+export function orAborted<T>(step: Promise<T>, signal: AbortSignal): Promise<T> {
   return new Promise((resolve, reject) => {
     const aborted = () => {
       reject(new ConnectError("the connection fell silent", Code.Unavailable));
     };
+    if (signal.aborted) {
+      step.catch(() => undefined);
+      aborted();
+      return;
+    }
     signal.addEventListener("abort", aborted, { once: true });
     step.then(
       (value) => {

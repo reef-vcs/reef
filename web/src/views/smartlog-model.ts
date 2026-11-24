@@ -14,7 +14,8 @@
 // once, both reads are made at it, and the stream is not consulted.
 import { Code, ConnectError } from "@connectrpc/connect";
 import { client, type Connection } from "../api/connection";
-import { isSessionInvalid, reefError, type ReefError } from "../api/errors";
+import { isPassing, isSessionInvalid, reefError, type ReefError } from "../api/errors";
+import { streamsOf } from "../api/streams";
 import { type Change, ChangeService, type LogEntry } from "../gen/reef/api/v1/changes_pb";
 import {
   ChangeEffectKind,
@@ -166,17 +167,25 @@ export class SmartlogModel {
   start(): () => void {
     if (this.frozen) {
       void this.readAt();
+      const unsubscribeResume = streamsOf(this.connection).onResume(() => {
+        if (this.snapshot.error) void this.readAt();
+      });
       return () => {
         this.stopped = true;
+        unsubscribeResume();
       };
     }
     const unsubscribe = this.operations.subscribe((batch) => {
       this.onBatch(batch);
     });
+    const unsubscribeResume = streamsOf(this.connection).onResume(() => {
+      if (this.requested) this.requestNow();
+    });
     if (this.operations.live) this.requestFirst();
     return () => {
       this.stopped = true;
       unsubscribe();
+      unsubscribeResume();
       this.paced.stop();
     };
   }
@@ -251,7 +260,7 @@ export class SmartlogModel {
     this.paced.request();
   }
 
-  private refresh(): Promise<void> | undefined {
+  private refresh(): Promise<boolean> | undefined {
     if (this.stopped) return undefined;
     if (!this.operations.live) {
       // A reset since this was asked for: read once the stream is live again.
@@ -261,24 +270,25 @@ export class SmartlogModel {
     return this.readLive();
   }
 
-  private async readLive() {
+  private async readLive(): Promise<boolean> {
     const revset = this.revset;
     const revealing = this.revealing;
     this.revealing = false;
     try {
       const read = await this.read("", revset);
-      if (this.isStopped()) return;
+      if (this.isStopped()) return true;
       if (revset !== this.revset) {
         // The revset changed during the read: read the new one.
         this.paced.request();
-        return;
+        return true;
       }
       this.apply(read, {
         live: !revealing && !this.fresh && this.snapshot.rows !== null,
         frozenAt: undefined,
       });
+      return true;
     } catch (thrown) {
-      this.fail(thrown);
+      return this.fail(thrown);
     }
   }
 
@@ -397,15 +407,17 @@ export class SmartlogModel {
     return this.stopped;
   }
 
-  private fail(thrown: unknown) {
-    if (this.isStopped()) return;
+  /** Whether the daemon answered: false for a failure another try may not meet. */
+  private fail(thrown: unknown): boolean {
+    if (this.isStopped()) return true;
     const error = reefError(thrown);
     if (isSessionInvalid(error)) {
       this.onSessionInvalid();
-      return;
+      return true;
     }
     // The last good graph stays; the error shows above it.
     this.update({ error });
+    return !isPassing(error);
   }
 
   private update(change: Partial<SmartlogSnapshot>) {

@@ -1,13 +1,16 @@
 // A TCP proxy whose connections can die as a phone's do when it sleeps or
 // changes networks: what is open carries nothing more either way, with no FIN
-// and no RST, while a new connection works.
+// and no RST, while a new connection works. The daemon is told of none of it:
+// its side stays open, whatever the browser does with its own.
 import { createServer, connect, type AddressInfo, type Server, type Socket } from "node:net";
 
 export class FreezingProxy {
   private readonly frozen = new Set<Socket>();
   private readonly open = new Map<Socket, Socket>();
+  private readonly left = new Set<Socket>();
   private server: Server | undefined;
   private target = 0;
+  private frozenAt = 0;
   /** Connections accepted so far. */
   accepted = 0;
 
@@ -26,10 +29,12 @@ export class FreezingProxy {
       client.on("error", () => undefined);
       daemon.on("error", () => undefined);
       client.on("close", () => {
-        daemon.destroy();
         this.open.delete(client);
+        if (this.frozen.delete(client)) this.left.add(daemon);
+        else daemon.destroy();
       });
       daemon.on("close", () => {
+        this.left.delete(daemon);
         if (!this.frozen.has(client)) client.destroy();
       });
     });
@@ -45,10 +50,17 @@ export class FreezingProxy {
 
   freeze() {
     for (const client of this.open.keys()) this.frozen.add(client);
+    this.frozenAt = Date.now();
+  }
+
+  /** How long ago the connections died. */
+  get deadMs(): number {
+    return Date.now() - this.frozenAt;
   }
 
   close() {
     this.server?.close();
+    for (const daemon of this.left) daemon.destroy();
     for (const [client, daemon] of this.open) {
       client.destroy();
       daemon.destroy();

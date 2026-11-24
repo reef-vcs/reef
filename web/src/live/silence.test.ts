@@ -27,6 +27,7 @@ import {
   sessionInvalid,
   settle,
 } from "../test/fakes";
+import { streamsOf } from "../api/streams";
 import { after } from "./backoff";
 import { browserEnvironment, Live } from "./share";
 import {
@@ -79,7 +80,7 @@ function daemon() {
     presence: streams.presenceCalls.length,
     inbox: inboxes.length,
   });
-  return { streams, connection, say, all, opened };
+  return { streams, inboxes, connection, say, all, opened };
 }
 
 const each = (n: number) => ({ operations: n, presence: n, inbox: n });
@@ -230,14 +231,14 @@ describe("a first frame that takes long", () => {
     live.close();
   });
 
-  it("loads in up to 320 s, and is not asked again on a wake before", async () => {
+  it("loads in up to 320 s", async () => {
     const { time, live, say, opened } = await silentInbox(320 * SECOND);
     const before = opened().inbox;
-    for (let at = 0; at < 300; at += 10) {
+    for (let at = 0; at < 310; at += 10) {
       await time.pass(10 * SECOND);
       say.operations();
       say.presence();
-      await time.wake();
+      await settle(30);
     }
     expect(opened().inbox).toBe(before);
     expect(live.state).toBe("reconnecting");
@@ -245,6 +246,25 @@ describe("a first frame that takes long", () => {
     await settle(30);
     expect(live.state).toBe("live");
     expect(SILENT_MS * 2 ** MAX_DOUBLINGS).toBe(320 * SECOND);
+    live.close();
+  });
+
+  it("is asked again on a wake after 40 s, whatever its limit, and not before", async () => {
+    const { time, live, say, opened } = await silentInbox(320 * SECOND);
+    const before = opened().inbox;
+    for (let n = 0; n < 3; n++) {
+      await time.pass(SILENT_MS - 1);
+      say.operations();
+      say.presence();
+      await time.wake();
+      expect(opened().inbox).toBe(before + n);
+      await time.pass(1);
+      await time.wake();
+      expect(opened().inbox).toBe(before + n + 1);
+    }
+    say.inbox();
+    await settle(30);
+    expect(live.state).toBe("live");
     live.close();
   });
 
@@ -367,10 +387,132 @@ describe("the header after a cut", () => {
   });
 });
 
+describe("what reads over the connection", () => {
+  it("is told when the streams are live again, and not the first time", async () => {
+    const { time, live, connection, all } = await page();
+    const streams = streamsOf(connection);
+    const told = vi.fn();
+    const stop = streams.onResume(told);
+    expect([streams.live, streams.resumes]).toEqual([true, 0]);
+    await time.pass(SILENT_MS);
+    expect(streams.live).toBe(false);
+    expect(told).not.toHaveBeenCalled();
+    await all();
+    expect([streams.live, streams.resumes]).toEqual([true, 1]);
+    expect(told).toHaveBeenCalledOnce();
+    stop();
+    await time.pass(SILENT_MS);
+    await all();
+    expect(streams.resumes).toBe(2);
+    expect(told).toHaveBeenCalledOnce();
+    live.close();
+  });
+
+  it("is told in a tab that follows another's streams too", async () => {
+    const shared = { locks: new FakeLocks(), bus: new FakeBus() };
+    const lead = daemon();
+    const leader = new Live(lead.connection, environment(manualFrames().frame, shared));
+    leader.start();
+    await settle(30);
+    await lead.all();
+    const follow = daemon();
+    const follower = new Live(follow.connection, environment(manualFrames().frame, shared));
+    follower.start();
+    await settle(30);
+    expect([follower.state, streamsOf(follow.connection).resumes]).toEqual(["live", 0]);
+    lead.streams.lastPresence().fail(new ConnectError("down", Code.Unavailable));
+    await settle(30);
+    expect(streamsOf(follow.connection).live).toBe(false);
+    await lead.all();
+    expect([follower.state, streamsOf(follow.connection).resumes]).toEqual(["live", 1]);
+    leader.close();
+    follower.close();
+  });
+});
+
 /** A stream that says nothing, whatever it is told. */
 const never = { [Symbol.asyncIterator]: () => ({ next: () => new Promise<never>(() => {}) }) };
 
+describe("the first time", () => {
+  it.each(["operations", "presence", "inbox"] as const)(
+    "is live only once %s has all it holds",
+    async (last) => {
+      const { connection, say, streams } = daemon();
+      const live = new Live(connection, environment(manualFrames().frame));
+      live.start();
+      await settle(30);
+      const part = {
+        operations: () => {
+          streams.lastOperations().push(operationsFrame({ cursor: "c0", live: false }));
+        },
+        presence: () => {
+          streams.lastPresence().push(presenceFrame([], false));
+        },
+        inbox: () => {
+          say.inbox(create(WatchInboxResponseSchema, { synced: false }));
+        },
+      };
+      for (const stream of ["operations", "presence", "inbox"] as const) {
+        if (stream === last) part[stream]();
+        else say[stream]();
+      }
+      await settle(30);
+      expect(live.state).toBe("connecting");
+      say[last]();
+      await settle(30);
+      expect(live.state).toBe("live");
+      live.close();
+    },
+  );
+
+  it.each(["operations", "presence", "inbox"] as const)(
+    "is not live from when %s fails until that stream speaks",
+    async (failing) => {
+      const { connection, all, say, streams, inboxes } = daemon();
+      let retry = () => {};
+      const live = new Live(connection, {
+        ...environment(manualFrames().frame),
+        sleep: () =>
+          new Promise((resolve) => {
+            retry = resolve;
+          }),
+      });
+      live.start();
+      await settle(30);
+      await all();
+      expect(live.state).toBe("live");
+      const down = new ConnectError("down", Code.Unavailable);
+      if (failing === "operations") streams.lastOperations().fail(down);
+      else if (failing === "presence") streams.lastPresence().fail(down);
+      else inboxes.at(-1)?.fail(down);
+      await settle(30);
+      const others = (["operations", "presence", "inbox"] as const).filter((s) => s !== failing);
+      for (const step of [() => undefined, retry]) {
+        step();
+        for (const other of others) say[other]();
+        await settle(30);
+        expect(live.state).toBe("reconnecting");
+      }
+      say[failing]();
+      await settle(30);
+      expect(live.state).toBe("live");
+      live.close();
+    },
+  );
+});
+
 describe("a line", () => {
+  it("is cut at once when its signal is aborted already", async () => {
+    const time = new FakeTime();
+    const page = new AbortController();
+    const stream = line(time.silence)(page.signal, () => {
+      page.abort();
+      return never;
+    });
+    await expect(stream[Symbol.asyncIterator]().next()).rejects.toThrow("silent");
+    expect(time.held).toBe(0);
+  });
+
   it("is cut though its stream ignores that, and its request is aborted", async () => {
     const time = new FakeTime();
     let request: AbortSignal | undefined;

@@ -17,8 +17,10 @@
 // browser suspended holds no other's streams. There each stream is cut and
 // opened again when it falls silent (live/silence.ts).
 import { fromBinary, toBinary } from "@bufbuild/protobuf";
+import { Code } from "@connectrpc/connect";
 import { client, type Connection } from "../api/connection";
-import { isSessionInvalid, reefError } from "../api/errors";
+import { isSessionInvalid, reefError, type ReefError } from "../api/errors";
+import { streamsOf } from "../api/streams";
 import { DaemonService } from "../gen/reef/api/v1/daemon_pb";
 import { InboxService, WatchInboxResponseSchema } from "../gen/reef/api/v1/inbox_pb";
 import {
@@ -97,6 +99,8 @@ export class Live {
   readonly presence: PresenceStore;
   readonly inbox: InboxStore;
   state: ConnectionState = "connecting";
+  /** Why the daemon refuses this tab's streams for now, as a sixth tab's (`REMOTE_BUSY`). */
+  refusal: ReefError | null = null;
   /** This tab holds the lock and the streams. */
   leading = false;
   private readonly stateNotifier: FrameNotifier;
@@ -212,8 +216,9 @@ export class Live {
           this.post({ t: "operations", frame: toBinary(SubscribeOperationsResponseSchema, frame) });
           this.updateState();
         },
-        onRetry: () => {
+        onRetry: (error) => {
           this.operationsFailing = true;
+          this.refused(error);
           this.updateState();
         },
       },
@@ -235,8 +240,9 @@ export class Live {
         this.post({ t: "presence", frame: toBinary(SubscribePresenceResponseSchema, frame) });
         this.updateState();
       },
-      onRetry: () => {
+      onRetry: (error) => {
         this.presenceFailing = true;
+        this.refused(error);
         this.updateState();
       },
     });
@@ -254,8 +260,9 @@ export class Live {
         this.post({ t: "inbox", frame: toBinary(WatchInboxResponseSchema, frame) });
         this.updateState();
       },
-      onRetry: () => {
+      onRetry: (error) => {
         this.inboxFailing = true;
+        this.refused(error);
         this.updateState();
       },
     });
@@ -365,9 +372,16 @@ export class Live {
     this.setState(live ? "live" : this.everLive ? "reconnecting" : "connecting");
   }
 
+  private refused(error: ReefError) {
+    this.refusal = error.code === Code.Unavailable && error.reason ? error : null;
+    this.stateNotifier.notify();
+  }
+
   private setState(state: ConnectionState) {
     if (this.state === state || this.state === "ended") return;
     this.state = state;
+    if (state === "live") this.refusal = null;
+    streamsOf(this.connection).change(state === "live");
     if (this.leading) this.post({ t: "state", state });
     this.stateNotifier.notify();
   }

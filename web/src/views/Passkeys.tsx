@@ -6,6 +6,7 @@
 import { useEffect, useState, type SubmitEvent } from "react";
 import { client, type Connection } from "../api/connection";
 import { isSessionInvalid, reefError, type ReefError } from "../api/errors";
+import { useResumes } from "../api/streams";
 import { DaemonService } from "../gen/reef/api/v1/daemon_pb";
 import {
   IdentityKind,
@@ -65,6 +66,7 @@ export function policySnippet({ identity, passkeys }: Person, origin: string): s
 
 function usePeople(connection: Connection, version: number, onSessionInvalid: () => void) {
   const [load, setLoad] = useState<Load>({ kind: "loading" });
+  const resumes = useResumes(connection);
   useEffect(() => {
     let current = true;
     const identities = client(connection, IdentityService);
@@ -94,7 +96,7 @@ function usePeople(connection: Connection, version: number, onSessionInvalid: ()
     return () => {
       current = false;
     };
-  }, [connection, version, onSessionInvalid]);
+  }, [connection, resumes, version, onSessionInvalid]);
   return load;
 }
 

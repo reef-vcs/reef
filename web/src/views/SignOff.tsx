@@ -4,6 +4,7 @@
 import { useEffect, useState } from "react";
 import { client, type Connection } from "../api/connection";
 import { isSessionInvalid, reefError, type ReefError } from "../api/errors";
+import { useResumes } from "../api/streams";
 import type { Change } from "../gen/reef/api/v1/changes_pb";
 import { EvidenceResult, EvidenceService, type Evidence } from "../gen/reef/api/v1/evidence_pb";
 import { PolicyService, type PolicyVerifiedSigner } from "../gen/reef/api/v1/policy_pb";
@@ -54,6 +55,7 @@ const STATUS_WORDS: Partial<Record<IdentityStatus, string>> = {
 /** The default identity, who Sign off signs as, and how many live passkeys it has. */
 export function useSigner(connection: Connection, onSessionInvalid: () => void): Signer {
   const [signer, setSigner] = useState<Signer>({ kind: "loading" });
+  const resumes = useResumes(connection);
   useEffect(() => {
     let current = true;
     const identities = client(connection, IdentityService);
@@ -73,7 +75,7 @@ export function useSigner(connection: Connection, onSessionInvalid: () => void):
     return () => {
       current = false;
     };
-  }, [connection, onSessionInvalid]);
+  }, [connection, resumes, onSessionInvalid]);
   return signer;
 }
 
@@ -92,6 +94,7 @@ function useSignOffs(
   onSessionInvalid: () => void,
 ) {
   const [state, setState] = useState<SignOffs | { error: ReefError } | null>(null);
+  const resumes = useResumes(connection);
   const { changeId, commitId } = change;
   useEffect(() => {
     let current = true;
@@ -121,7 +124,7 @@ function useSignOffs(
     return () => {
       current = false;
     };
-  }, [connection, repo, changeId, commitId, version, onSessionInvalid]);
+  }, [connection, resumes, repo, changeId, commitId, version, onSessionInvalid]);
   return state;
 }
 

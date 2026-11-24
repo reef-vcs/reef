@@ -60,3 +60,21 @@ export function isSessionInvalid(error: ReefError): boolean {
       error.reason === REMOTE_ORIGIN_CHANGED)
   );
 }
+
+/**
+ * No answer of the daemon's, or not a whole one: the connection died, or
+ * something between the two answered. A read is worth sending again.
+ */
+export function isUnanswered(error: ReefError): boolean {
+  return (
+    error.reason === "" &&
+    (error.code === Code.Unavailable ||
+      error.code === Code.Unknown ||
+      error.code === Code.DeadlineExceeded)
+  );
+}
+
+/** Unanswered, or an answer that another try may not meet. */
+export function isPassing(error: ReefError): boolean {
+  return error.code === Code.Unavailable || isUnanswered(error);
+}

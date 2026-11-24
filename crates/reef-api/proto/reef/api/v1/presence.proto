@@ -57,7 +57,7 @@ service PresenceService {
     option idempotency_level = IDEMPOTENT;
   }
   // The current presence set, then changes to it as they happen. A frame
-  // with no events is a keepalive, sent at least every 30 seconds.
+  // with no events is a keepalive, sent at least every 15 seconds.
   //
   // The first frames carry every live entry the request matches; the frame
   // that completes the set, empty when there is none, has `synced` set, and

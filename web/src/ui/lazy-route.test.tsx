@@ -1,4 +1,5 @@
-// R2.21 test 9: a page loaded by `import()`, while it loads and when it fails.
+// R2.21 test 9: a page loaded by `import()`, while it loads, when it fails and
+// when the connection that failed it is back (R3.40).
 import { afterEach, describe, expect, it } from "vitest";
 import { settle } from "../test/fakes";
 import { act, cleanup, render, screen } from "../test/testing-library";
@@ -54,5 +55,36 @@ describe("lazyRoute", () => {
     );
     expect(screen.getByRole("button", { name: "Reload" })).toBeTruthy();
     expect(screen.getByText("the header")).toBeTruthy();
+  });
+
+  it("asks again for what the connection failed: once at once, and when the network is back", async () => {
+    let asked = 0;
+    let dead = true;
+    const Route = lazyRoute<{ name: string }>(() => {
+      asked += 1;
+      return dead ? Promise.reject(new TypeError("Load failed")) : Promise.resolve(Page);
+    });
+    render(shell(Route));
+    await act(async () => {
+      await settle(10);
+    });
+    expect(screen.getByRole("alert")).toBeTruthy();
+    expect(asked).toBe(2);
+    dead = false;
+    await act(async () => {
+      window.dispatchEvent(new Event("online"));
+      await settle(10);
+    });
+    expect(screen.getByText("the smartlog page")).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(asked).toBe(3);
+    cleanup();
+    render(shell(Route));
+    await act(async () => {
+      window.dispatchEvent(new Event("online"));
+      await settle(10);
+    });
+    expect(screen.getByText("the smartlog page")).toBeTruthy();
+    expect(asked).toBe(3);
   });
 });

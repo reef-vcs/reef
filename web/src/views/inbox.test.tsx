@@ -3,14 +3,15 @@
 // that shows only its repository, the Answer box, and a digest marked seen
 // once on screen that keeps what it showed for the visit.
 import { timestampFromMs } from "@bufbuild/protobuf/wkt";
-import { Code } from "@connectrpc/connect";
+import { Code, ConnectError } from "@connectrpc/connect";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { create } from "@bufbuild/protobuf";
 import { DEVICE_READS } from "../device";
 import { InboxReason, InboxSectionSchema } from "../gen/reef/api/v1/inbox_pb";
 import { InboxStore } from "../live/inbox";
 import type { Live } from "../live/share";
-import { daemonError, immediateFrames, settle } from "../test/fakes";
+import { RepositoryService } from "../gen/reef/api/v1/repositories_pb";
+import { daemonError, fakeTransport, immediateFrames, settle } from "../test/fakes";
 import { helpItem, InboxDaemon, OTHER, proposalItem, REPO, section } from "../test/inbox-daemon";
 import { narrow } from "../test/narrow";
 import { paired } from "../test/paired";
@@ -317,6 +318,93 @@ describe("the inbox", () => {
     expect(digest?.count, "each landing once").toBe(2n);
     expect(digest?.newest.map((l) => l.seq)).toEqual([6n, 5n]);
     stop();
+  });
+
+  it("marks again, saying nothing, after a mark no answer came for", async () => {
+    const daemon = new InboxDaemon();
+    daemon.sections = [
+      section(REPO, {
+        landed: { count: 1n, fromSeq: 4n, throughSeq: 5n, fromMark: true },
+      }),
+    ];
+    const stream = live(daemon);
+    const model = new InboxModel(
+      daemon.connection(),
+      stream.live.inbox,
+      immediateFrames,
+      vi.fn(),
+      undefined,
+    );
+    const stop = model.start();
+    daemon.refuseMarks = new ConnectError("Load failed", Code.Unknown);
+    await model.markSeen(REPO, 5n);
+    expect(model.getSnapshot().error).toBeNull();
+    daemon.refuseMarks = null;
+    await model.markSeen(REPO, 5n);
+    expect(daemon.marks.map((m) => m.seq)).toEqual([5n]);
+    stop();
+  });
+
+  it("finds its repository once the daemon answers, and not again after a refusal", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    try {
+      for (const [thrown, tries] of [
+        [new ConnectError("Load failed", Code.Unknown), 3],
+        [daemonError(Code.NotFound, { reason: "REPOSITORY_NOT_FOUND" }), 1],
+      ] as const) {
+        let asked = 0;
+        const model = new InboxModel(
+          {
+            label: "test",
+            transport: fakeTransport({
+              [RepositoryService.typeName]: {
+                getRepository: () => {
+                  asked += 1;
+                  if (asked < 3) throw thrown;
+                  return { repository: { id: REPO } };
+                },
+              },
+            }),
+          },
+          live(new InboxDaemon()).live.inbox,
+          immediateFrames,
+          vi.fn(),
+          "reef",
+        );
+        const stop = model.start();
+        await settle(60);
+        expect(model.getSnapshot().error?.code).toBe(thrown.code);
+        await vi.advanceTimersByTimeAsync(10_000);
+        await settle(60);
+        expect(asked).toBe(tries);
+        expect(model.getSnapshot().error === null).toBe(tries === 3);
+        stop();
+        expect(vi.getTimerCount()).toBe(0);
+      }
+      const gone = new InboxModel(
+        {
+          label: "test",
+          transport: fakeTransport({
+            [RepositoryService.typeName]: {
+              getRepository: () => {
+                throw new ConnectError("Load failed", Code.Unknown);
+              },
+            },
+          }),
+        },
+        live(new InboxDaemon()).live.inbox,
+        immediateFrames,
+        vi.fn(),
+        "reef",
+      );
+      const stop = gone.start();
+      await settle(60);
+      expect(vi.getTimerCount()).toBe(1);
+      stop();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("keeps a failed repository's rows as they were, and says it could not read it", async () => {

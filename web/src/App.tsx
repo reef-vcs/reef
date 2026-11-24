@@ -4,9 +4,10 @@
 // (R3.33) above the overview, which is in the entry chunk; every other page
 // is its own (R2.21), and the repository pages share a frame keyed by the
 // repository.
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { client, type Connection } from "./api/connection";
 import { isSessionInvalid, REMOTE_ORIGIN_CHANGED, reefError, type ReefError } from "./api/errors";
+import { useResumes } from "./api/streams";
 import { device, endDevice } from "./device";
 import { DaemonService, type GetDaemonStatusResponse } from "./gen/reef/api/v1/daemon_pb";
 import { animationFrame, type FrameScheduler } from "./live/frame";
@@ -55,13 +56,16 @@ function repoRoute(path: string): { repo: string; page: RepoPage; change: string
 function useDaemonStatus(connection: Connection, onSessionInvalid: () => void) {
   const [status, setStatus] = useState<GetDaemonStatusResponse | null>(null);
   const [error, setError] = useState<ReefError | null>(null);
+  const resumes = useResumes(connection);
   useEffect(() => {
     let current = true;
     client(connection, DaemonService)
       .getDaemonStatus({})
       .then(
         (response) => {
-          if (current) setStatus(response);
+          if (!current) return;
+          setStatus(response);
+          setError(null);
         },
         (thrown: unknown) => {
           if (!current) return;
@@ -73,8 +77,17 @@ function useDaemonStatus(connection: Connection, onSessionInvalid: () => void) {
     return () => {
       current = false;
     };
-  }, [connection, onSessionInvalid]);
+  }, [connection, resumes, onSessionInvalid]);
   return { status, error };
+}
+
+/** Why the daemon refuses this tab's streams, while it does. */
+function Refusal({ live }: { live: Live }) {
+  const refusal = useSyncExternalStore(
+    (listener) => live.subscribeState(listener),
+    () => live.refusal,
+  );
+  return refusal && <ErrorView error={refusal} />;
 }
 
 function Shell({
@@ -125,6 +138,7 @@ function Shell({
           onStrip={setStrip}
         />
         <main>
+          <Refusal live={live} />
           {error && <ErrorView error={error} />}
           {path === "/" ? (
             <Overview
