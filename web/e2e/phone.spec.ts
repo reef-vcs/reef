@@ -390,7 +390,6 @@ async function withMortalConnection(
   browser: Browser,
   reef: Reef,
   run: (page: Page, proxy: FreezingProxy) => Promise<void>,
-  before: (page: Page) => unknown = () => undefined,
 ) {
   const proxy = new FreezingProxy();
   const through = await proxy.listen();
@@ -405,7 +404,6 @@ async function withMortalConnection(
   try {
     const page = await context.newPage();
     await page.clock.install();
-    await before(page);
     await pairBrowser(page, reef);
     await expect(page.locator(".connection")).toHaveText("Live");
     await run(page, proxy);
@@ -581,50 +579,57 @@ test("a row tapped on a dead connection opens its proposal with no second tap", 
 }) => {
   test.skip(browserName === "firefox", NOT_FIREFOX);
   await needYou(reef);
-  const loaded: string[] = [];
-  await withMortalConnection(
-    browser,
-    reef,
-    async (page, proxy) => {
-      await test.step("its code here ahead, and never shown", async () => {
-        await expect.poll(() => loaded.join(" ")).toContain("/Proposal-");
-        await tapDead(page, proxy);
-        await proposalIsShown(page);
-      });
-      await test.step("again", async () => {
-        await page.getByRole("link", { name: "Reef", exact: true }).click();
-        await tapDead(page, proxy);
-        await proposalIsShown(page);
-      });
-    },
-    (page) => {
-      page.on("requestfinished", (request) => loaded.push(request.url()));
-    },
-  );
+  await withMortalConnection(browser, reef, async (page, proxy) => {
+    await test.step("the first time", async () => {
+      await tapDead(page, proxy);
+      await proposalIsShown(page);
+    });
+    await test.step("again", async () => {
+      await page.getByRole("link", { name: "Reef", exact: true }).click();
+      await tapDead(page, proxy);
+      await proposalIsShown(page);
+    });
+  });
 });
 
-test("a page whose code hangs on a dead connection offers a reload, and opens with it", async ({
+test("an app whose script does not come says so, and its link opens the page", async ({
   browser,
   browserName,
   reef,
 }) => {
   test.skip(browserName === "firefox", NOT_FIREFOX);
   await needYou(reef);
-  let asked = 0;
-  await withMortalConnection(
-    browser,
-    reef,
-    async (page, proxy) => {
-      // Loading ahead asked for it, and it never comes.
-      await expect.poll(() => asked).toBe(1);
-      await tapDead(page, proxy);
-      const reload = page.getByRole("main").getByRole("button", { name: "Reload" });
-      await expect(reload).toBeVisible({ timeout: 12_000 });
-      await noSidewaysScroll(page, "a page that takes long to load");
-      await reload.click();
-      await proposalIsShown(page);
-    },
-    (page) =>
-      page.route(/\/assets\/RepoFrame/, (route) => (asked++ === 0 ? undefined : route.continue())),
-  );
+  const origin = await reef.serveRemote();
+  const context = await browser.newContext({
+    ignoreHTTPSErrors: true,
+    viewport: { width: 375, height: 812 },
+    baseURL: origin,
+  });
+  try {
+    const page = await context.newPage();
+    await pairBrowser(page, reef);
+    await openProposal(page);
+    await expect(page.getByText("Loading Reef.")).toHaveCount(0);
+    for (const how of ["hangs", "fails"]) {
+      await test.step(`one that ${how}`, async () => {
+        const cold = await context.newPage();
+        let asked = 0;
+        await cold.route(/\/assets\/index-.*\.js$/, (route) => {
+          if (asked++ > 0) return route.continue();
+          return how === "hangs" ? undefined : route.abort();
+        });
+        await cold.goto(page.url(), { waitUntil: "commit" });
+        await expect.poll(() => asked).toBe(1);
+        await expect(cold.getByText("Loading Reef.")).toBeHidden();
+        await expect(cold.getByText("Loading Reef.")).toBeVisible({ timeout: 15_000 });
+        await noSidewaysScroll(cold, "an app whose script does not come");
+        await cold.getByRole("link", { name: "Load it again" }).click();
+        await proposalIsShown(cold);
+        await expect(cold.getByText("Loading Reef.")).toHaveCount(0);
+        await cold.close();
+      });
+    }
+  } finally {
+    await context.close();
+  }
 });

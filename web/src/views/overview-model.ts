@@ -190,6 +190,7 @@ export class OverviewModel {
           if (this.isStopped() || generation !== this.generation) return;
           for (const operation of page.operations) this.fold(operation);
           this.latestErrors.delete(repo);
+          if (this.latestErrors.size === 0) this.backoff.reset();
         } catch (thrown) {
           if (this.isStopped() || generation !== this.generation) return;
           this.listed.delete(repo);

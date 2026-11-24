@@ -766,6 +766,21 @@ input {
 }
 
 /* Errors: neutral, with a left edge and the fix as commands. */
+/* index.html's words until the app renders: shown after 10 s. */
+.starting {
+  padding: 16px;
+  opacity: 0;
+  visibility: hidden;
+  animation: starting 0s 10s forwards;
+}
+
+@keyframes starting {
+  to {
+    opacity: 1;
+    visibility: visible;
+  }
+}
+
 .error {
   border: 1px solid var(--border);
   border-left: 3px solid var(--text-secondary);

@@ -123,6 +123,8 @@ export class FakeFleetDaemon {
   readonly getCalls: GetWorkspaceRequest[] = [];
   readonly repositoryCalls: GetRepositoryRequest[] = [];
   readonly statusCalls: GetDaemonStatusRequest[] = [];
+  /** What the status's answer waits for. */
+  holdStatus: Promise<void> | undefined;
   readonly operationCalls: GetOperationRequest[] = [];
 
   connection(): Connection {
@@ -137,8 +139,9 @@ export class FakeFleetDaemon {
         },
       });
       service(DaemonService, {
-        getDaemonStatus: (request) => {
+        getDaemonStatus: async (request) => {
           this.statusCalls.push(request);
+          await this.holdStatus;
           return create(GetDaemonStatusResponseSchema, {
             version: "0.2.0",
             uptimeMs: BigInt(this.uptimeMs),

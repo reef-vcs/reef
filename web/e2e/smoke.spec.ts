@@ -249,7 +249,7 @@ test("smoke", async ({ reef, context, page }) => {
     };
     const feed = (p: Page) => p.getByRole("table", { name: "Activity" });
 
-    // The first visit loads the page's own chunk.
+    // The app is one script: a page loads none of its own.
     const scripts: string[] = [];
     const onRequest = (request: Request) => {
       if (/\/assets\/.+\.js$/.test(new URL(request.url()).pathname)) scripts.push(request.url());
@@ -262,10 +262,7 @@ test("smoke", async ({ reef, context, page }) => {
     await expect(page).toHaveURL(`${url}repos/${repo}/activity`);
     await expect(feed(page)).toBeVisible();
     page.off("request", onRequest);
-    expect(
-      scripts.some((s) => /\/Activity-[^/]+\.js$/.test(s)),
-      "the feed's chunk",
-    ).toBe(true);
+    expect(scripts).toEqual([]);
     await expect.poll(async () => (await total(page)) - (await cliTotal())).toBe(0);
 
     // Three writes, each snapshotted for e2e-feed: one row by e2e-feed in

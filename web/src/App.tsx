@@ -1,9 +1,9 @@
 // The app shell: the app bar and the routes over one connection and one live
 // layer. Without a session, or once the daemon refuses it, every route is
 // the no-session page. The home page is the inbox across every repository
-// (R3.33) above the overview, which is in the entry chunk; every other page
-// is its own (R2.21), and the repository pages share a frame keyed by the
-// repository.
+// (R3.33) above the overview, and the repository pages share a frame keyed by
+// the repository. All of it is one file (R3.40): nothing is asked of the
+// network after it but the API.
 import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { client, type Connection } from "./api/connection";
 import { isSessionInvalid, REMOTE_ORIGIN_CHANGED, reefError, type ReefError } from "./api/errors";
@@ -16,19 +16,17 @@ import { endSession, SESSION_KEY, storedSession } from "./session";
 import { AppBar } from "./ui/AppBar";
 import { ErrorView } from "./ui/ErrorView";
 import { HeaderSlots } from "./ui/header-slots";
-import { lazyRoute, loadAhead } from "./ui/lazy-route";
 import type { RepoPage } from "./ui/RepoNav";
 import { match, navigate, usePath, useSearch } from "./ui/router";
+import { Approve } from "./views/Approve";
 import { inboxHref } from "./views/inbox-route";
 import { ItemLink } from "./views/ItemLink";
 import { NoSession } from "./views/NoSession";
 import { NotFound } from "./views/NotFound";
 import { Overview } from "./views/Overview";
-
-const RepoFrame = lazyRoute(() => import("./views/RepoFrame").then((m) => m.RepoFrame));
-const States = lazyRoute(() => import("./views/States").then((m) => m.States));
-const Passkeys = lazyRoute(() => import("./views/Passkeys").then((m) => m.Passkeys));
-const Approve = lazyRoute(() => import("./views/Approve").then((m) => m.Approve));
+import { Passkeys } from "./views/Passkeys";
+import { RepoFrame } from "./views/RepoFrame";
+import { States } from "./views/States";
 
 const REPO_PAGES: [string, RepoPage][] = [
   ["/repos/:repo/smartlog", "smartlog"],
@@ -114,11 +112,6 @@ function Shell({
   useEffect(() => {
     if (oldTab) navigate(inboxHref({ repo: oldTab }), { replace: true });
   }, [oldTab]);
-  // The remote listener's page: a phone's connection may be dead when it is tapped.
-  useEffect(
-    () => (location.protocol === "https:" ? loadAhead(connection) : undefined),
-    [connection],
-  );
   // The app bar's slots, for the repository frame's portals (ui/header-slots).
   const [crumb, setCrumb] = useState<HTMLElement | null>(null);
   const [tabs, setTabs] = useState<HTMLElement | null>(null);

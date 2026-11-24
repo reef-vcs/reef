@@ -656,3 +656,18 @@ impl InboxService for InboxHandler {
         Ok(Response::new(MarkInboxSeenResponse { marks }))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_errors_message_is_cut_between_characters() {
+        let long = inbox_error(&Status::unavailable(format!("x{}", "ö".repeat(1 << 10))));
+        assert_eq!(long.message, format!("x{}", "ö".repeat(511)));
+        let exact = inbox_error(&Status::unavailable("ö".repeat(512)));
+        assert_eq!(exact.message.len(), MAX_ERROR);
+        let short = inbox_error(&Status::unavailable("it is not open"));
+        assert_eq!(short.message, "it is not open");
+    }
+}

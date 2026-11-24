@@ -129,6 +129,7 @@ export class FleetModel {
   private readonly paced: Paced;
   /** Re-reads the workspaces listed as releasing until one is not (#212). */
   private readonly settling: Paced;
+  private readonly status: Paced;
   /** As the route gave it. */
   private readonly repo: string;
   /** The full id, once `GetRepository` answered. */
@@ -145,6 +146,8 @@ export class FleetModel {
   private requested = false;
   private waiting = false;
   private stopped = false;
+  /** `readAt` is under way. */
+  private reading = false;
   private uptimeMs: number | undefined;
   /** When the uptime was read, by this tab's clock: only the time since is used. */
   private uptimeReadAt = 0;
@@ -169,6 +172,7 @@ export class FleetModel {
     this.notifier = new FrameNotifier(frame);
     this.paced = new Paced(() => this.refresh(), now);
     this.settling = new Paced(() => this.settle(), now);
+    this.status = new Paced(() => this.readStatus(), now);
     this.repo = options.repo;
     this.at = options.at || undefined;
     this.disk = new DiskScheduler(
@@ -212,7 +216,7 @@ export class FleetModel {
     if (this.frozen) {
       void this.readAt();
       const unsubscribeResume = streamsOf(this.connection).onResume(() => {
-        if (this.snapshot.error) void this.readAt();
+        if (this.snapshot.error && !this.reading) void this.readAt();
       });
       return () => {
         this.stopped = true;
@@ -239,6 +243,7 @@ export class FleetModel {
       unsubscribePresence();
       this.paced.stop();
       this.settling.stop();
+      this.status.stop();
       this.disk.stop();
       this.closeWindow?.();
     };
@@ -330,7 +335,7 @@ export class FleetModel {
       // A new subscription: the daemon may have restarted, so the restart
       // window is read again (only once the repository is known).
       this.resyncs = this.presence.resyncs;
-      if (this.started) void this.readStatus();
+      if (this.started) this.status.request();
     }
     if (!this.presence.synced) return;
     const repoId = this.repoId;
@@ -432,18 +437,19 @@ export class FleetModel {
     }
   }
 
-  private async readStatus() {
+  private async readStatus(): Promise<boolean> {
     try {
       const status = await client(this.connection, DaemonService).getDaemonStatus({
         skipBackends: true,
       });
-      if (this.isStopped()) return;
+      if (this.isStopped()) return true;
       this.uptimeMs = Number(status.uptimeMs);
       this.uptimeReadAt = this.now();
       this.windowDecided = false;
       this.decideWindow();
+      return true;
     } catch (thrown) {
-      this.fail(thrown);
+      return this.fail(thrown);
     }
   }
 
@@ -472,6 +478,7 @@ export class FleetModel {
   }
 
   private async readAt() {
+    this.reading = true;
     try {
       const response = await client(this.connection, OperationService).getOperation({
         repo: this.repo,
@@ -489,6 +496,8 @@ export class FleetModel {
       await this.apply(workspaces.workspaces, workspaces.more, changes, false);
     } catch (thrown) {
       this.fail(thrown);
+    } finally {
+      this.reading = false;
     }
   }
 

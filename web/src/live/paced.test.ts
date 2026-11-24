@@ -100,6 +100,12 @@ describe("Paced", () => {
     expect(state.starts).toBe(1);
     gated.shift()?.();
     expect(state.starts).toBe(2);
+    await finish();
+    paced.request();
+    vi.advanceTimersByTime(MIN_SPACING_MS);
+    paced.stop();
+    gated.shift()?.();
+    expect(state.starts).toBe(2);
   });
 
   it("records no start for a run that did not start, and nothing after stop", async () => {
@@ -158,8 +164,11 @@ describe("Paced", () => {
     paced.request();
     await finish();
     vi.setSystemTime(Date.now() - 3_600_000);
-    paced.request();
-    vi.advanceTimersByTime(MAX_SPACING_MS);
+    // However often it is asked for meanwhile.
+    for (let i = 0; i < 10; i++) {
+      paced.request();
+      vi.advanceTimersByTime(MAX_SPACING_MS / 10);
+    }
     expect(state.starts).toBe(2);
   });
 
@@ -171,9 +180,7 @@ describe("Paced", () => {
     vi.setSystemTime(Date.now() + 3_600_000);
     for (const wait of [100, 200, 400, 800, 1_600, 3_200, 6_400, 12_800, 25_600, 30_000, 30_000]) {
       const before = state.starts;
-      paced.request();
       await finish(false);
-      paced.request();
       vi.advanceTimersByTime(wait - 1);
       expect(state.starts).toBe(before);
       vi.advanceTimersByTime(1);
@@ -187,6 +194,33 @@ describe("Paced", () => {
     await finish(false);
     vi.advanceTimersByTime(Backoff.FIRST_MS);
     expect(state.starts).toBe(14);
+  });
+
+  it("is asked for during the backoff spaced as ever, and the backoff is off", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    const { state, run, finish } = runs();
+    const paced = new Paced(run);
+    paced.request();
+    // Failing for a minute: the next is 30 s away, and each took a while.
+    for (let i = 0; i < 12; i++) {
+      vi.setSystemTime(Date.now() + 5_000);
+      await finish(false);
+      vi.advanceTimersByTime(Backoff.PAGE_MS);
+    }
+    const before = state.starts;
+    vi.setSystemTime(Date.now() + 5_000);
+    await finish(false);
+    paced.request();
+    expect(state.starts).toBe(before + 1);
+    await finish();
+    vi.advanceTimersByTime(60_000);
+    expect(state.starts).toBe(before + 1);
+    // Asked for during one that no answer comes to: spaced, not backed off.
+    paced.request();
+    paced.request();
+    await finish(false);
+    vi.advanceTimersByTime(MIN_SPACING_MS);
+    expect(state.starts).toBe(before + 3);
   });
 
   it("runs at once when asked to after a run no answer came to, and once", async () => {

@@ -23,7 +23,7 @@ export function spacing(started: number, duration: number, now: number): number 
  * What a run does. It returns undefined when it did not start (say, the
  * stream is not live), which records no start and no duration, and resolves
  * to false when it was not answered (`isPassing`), and is then run again after
- * the backoff, whatever it took.
+ * the backoff, or as soon as one is asked for, spaced as ever.
  */
 export type Run = () => Promise<boolean> | undefined;
 
@@ -36,6 +36,8 @@ export class Paced {
   /** The run asked for during this one was the user's: not spaced. */
   private againNow = false;
   private pending: Cancel | undefined;
+  /** The backoff after a run no answer came to: one that is asked for takes its place. */
+  private retry: Cancel | undefined;
   private stopped = false;
   private lastStart = Number.NEGATIVE_INFINITY;
   private lastDuration = 0;
@@ -62,9 +64,10 @@ export class Paced {
       return;
     }
     if (this.pending) return;
+    this.cancel();
     const wait = spacing(this.lastStart, this.lastDuration, this.now());
     if (wait <= 0) void this.start();
-    else this.startIn(wait);
+    else this.pending = this.startIn(wait);
   }
 
   /**
@@ -73,8 +76,7 @@ export class Paced {
    */
   requestNow() {
     if (this.stopped) return;
-    this.pending?.();
-    this.pending = undefined;
+    this.cancel();
     if (this.loading) {
       this.again = true;
       this.againNow = true;
@@ -83,13 +85,22 @@ export class Paced {
 
   stop() {
     this.stopped = true;
-    this.pending?.();
-    this.pending = undefined;
+    this.cancel();
   }
 
-  private startIn(ms: number) {
-    if (this.stopped) return;
-    this.pending = after(ms, () => {
+  /** A call, so TypeScript does not narrow `stopped` across an await. */
+  private isStopped(): boolean {
+    return this.stopped;
+  }
+
+  private cancel() {
+    this.pending?.();
+    this.pending = undefined;
+    this.retry?.();
+  }
+
+  private startIn(ms: number): Cancel {
+    return after(ms, () => {
       this.pending = undefined;
       this.gate(() => void this.start());
     });
@@ -107,15 +118,15 @@ export class Paced {
       answered = await work;
     } finally {
       this.loading = false;
-      this.lastDuration = this.now() - started;
+      this.lastDuration = answered ? this.now() - started : 0;
       if (answered) this.backoff.reset();
       const now = this.againNow;
       const again = this.again;
       this.again = false;
       this.againNow = false;
       if (now) void this.start();
-      else if (!answered) this.startIn(this.backoff.next());
       else if (again) this.request();
+      else if (!answered && !this.isStopped()) this.retry = this.startIn(this.backoff.next());
     }
   }
 }

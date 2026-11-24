@@ -13,6 +13,7 @@ import {
   type WatchInboxResponse,
 } from "../gen/reef/api/v1/inbox_pb";
 import { OperationService } from "../gen/reef/api/v1/operations_pb";
+import { PolicyDecision } from "../gen/reef/api/v1/policy_pb";
 import { RepositoryService } from "../gen/reef/api/v1/repositories_pb";
 import { sleep } from "../live/backoff";
 import { InboxStore } from "../live/inbox";
@@ -683,6 +684,151 @@ describe("while the streams are live, what the daemon is too busy to answer", ()
     expect(screen.queryByText("too many open")).toBeNull();
   });
 
+  it.each([
+    ["listIdentities", "Passkeys"],
+    ["getApproval", "Approve"],
+    ["listEvidence", "SignOff"],
+    ["getIdentity", "Signer"],
+  ])(
+    "%s says so when it holds nothing, and a refusal takes the place of what it holds",
+    async (only, page) => {
+      const daemon = new IdentityDaemon();
+      daemon.passkeys = [passkey(daemon.arsood, "MacBook Touch ID", 1)];
+      const approval = await daemon.pending();
+      const line = busy(daemon.connection());
+      line.only = only;
+      line.state = "failing";
+      const common = { connection: line.connection, onSessionInvalid: ended };
+      const change = create(ChangeSchema, { changeId: CHANGE, commitId: COMMIT, treeId: TREE });
+      render(
+        page === "Passkeys" ? (
+          <Passkeys {...common} />
+        ) : page === "Approve" ? (
+          <Approve id={approval.id} {...common} />
+        ) : (
+          <SignOff repo={REPO} change={change} {...common} />
+        ),
+      );
+      await flush();
+      expect(screen.getByText("too many open")).toBeTruthy();
+      line.state = "alive";
+      await pass(1_000);
+      expect(screen.queryByText("too many open")).toBeNull();
+      line.state = "failing";
+      line.error = daemonError(
+        Code.PermissionDenied,
+        { reason: "REMOTE_ACCESS_DENIED" },
+        "no more",
+      );
+      line.back();
+      await flush();
+      expect(screen.getByText("no more")).toBeTruthy();
+      if (page === "Signer") return;
+      expect(screen.queryByText(/MacBook Touch ID|No sign-offs yet/)).toBeNull();
+      expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+    },
+  );
+
+  it("the change an approval is for, and those below it, stay and are read again", async () => {
+    const daemon = new IdentityDaemon();
+    daemon.below = ["Add the lease clock"];
+    const approval = await daemon.pending();
+    const line = busy(daemon.connection());
+    render(<Approve connection={line.connection} id={approval.id} onSessionInvalid={ended} />);
+    await flush();
+    const shown = () =>
+      [/Fix the lease renewal race/, /Add the lease clock/].map((text) =>
+        text.test(document.body.textContent),
+      );
+    expect(shown()).toEqual([true, true]);
+    line.state = "failing";
+    line.back();
+    await pass(10_000);
+    expect(shown()).toEqual([true, true]);
+    expect(line.calls.filter((call) => call === "getChange").length).toBeGreaterThan(3);
+    expect(line.calls.filter((call) => call === "listChanges").length).toBeGreaterThan(3);
+    line.error = daemonError(Code.NotFound, { reason: "CHANGE_NOT_FOUND" }, "no such change");
+    for (const [only, left] of [
+      ["getChange", [false, true]],
+      ["listChanges", [true, false]],
+    ] as const) {
+      line.state = "alive";
+      line.back();
+      await flush();
+      expect(shown()).toEqual([true, true]);
+      line.state = "failing";
+      line.only = only;
+      line.back();
+      await flush();
+      expect(shown()).toEqual(left);
+    }
+  });
+
+  it("an approval that ended is read no more, and keeps how it ended", async () => {
+    const daemon = new IdentityDaemon();
+    const approval = await daemon.pending();
+    const line = new Dying(daemon.connection());
+    render(<Approve connection={line.connection} id={approval.id} onSessionInvalid={ended} />);
+    await flush();
+    await act(() => {
+      screen.getByRole("button", { name: "Decline" }).click();
+    });
+    await flush();
+    expect(screen.getByText("Declined. Nothing was approved.")).toBeTruthy();
+    // The daemon forgets it after 2 minutes.
+    daemon.approvals.clear();
+    daemon.fail.getApproval = daemonError(Code.NotFound, { reason: "APPROVAL_NOT_FOUND" });
+    line.calls.length = 0;
+    line.back();
+    await flush(HOUR);
+    expect(line.calls).not.toContain("getApproval");
+    expect(screen.getByText("Declined. Nothing was approved.")).toBeTruthy();
+  });
+
+  it("a proposal's verdict stays, with why it was not read, until another is", async () => {
+    const daemon = new ProposalDaemon();
+    daemon.evaluation.decision = PolicyDecision.BLOCK;
+    const line = busy(daemon.connection());
+    line.only = "evaluatePolicy";
+    render(
+      <Proposal
+        repo={REPO}
+        change={CHANGE}
+        connection={line.connection}
+        live={liveStores() as unknown as Live}
+        {...common}
+      />,
+    );
+    await flush();
+    expect(screen.getByText("The policy blocks it.")).toBeTruthy();
+    line.state = "failing";
+    line.back();
+    await flush();
+    expect(screen.getByText("The policy blocks it.")).toBeTruthy();
+    expect(screen.getByText("too many open")).toBeTruthy();
+    daemon.evaluation.decision = PolicyDecision.ALLOW;
+    line.state = "alive";
+    await flush(1_000);
+    expect(screen.getByText("The policy allows it to land.")).toBeTruthy();
+    expect(screen.queryByText("too many open")).toBeNull();
+    // Another commit's verdict is not this one's, nor does one stand over a refusal.
+    line.state = "failing";
+    daemon.entries = [proposal(CHANGE, "d".repeat(40), "Fix the race another way")];
+    line.back();
+    await flush();
+    expect(screen.queryByText("The policy allows it to land.")).toBeNull();
+    line.state = "alive";
+    line.back();
+    await flush();
+    expect(screen.getByText("The policy allows it to land.")).toBeTruthy();
+    line.state = "failing";
+    line.error = daemonError(Code.FailedPrecondition, { reason: "INVALID_POLICY" }, "bad policy");
+    line.back();
+    await flush();
+    expect(screen.queryByText("The policy allows it to land.")).toBeNull();
+    expect(screen.getByText("bad policy")).toBeTruthy();
+  });
+
   it("an approval that is shown stays, and is read again", async () => {
     const daemon = new IdentityDaemon();
     const approval = await daemon.pending();
@@ -778,25 +924,6 @@ describe("the app", () => {
     await flush();
     expect(document.querySelector(".connection")?.textContent).toBe("Reconnecting");
     expect(screen.queryByRole("alert")).toBeNull();
-  });
-
-  it.each([
-    ["http:", 0],
-    ["https:", 1],
-  ])("over %s loads its pages ahead, or not", async (protocol, ahead) => {
-    vi.stubGlobal("location", { protocol, pathname: "/states", search: "", hash: "" });
-    const line = new Dying(new FakeStreams().connection());
-    const before = line.held;
-    render(
-      <App
-        session={{ connection: line.connection, token: "tok" }}
-        environment={environment(immediateFrames)}
-      />,
-    );
-    await flush();
-    expect(line.held - before).toBe(1 + ahead);
-    cleanup();
-    vi.unstubAllGlobals();
   });
 
   it("reads the daemon's status again when the streams are live again", async () => {

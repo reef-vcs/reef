@@ -21,13 +21,7 @@
 // is shown in its section and does not fail the page.
 import { Code } from "@connectrpc/connect";
 import { client, type Connection } from "../api/connection";
-import {
-  isPassing,
-  isSessionInvalid,
-  isUnanswered,
-  reefError,
-  type ReefError,
-} from "../api/errors";
+import { isPassing, isSessionInvalid, reefError, type ReefError } from "../api/errors";
 import { streamsOf } from "../api/streams";
 import { AutomaticState, ChangeService, type ProposalEntry } from "../gen/reef/api/v1/changes_pb";
 import { CommentService, type Comment } from "../gen/reef/api/v1/comments_pb";
@@ -386,14 +380,21 @@ export class ProposalModel extends RepoReader<ProposalSnapshot> {
       }),
     ]);
     if (this.isStopped()) return true;
+    // A verdict no answer came for this time: the last one of this commit stands.
+    const { policyError } = policyRead;
+    const last = this.snapshot.read;
+    const held =
+      policyError && isPassing(policyError) && last?.entry.change?.commitId === commit
+        ? last
+        : null;
     const members = new Map(stack.entries.map((e) => [e.changeId, e]));
     this.update({
       read: {
         entry,
         stack: below.map((id) => ({ changeId: id, entry: members.get(id) })),
-        evaluation: policyRead.evaluation,
-        members: policyRead.members,
-        policyError: policyRead.policyError,
+        evaluation: (held ?? policyRead).evaluation,
+        members: (held ?? policyRead).members,
+        policyError,
         evidence: evidence.evidence,
         comments: comments.comments,
         moreComments: comments.more,
@@ -403,6 +404,6 @@ export class ProposalModel extends RepoReader<ProposalSnapshot> {
       error: null,
       fatal: null,
     });
-    return !(policyRead.policyError && isUnanswered(policyRead.policyError));
+    return !(policyError && isPassing(policyError));
   }
 }

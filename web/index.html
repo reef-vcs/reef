@@ -10,7 +10,10 @@
     <title>Reef</title>
   </head>
   <body>
-    <div id="root"></div>
+    <!-- Until the app renders. Late, so that no load that goes well shows it. -->
+    <div id="root">
+      <p class="starting">Loading Reef. <a href="">Load it again</a> if it does not come.</p>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

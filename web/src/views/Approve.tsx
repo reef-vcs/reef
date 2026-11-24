@@ -39,8 +39,11 @@ type Action =
 function useApproval(connection: Connection, id: string, onSessionInvalid: () => void) {
   const [load, setLoad] = useState<Load>({ kind: "loading" });
   const [error, setError] = useState<ReefError | null>(null);
+  // One that ended changes no more, and the daemon forgets it after 2 minutes.
+  const over = load.kind === "loaded" && load.approval.state !== ApprovalState.PENDING;
   const again = useAgain(connection, error, true);
   useEffect(() => {
+    if (over) return;
     const controller = new AbortController();
     const identities = client(connection, IdentityService);
     void (async () => {
@@ -71,7 +74,7 @@ function useApproval(connection: Connection, id: string, onSessionInvalid: () =>
     return () => {
       controller.abort();
     };
-  }, [connection, again, id, onSessionInvalid]);
+  }, [connection, again, over, id, onSessionInvalid]);
   return [load, setLoad] as const;
 }
 
@@ -80,7 +83,8 @@ function useChange(connection: Connection, approval: Approval | null) {
   const repo = approval?.repoId ?? "";
   const commit = approval?.commitId ?? "";
   const [change, setChange] = useState<{ commit: string; change: Change | null } | null>(null);
-  const again = useAgain(connection, null, true);
+  const [error, setError] = useState<ReefError | null>(null);
+  const again = useAgain(connection, error, true);
   useEffect(() => {
     if (!commit) return;
     let current = true;
@@ -88,10 +92,17 @@ function useChange(connection: Connection, approval: Approval | null) {
       .getChange({ repo, revision: commit, skipSnapshot: true })
       .then(
         (response) => {
-          if (current) setChange({ commit, change: response.change ?? null });
+          if (!current) return;
+          setError(null);
+          setChange({ commit, change: response.change ?? null });
         },
-        () => {
-          if (current) setChange({ commit, change: null });
+        (thrown: unknown) => {
+          if (!current) return;
+          const error = reefError(thrown);
+          setError(error);
+          setChange((held) =>
+            held?.commit === commit && isPassing(error) ? held : { commit, change: null },
+          );
         },
       );
     return () => {
@@ -113,7 +124,8 @@ function useBelow(connection: Connection, approval: Approval | null) {
   const repo = approval?.repoId ?? "";
   const commit = approval?.commitId ?? "";
   const [below, setBelow] = useState<{ commit: string; changes: Change[] | null } | null>(null);
-  const again = useAgain(connection, null, true);
+  const [error, setError] = useState<ReefError | null>(null);
+  const again = useAgain(connection, error, true);
   useEffect(() => {
     if (!commit) return;
     let current = true;
@@ -127,10 +139,17 @@ function useBelow(connection: Connection, approval: Approval | null) {
       .then(
         ({ entries }) => {
           const changes = entries.flatMap((entry) => (entry.change ? [entry.change] : []));
-          if (current) setBelow({ commit, changes });
+          if (!current) return;
+          setError(null);
+          setBelow({ commit, changes });
         },
-        () => {
-          if (current) setBelow({ commit, changes: null });
+        (thrown: unknown) => {
+          if (!current) return;
+          const error = reefError(thrown);
+          setError(error);
+          setBelow((held) =>
+            held?.commit === commit && isPassing(error) ? held : { commit, changes: null },
+          );
         },
       );
     return () => {
@@ -322,7 +341,7 @@ export function Approve({
         <h1>No such approval</h1>
         <p>
           The daemon holds no approval <span className="mono">{id}</span>. It ended over 2 minutes
-          ago, the daemon restarted, or it was never requested. Nothing was approved.
+          ago, the daemon restarted, or it was never requested.
         </p>
       </section>
     );

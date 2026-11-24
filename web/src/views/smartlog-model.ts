@@ -120,6 +120,8 @@ export class SmartlogModel {
   private revealing = false;
   private readonly paced: Paced;
   private stopped = false;
+  /** `readAt` is under way. */
+  private reading = false;
   /** As the route gave it: an id, a prefix or a path. */
   private readonly repo: string;
   /** The full id, once a read has resolved it: what operations and presence carry. */
@@ -168,7 +170,7 @@ export class SmartlogModel {
     if (this.frozen) {
       void this.readAt();
       const unsubscribeResume = streamsOf(this.connection).onResume(() => {
-        if (this.snapshot.error) void this.readAt();
+        if (this.snapshot.error && !this.reading) void this.readAt();
       });
       return () => {
         this.stopped = true;
@@ -294,6 +296,7 @@ export class SmartlogModel {
 
   private async readAt() {
     const revset = this.revset;
+    this.reading = true;
     try {
       const response = await client(this.connection, OperationService).getOperation({
         repo: this.repo,
@@ -307,6 +310,8 @@ export class SmartlogModel {
       this.apply(read, { live: false, frozenAt: operation });
     } catch (thrown) {
       this.fail(thrown);
+    } finally {
+      this.reading = false;
     }
   }
 

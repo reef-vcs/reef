@@ -21,6 +21,7 @@ import {
   sessionInvalid,
   settle,
 } from "../test/fakes";
+import { Dying } from "../test/dying";
 import { change, FakeFleetDaemon, REPO, T, workspace } from "../test/fleet-daemon";
 import { FleetModel, REPOSITORY_NOT_FOUND } from "./fleet-model";
 
@@ -468,6 +469,55 @@ describe("FleetModel", () => {
     await flush();
     expect(t.daemon.statusCalls).toHaveLength(2);
     expect(t.model.getSnapshot().restarting).toBe(true);
+  });
+
+  it("has one read of the status under way, however often presence starts over", async () => {
+    const daemon = withTwo();
+    const t = setup({ daemon });
+    await flush();
+    let answer = () => {};
+    daemon.holdStatus = new Promise<void>((give) => {
+      answer = give;
+    });
+    for (let i = 0; i < 200; i++) {
+      t.presence.beginResync();
+      await flush(1_000);
+    }
+    expect(daemon.statusCalls).toHaveLength(2);
+    daemon.holdStatus = undefined;
+    answer();
+    await flush(10_000);
+    expect(daemon.statusCalls, "and one for those asked for meanwhile").toHaveLength(3);
+    t.presence.beginResync();
+    t.stop();
+    await flush(60_000);
+    expect(daemon.statusCalls).toHaveLength(3);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("at an operation, reads again once at a time", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    const daemon = withTwo();
+    const line = new Dying(daemon.connection());
+    line.state = "failing";
+    const model = new FleetModel(
+      line.connection,
+      new OperationStore(immediateFrames),
+      new PresenceStore(immediateFrames),
+      immediateFrames,
+      vi.fn(),
+      { repo: REPO, at: "op1" },
+    );
+    const stop = model.start();
+    await flush();
+    line.state = "hung";
+    line.calls.length = 0;
+    for (let i = 0; i < 5; i++) {
+      line.back();
+      await flush();
+    }
+    expect(line.calls).toHaveLength(1);
+    stop();
   });
 
   it("keeps the last rows on an error, and retries on the next operation", async () => {

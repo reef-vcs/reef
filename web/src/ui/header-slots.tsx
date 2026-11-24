@@ -1,6 +1,6 @@
 // The app bar's slots (the design pass). The shell owns the one sticky
-// header but not the repository's name, which the repository frame (a lazy
-// chunk) reads; the frame portals its crumb, tabs and scrubber into these
+// header but not the repository's name, which the repository frame
+// reads; the frame portals its crumb, tabs and scrubber into these
 // slots. Without a provider (a frame rendered alone in a test) the parts
 // render in place.
 import { createContext, type ReactNode, useContext } from "react";

@@ -11,7 +11,7 @@ import { MAX_DOUBLINGS, SILENT_MS } from "../live/silence";
 import { settle } from "../test/fakes";
 import { browserConnection, client } from "./connection";
 import { reefError } from "./errors";
-import { TRIES } from "./steady";
+import { MOST, TRIES } from "./steady";
 import { streamsOf } from "./streams";
 
 const SECOND = 1_000;
@@ -233,25 +233,55 @@ describe("a read the connection failed", () => {
 
 describe("a read that hangs", () => {
   it("is not sent for a page that wants it no more already", async () => {
-    const { read, sent, connection, held } = page();
+    const { read, sent, held } = page();
     const ended = read(AbortSignal.abort());
     await flush();
     expect(sent.filter(({ signal }) => !signal.aborted)).toEqual([]);
     await pass(60 * SECOND);
     expect(ended.code).toBeDefined();
-    expect(streamsOf(connection).reads).toBe(0);
     expect(held.listeners).toBe(0);
   });
 
-  it("is counted while it is under way", async () => {
-    const { read, sent, connection } = page();
-    read();
-    read();
+  it("is held with 31 others at most, the oldest failing for one more", async () => {
+    const { read, sent, held, streams } = page();
+    streams.change(false);
+    const ends = Array.from({ length: MOST + 10 }, () => read());
     await flush();
-    expect(streamsOf(connection).reads).toBe(2);
+    expect(ends.map(({ code }) => code !== undefined)).toEqual([
+      ...Array.from({ length: 10 }, () => true),
+      ...Array.from({ length: MOST }, () => false),
+    ]);
+    expect(sent.filter(({ signal }) => !signal.aborted)).toHaveLength(MOST);
     for (const { answer: reply } of sent) reply(answer());
     await flush();
-    expect(streamsOf(connection).reads).toBe(0);
+    expect(ends.filter(({ version }) => version)).toHaveLength(MOST);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(held.listeners).toBe(0);
+    // What was answered, refused or left is held no more.
+    const left = new AbortController();
+    for (let i = 0; i < MOST; i++) read(left.signal);
+    await flush();
+    left.abort();
+    await flush();
+    const more = Array.from({ length: MOST }, () => read());
+    await flush();
+    expect(more.map(({ code }) => code)).toEqual(Array.from({ length: MOST }, () => undefined));
+  });
+
+  it.each([
+    ["answered", () => Promise.resolve(answer())],
+    ["refused", () => Promise.resolve(refusal(Code.NotFound))],
+  ])("is not failed for the many that were %s since", async (_, reply) => {
+    const { read, plan } = page();
+    plan(() => new Promise(() => {}));
+    const held = read();
+    await flush();
+    plan(...Array.from({ length: 2 * MOST }, () => reply));
+    for (let i = 0; i < 2 * MOST; i++) {
+      read();
+      await flush();
+    }
+    expect(held).toEqual({});
   });
 
   it("ends with the page that wants it", async () => {

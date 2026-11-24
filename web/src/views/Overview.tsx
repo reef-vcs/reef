@@ -1,4 +1,4 @@
-// `/`: the inbox across every repository (R3.33, its own chunk), then every
+// `/`: the inbox across every repository (R3.33), then every
 // registered repository as a card, with who is working in it now
 // and its latest operation, live from both streams. The repository links to
 // its smartlog (R2.19); the agents, and the latest operation's workspace and
@@ -17,17 +17,15 @@ import { Avatar, AvatarStack } from "../ui/Avatar";
 import { useDevMode } from "../ui/dev-mode";
 import { ErrorView } from "../ui/ErrorView";
 import { operationLabel } from "../ui/operation";
-import { lazyRoute } from "../ui/lazy-route";
 import { Link } from "../ui/router";
 import { clock } from "../ui/time";
 import { Time } from "../ui/TimeLabel";
 import { capitalize, operationSentence, plural } from "../ui/words";
 import { activityHref } from "./activity-route";
 import { fleetHref } from "./fleet-route";
+import { Inbox } from "./Inbox";
 import { OverviewModel } from "./overview-model";
 import { smartlogHref } from "./smartlog-route";
-
-const Inbox = lazyRoute(() => import("./Inbox").then((m) => m.Inbox));
 
 function lastComponent(root: string): string {
   return root.replace(/\/+$/, "").split("/").pop() || root;

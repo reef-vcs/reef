@@ -13,6 +13,8 @@ import type { Streams } from "./streams";
 
 /** Failures in a row, while the streams are live, that the page is told of. */
 export const TRIES = 4;
+/** Calls held at once. The oldest, which a page that was left may have made, fails for one more. */
+export const MOST = 32;
 
 export function steady(streams: () => Streams): {
   interceptor: Interceptor;
@@ -20,20 +22,29 @@ export function steady(streams: () => Streams): {
 } {
   /** By a call's signal, which the transport hands to `fetch`: a byte of its answer came. */
   const heard = new WeakMap<AbortSignal, () => void>();
+  const calls = new Set<{ over: boolean; cut: () => void }>();
 
   const interceptor: Interceptor = (next) => async (request) => {
     if (request.stream || !request.method.idempotency) return next(request);
+    const call = { over: false, cut: () => {} };
+    const [oldest] = calls;
+    if (oldest && calls.size >= MOST) {
+      calls.delete(oldest);
+      oldest.over = true;
+      oldest.cut();
+    }
+    calls.add(call);
     const backoff = new Backoff();
     // A call, so TypeScript does not narrow it across the awaits.
     const ended = () => request.signal.aborted;
     let failures = 0;
     let unheard = 0;
     for (;;) {
-      streams().reads += 1;
       const attempt = new AbortController();
       const cut = () => {
         attempt.abort();
       };
+      call.cut = cut;
       /** A byte came while the streams were lost, so not on a dead connection. */
       let alive = false;
       let cancel = after(SILENT_MS * 2 ** Math.min(unheard, MAX_DOUBLINGS), () => {
@@ -52,15 +63,21 @@ export function steady(streams: () => Streams): {
         if (!alive) cut();
       });
       try {
-        return await orAborted(next({ ...request, signal: attempt.signal }), attempt.signal);
+        const answer = await orAborted(
+          next({ ...request, signal: attempt.signal }),
+          attempt.signal,
+        );
+        calls.delete(call);
+        return answer;
       } catch (thrown) {
-        if (!isUnanswered(reefError(thrown))) throw thrown;
-        if (streams().live && ++failures >= TRIES) throw thrown;
+        const told = !isUnanswered(reefError(thrown)) || (streams().live && ++failures >= TRIES);
         cancel();
-        await sleep(backoff.next(), attempt.signal);
-        if (ended()) throw thrown;
+        if (!told) await sleep(backoff.next(), attempt.signal);
+        if (told || ended() || call.over) {
+          calls.delete(call);
+          throw thrown;
+        }
       } finally {
-        streams().reads -= 1;
         cancel();
         stop();
         request.signal.removeEventListener("abort", cut);

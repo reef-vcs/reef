@@ -34,17 +34,15 @@ export class Dying {
     };
     const streams = streamsOf(this.connection);
     streams.change(true);
-    for (const on of ["onLive", "onResume"] as const) {
-      const listen = streams[on];
-      streams[on] = (run) => {
-        this.held += 1;
-        const stop = listen(run);
-        return () => {
-          this.held -= 1;
-          stop();
-        };
+    const { onResume } = streams;
+    streams.onResume = (run) => {
+      this.held += 1;
+      const stop = onResume(run);
+      return () => {
+        this.held -= 1;
+        stop();
       };
-    }
+    };
   }
 
   /** The browser gives the dead connection up, and what hung on it fails. */

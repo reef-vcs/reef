@@ -393,6 +393,88 @@ describe("Overview", () => {
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
+  it("with several gone, asks for them together, and says so until the last is read", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    const gone = new Set(["bbbbbbbb22", "cccccccc33"]);
+    let held = false;
+    let asked = 0;
+    const t = setup({
+      repositories: [
+        repo("aaaaaaaa11", "/src/alpha"),
+        repo("bbbbbbbb22", "/src/b"),
+        repo("cccccccc33", "/src/c"),
+      ],
+      listOperations: async (id) => {
+        await settle(1);
+        asked += 1;
+        if (held && id === "cccccccc33") await new Promise(() => undefined);
+        if (gone.has(id)) throw daemonError(Code.Unavailable, { reason: "" }, `${id} is not open`);
+      },
+    });
+    const pass = async (ms: number) => {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(ms);
+        await settle(60);
+      });
+    };
+    await pass(0);
+    expect(vi.getTimerCount(), "one backoff for all").toBe(1);
+    await pass(60_000);
+    const before = asked;
+    await pass(5 * 60_000);
+    expect(asked - before).toBeLessThanOrEqual(22);
+    gone.delete("cccccccc33");
+    await pass(31_000);
+    expect(screen.getByRole("alert").textContent).toContain("bbbbbbbb22");
+    gone.delete("bbbbbbbb22");
+    await pass(31_000);
+    expect(screen.queryByRole("alert")).toBeNull();
+    // The backoff starts over for the next failure.
+    gone.add("bbbbbbbb22");
+    t.operations.reset();
+    t.operations.applyFrame(operationsFrame({ live: true, cursor: "c2" }));
+    await pass(1_000);
+    asked = 0;
+    await pass(2_000);
+    expect(asked).toBeGreaterThan(0);
+    // One that was read says nothing of another.
+    gone.add("cccccccc33");
+    t.operations.reset();
+    t.operations.applyFrame(operationsFrame({ live: true, cursor: "c3" }));
+    await pass(1_000);
+    expect(screen.getByRole("alert").textContent).toContain("bbbbbbbb22");
+    held = true;
+    gone.delete("bbbbbbbb22");
+    await pass(31_000);
+    expect(screen.getByRole("alert").textContent).toContain("cccccccc33");
+  });
+
+  it("drops what failed before the stream started over, and after the page was left", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    const held: ((error: Error) => void)[] = [];
+    const t = setup({
+      repositories: [repo("aaaaaaaa11", "/src/alpha")],
+      listOperations: () => new Promise<void>((_, fail) => held.push(fail)),
+    });
+    await flush();
+    expect(held).toHaveLength(1);
+    t.operations.reset();
+    t.operations.applyFrame(operationsFrame({ live: true, cursor: "c2" }));
+    await flush();
+    held.shift()?.(daemonError(Code.Unavailable, { reason: "" }, "stale"));
+    await flush();
+    expect(screen.queryByRole("alert")).toBeNull();
+    cleanup();
+    for (const fail of held) fail(daemonError(Code.Unavailable, { reason: "" }, "late"));
+    await flush();
+    expect(vi.getTimerCount()).toBe(0);
+    const u = setup({ repositories: [repo("aaaaaaaa11", "/src/alpha")] });
+    u.state.failRepositories = new ConnectError("Load failed", Code.Unknown);
+    cleanup();
+    await flush();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("lists the repositories again after no answer, and not after a refusal", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
     for (const [thrown, again] of [

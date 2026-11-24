@@ -7,36 +7,25 @@ import { after, Backoff } from "../live/backoff";
 import type { Connection } from "./connection";
 import { isPassing, type ReefError } from "./errors";
 
-type Listeners = Set<() => void>;
-
-function listen(listeners: Listeners, run: () => void): () => void {
-  listeners.add(run);
-  return () => {
-    listeners.delete(run);
-  };
-}
-
 export class Streams {
   live = false;
-  /** Calls under way that api/steady.ts holds. */
-  reads = 0;
   private before = false;
   private owed = false;
-  private readonly lives: Listeners = new Set();
-  private readonly resumes: Listeners = new Set();
-
-  /** Calls `run` whenever they are live, the first time too. */
-  onLive = (run: () => void) => listen(this.lives, run);
+  private readonly listeners = new Set<() => void>();
 
   /** Calls `run` whenever they are live again and the page is shown. */
-  onResume = (run: () => void) => listen(this.resumes, run);
+  onResume = (run: () => void): (() => void) => {
+    this.listeners.add(run);
+    return () => {
+      this.listeners.delete(run);
+    };
+  };
 
   change(live: boolean) {
     this.live = live;
     if (!live) return;
     this.owed = this.before;
     this.before = true;
-    for (const run of [...this.lives]) run();
     this.resume();
   }
 
@@ -46,7 +35,7 @@ export class Streams {
       document.addEventListener("visibilitychange", this.resume, { once: true });
       return;
     }
-    for (const run of [...this.resumes]) run();
+    for (const run of [...this.listeners]) run();
   };
 }
 

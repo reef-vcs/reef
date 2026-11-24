@@ -1,25 +1,22 @@
 // The repository pages' frame (R2.21; the proposal page since R3.31, the
 // inbox since R3.33): one operation window per repository, the shared header
 // over it, and the page. Keyed by the repository alone, so
-// the window survives moving between the pages and moving `at`. Its own
-// chunk, as each page is: the overview never loads it.
+// the window survives moving between the pages and moving `at`.
 import { useEffect, useState } from "react";
 import type { Connection } from "../api/connection";
 import type { FrameScheduler } from "../live/frame";
 import type { Live } from "../live/share";
 import { OperationWindow } from "../log/window";
-import { lazyRoute } from "../ui/lazy-route";
 import { RepoHeader } from "../ui/RepoHeader";
 import type { RepoPage } from "../ui/RepoNav";
+import { Activity } from "./Activity";
 import { activityParams } from "./activity-route";
+import { Fleet } from "./Fleet";
 import { fleetParams } from "./fleet-route";
+import { Inbox } from "./Inbox";
+import { Proposal } from "./Proposal";
+import { Smartlog } from "./Smartlog";
 import { smartlogParams } from "./smartlog-route";
-
-const Proposal = lazyRoute(() => import("./Proposal").then((m) => m.Proposal));
-const Smartlog = lazyRoute(() => import("./Smartlog").then((m) => m.Smartlog));
-const Fleet = lazyRoute(() => import("./Fleet").then((m) => m.Fleet));
-const Activity = lazyRoute(() => import("./Activity").then((m) => m.Activity));
-const Inbox = lazyRoute(() => import("./Inbox").then((m) => m.Inbox));
 
 export function RepoFrame({
   repo,
