@@ -547,8 +547,15 @@ async fn jj_cli_lists_reef_workspace() {
         "{}",
         String::from_utf8_lossy(&list.stderr)
     );
-    assert!(stdout.contains("reef-x:"), "{stdout}");
-    assert!(stdout.contains("default:"), "{stdout}");
+    // jj 0.47.1 lists the workspace it runs in as `default (current):` (#247).
+    let listed = |name: &str| {
+        stdout.lines().any(|line| {
+            line.strip_prefix(name)
+                .is_some_and(|rest| rest.starts_with(':') || rest.starts_with(" ("))
+        })
+    };
+    assert!(listed("reef-x"), "{stdout}");
+    assert!(listed("default"), "{stdout}");
 
     let status = jj(&root, &["status"]);
     assert!(
