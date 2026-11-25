@@ -1095,6 +1095,49 @@ async fn not_found_reasons() {
     assert_eq!(reason(&output), "REPOSITORY_NOT_FOUND");
 }
 
+// #419: a deleted checkout names its directory and the way out. `next` is
+// never `reef repo forget`, which would delete a record whose disk is only
+// unmounted.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_repository_whose_directory_is_gone_says_so() {
+    let (daemon, repo) = with_repo().await;
+    let root = repo.root.to_str().unwrap().to_owned();
+    std::fs::remove_dir_all(&repo.root).unwrap();
+    let daemon = daemon.restart().await;
+
+    let output = run(reef(&daemon), &["status", "--repo", &repo.id]).await;
+    failed(&output, 6, "unavailable");
+    let error: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(error["error"]["reason"], "REPOSITORY_DIRECTORY_GONE");
+    assert_eq!(next_of(&output), ["reef", "repo", "list"]);
+
+    let output = run(reef(&daemon), &["-o", "json", "inbox"]).await;
+    let inbox: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    let gone = &inbox["failed"][0];
+    assert_eq!(gone["reason"], "REPOSITORY_DIRECTORY_GONE", "{inbox}");
+    assert!(gone["message"].as_str().unwrap().contains(&root), "{inbox}");
+    assert!(
+        gone["hint"].as_str().unwrap().contains("mount it"),
+        "{inbox}"
+    );
+    assert_eq!(gone["next"], "reef repo list");
+    let text = stdout(&run(reef(&daemon), &["-o", "text", "inbox"]).await);
+    assert!(text.contains("  next: reef repo list"), "{text}");
+    let watched = run(
+        reef(&daemon),
+        &["-o", "json", "inbox", "watch", "--for", "2"],
+    )
+    .await;
+    let line: Value = serde_json::from_str(stdout(&watched).lines().next().unwrap()).unwrap();
+    assert_eq!(line["error"]["next"], "reef repo list", "{line}");
+
+    let output = run(reef(&daemon), &["repo", "forget", &repo.id]).await;
+    assert!(output.status.success(), "{}", stdout(&output));
+    let output = run(reef(&daemon), &["-o", "json", "inbox"]).await;
+    let inbox: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(inbox["failed"], serde_json::json!([]));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn repo_forget() {
     let (daemon, repo) = with_repo().await;

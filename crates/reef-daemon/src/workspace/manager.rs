@@ -291,7 +291,7 @@ impl Manager {
                     .await
                     .map_err(ManagerError::from)
                     .and_then(|counted| counted.map_err(ManagerError::from)),
-                None => Err(ManagerError::RepoNotOpen(id)),
+                None => Err(self.not_open(id)),
             };
             match counted {
                 Ok(count) => match self.db.set_repository_tracked_files(id, count) {
@@ -329,7 +329,18 @@ impl Manager {
 
     /// The repository's thread.
     pub(crate) fn handle(&self, repo: RepoId) -> Result<RepoHandle, ManagerError> {
-        self.repos.get(repo).ok_or(ManagerError::RepoNotOpen(repo))
+        self.repos.get(repo).ok_or_else(|| self.not_open(repo))
+    }
+
+    /// Why a repository has no thread, read from its row and the disk.
+    fn not_open(&self, id: RepoId) -> ManagerError {
+        match self.db.repository(id) {
+            Ok(record) if matches!(record.root.try_exists(), Ok(false)) => ManagerError::RepoGone {
+                id,
+                root: record.root,
+            },
+            _ => ManagerError::RepoNotOpen(id),
+        }
     }
 
     /// The loaded entry of an `active` workspace, or why there is none.
@@ -374,7 +385,7 @@ impl Manager {
             // has written its row and not yet its entry.
             return Err(ManagerError::NotLoaded(id));
         }
-        Err(ManagerError::RepoNotOpen(record.repo_id))
+        Err(self.not_open(record.repo_id))
     }
 
     /// The operation `id` of `repo`, read on the repository's
