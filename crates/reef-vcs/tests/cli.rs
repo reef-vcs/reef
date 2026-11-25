@@ -1125,7 +1125,7 @@ async fn a_repository_whose_directory_is_gone_says_so() {
     assert!(text.contains("  next: reef repo list"), "{text}");
     let watched = run(
         reef(&daemon),
-        &["-o", "json", "inbox", "watch", "--for", "2"],
+        &["-o", "json", "inbox", "watch", "--for", "0"],
     )
     .await;
     let line: Value = serde_json::from_str(stdout(&watched).lines().next().unwrap()).unwrap();
