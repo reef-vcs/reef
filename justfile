@@ -111,7 +111,7 @@ shell-check:
     cd shell && cargo fmt --check
     cargo deny --manifest-path shell/Cargo.toml check -A unmaintained advisories bans licenses sources
     cd shell && CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/../target}/shell" cargo clippy -- -D warnings
-    scripts/shell-build.sh debug
+    APPLE_SIGNING_IDENTITY=- scripts/shell-build.sh debug
 
 # A debug Reef.app that starts an installed reef, signed with APPLE_SIGNING_IDENTITY, else your
 # keychain's Apple Development identity, else ad hoc (then notifications reset at each rebuild).
