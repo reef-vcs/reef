@@ -380,6 +380,12 @@ pub mod error {
     /// A repository id or prefix that names no registered repository
     /// (R2.05). Metadata: `repo`, the id or prefix looked up.
     pub const REPOSITORY_NOT_FOUND: &str = "REPOSITORY_NOT_FOUND";
+    /// A registered repository whose directory is gone, so the daemon could
+    /// not open it at its start (#419). Metadata: `repo`, `path`.
+    pub const REPOSITORY_DIRECTORY_GONE: &str = "REPOSITORY_DIRECTORY_GONE";
+    /// The hint of [`REPOSITORY_DIRECTORY_GONE`], for a client that shows
+    /// the reason without its `ErrorDetail`, as an inbox section does.
+    pub const REPOSITORY_DIRECTORY_GONE_HINT: &str = "If it is on a disk that is not mounted, mount it and restart the daemon (`reef daemon stop`; the next command starts it). If it was deleted, `reef repo forget` unregisters it and permanently drops its proposals, evidence and landings; that is refused while it has active or releasing workspaces.";
     /// A workspace id, prefix, or path that names no workspace (R2.05).
     /// Metadata: `workspace`, the id, prefix, or path looked up.
     pub const WORKSPACE_NOT_FOUND: &str = "WORKSPACE_NOT_FOUND";

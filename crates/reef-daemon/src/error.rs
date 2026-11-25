@@ -720,6 +720,13 @@ fn reason_and_metadata(
                 reef_api::error::REPOSITORY_NOT_REGISTERED,
                 meta(&[("path", path.display().to_string())]),
             ))
+        } else if let Some(ManagerError::RepoGone { id, root }) =
+            error.downcast_ref::<ManagerError>()
+        {
+            Some((
+                reef_api::error::REPOSITORY_DIRECTORY_GONE,
+                meta(&[("repo", id.as_hex()), ("path", root.display().to_string())]),
+            ))
         } else if let Some(db) = wrapped_db(error) {
             db_reason(db)
         } else if let Some(error) = error.downcast_ref::<RevisionError>() {

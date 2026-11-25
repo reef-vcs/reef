@@ -514,6 +514,15 @@ pub enum ManagerError {
     /// or was forgotten).
     #[error("repository {0} is not open")]
     RepoNotOpen(RepoId),
+    /// The repository is not open and the directory it was registered at
+    /// does not exist: it was deleted, or its disk is not mounted.
+    #[error("repository {id}'s directory is gone: {}", root.display())]
+    RepoGone {
+        /// The repository.
+        id: RepoId,
+        /// The directory it was registered at.
+        root: PathBuf,
+    },
     /// The workspace is not `active`.
     #[error("workspace {id} is {}", state.as_str())]
     NotActive {
@@ -671,7 +680,9 @@ impl Classify for ManagerError {
             | Self::InvalidOwner
             | Self::RepoRequired
             | Self::WorkspaceRequired => ErrorKind::InvalidArgument,
-            Self::RepoNotOpen(_) | Self::NotLoaded(_) => ErrorKind::Unavailable,
+            Self::RepoNotOpen(_) | Self::RepoGone { .. } | Self::NotLoaded(_) => {
+                ErrorKind::Unavailable
+            }
             Self::NotActive { .. } | Self::LeaseNotExpired(_) | Self::WriteInFlight { .. } => {
                 ErrorKind::Conflict
             }
@@ -708,6 +719,10 @@ impl Advise for ManagerError {
             Self::Store(error) => error.advice(),
             Self::Disk(error) => Some(error.advice()),
             Self::NotRegistered(path) => Some(unregistered_advice(path)),
+            Self::RepoGone { .. } => Some(Advice::run(
+                reef_api::error::REPOSITORY_DIRECTORY_GONE_HINT,
+                ["reef", "repo", "list"],
+            )),
             Self::WorkspaceRoot(error) => Some(Advice::hint(format!(
                 "Reef keeps {} private to the daemon's user (#260); give it back to that user, or set [workspace] root in config.toml to a directory of your own",
                 error.path().display()

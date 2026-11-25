@@ -2094,7 +2094,8 @@ fn before_writing(error: &ManagerError) -> bool {
         ManagerError::RewriteSnapshot { .. }
         | ManagerError::Revision(_)
         | ManagerError::NotLoaded(_)
-        | ManagerError::RepoNotOpen(_) => true,
+        | ManagerError::RepoNotOpen(_)
+        | ManagerError::RepoGone { .. } => true,
         _ => false,
     }
 }

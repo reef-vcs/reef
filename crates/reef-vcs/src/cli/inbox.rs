@@ -126,6 +126,33 @@ pub(crate) struct Failed {
     reason: String,
     /// What went wrong.
     message: String,
+    /// How to fix it, when there is a known way.
+    hint: Option<String>,
+    /// A safe command to run first.
+    next: Option<String>,
+}
+
+impl Failed {
+    fn new(repo_id: &str, error: &v1::InboxError) -> Self {
+        let gone = error.reason == reef_api::error::REPOSITORY_DIRECTORY_GONE;
+        Failed {
+            repo_id: repo_id.to_owned(),
+            reason: error.reason.clone(),
+            message: error.message.clone(),
+            hint: gone.then(|| reef_api::error::REPOSITORY_DIRECTORY_GONE_HINT.to_owned()),
+            next: gone.then(|| "reef repo list".to_owned()),
+        }
+    }
+
+    fn render_fix(&self, w: &mut dyn Write) -> io::Result<()> {
+        if let Some(hint) = &self.hint {
+            writeln!(w, "  hint: {hint}")?;
+        }
+        if let Some(next) = &self.next {
+            writeln!(w, "  next: {next}")?;
+        }
+        Ok(())
+    }
 }
 
 /// `reef inbox`'s result.
@@ -243,11 +270,7 @@ impl Inbox {
         };
         for section in &response.sections {
             if let Some(error) = &section.error {
-                inbox.failed.push(Failed {
-                    repo_id: section.repo_id.clone(),
-                    reason: error.reason.clone(),
-                    message: error.message.clone(),
-                });
+                inbox.failed.push(Failed::new(&section.repo_id, error));
                 continue;
             }
             inbox
@@ -339,6 +362,7 @@ impl TextRender for Inbox {
                 super::changes::short(&failed.repo_id),
                 clean(&failed.message)
             )?;
+            failed.render_fix(w)?;
         }
         Ok(())
     }
@@ -413,6 +437,7 @@ impl TextRender for Change {
         }
         if let Some(error) = &self.error {
             writeln!(w, "{repo} could not be read: {}", clean(&error.message))?;
+            error.render_fix(w)?;
         }
         if self.items.is_empty() && self.left.is_empty() && self.error.is_none() {
             let landed = self.landed.as_ref().map_or(0, |landed| landed.count);
@@ -620,11 +645,10 @@ impl Watcher<'_> {
             .landed
             .as_ref()
             .map(|landed| Digest::new(&repo, landed));
-        let error = section.error.as_ref().map(|error| Failed {
-            repo_id: repo.clone(),
-            reason: error.reason.clone(),
-            message: error.message.clone(),
-        });
+        let error = section
+            .error
+            .as_ref()
+            .map(|error| Failed::new(&section.repo_id, error));
         let totals = (
             u64::from(section.needs_you_now_total),
             u64::from(section.watching_total),
