@@ -157,7 +157,7 @@ impl StatusService for StatusHandler {
                 let trunk = match revset::trunk(repo) {
                     Some(trunk) => {
                         let info = describer.describe(&trunk.commit_id).await.map_err(status)?;
-                        Some((convert::change(&info), trunk.bookmark))
+                        Some((convert::listed(convert::change(&info)), trunk.bookmark))
                     }
                     None => None,
                 };
@@ -197,7 +197,7 @@ impl StatusService for StatusHandler {
                     let mut parents = Vec::with_capacity(info.parent_commit_ids.len());
                     for parent in &info.parent_commit_ids {
                         let parent = describer.describe(parent).await.map_err(status)?;
-                        parents.push(convert::change(&parent));
+                        parents.push(convert::listed(convert::change(&parent)));
                     }
                     let options = DiffOptions {
                         format: DiffFormat::Summary,
@@ -242,7 +242,10 @@ impl StatusService for StatusHandler {
                 Ok::<_, Status>(Read {
                     at: op_id(repo),
                     trunk,
-                    heads: heads.iter().map(convert::change).collect(),
+                    heads: heads
+                        .iter()
+                        .map(|head| convert::listed(convert::change(head)))
+                        .collect(),
                     head_count,
                     conflicted,
                     divergent,

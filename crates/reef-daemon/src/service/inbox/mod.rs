@@ -329,7 +329,10 @@ async fn proposals(state: &Arc<AppState>, repo: &str) -> Result<Vec<v1::Proposal
             }))
             .await?
             .into_inner();
-        proposals.extend(page.entries);
+        proposals.extend(page.entries.into_iter().map(|mut entry| {
+            entry.change = entry.change.map(super::convert::listed);
+            entry
+        }));
         if page.next_page_token.is_empty() {
             return Ok(proposals);
         }

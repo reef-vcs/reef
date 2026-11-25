@@ -2321,7 +2321,8 @@ pub struct Change {
     pub parent_commit_ids: Vec<String>,
     /// Its parents' changes, in hex.
     pub parent_change_ids: Vec<String>,
-    /// Its description, verbatim.
+    /// Its description, verbatim; in a status's trunk, heads and parents, at
+    /// most its first 1,024 bytes (#422).
     pub description: String,
     /// The description's first line, as `git log --oneline` shows it;
     /// empty when there is none (#262: what brief views keep of a change

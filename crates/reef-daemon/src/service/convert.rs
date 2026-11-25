@@ -456,6 +456,22 @@ pub(super) fn unread_operation(id: &str, repo: RepoId, written: Written<'_>) -> 
     }
 }
 
+/// The most of a description [`listed`] keeps.
+pub(super) const MAX_LISTED_DESCRIPTION: usize = 1 << 10;
+
+/// `change` as an entry among others' work: at most
+/// [`MAX_LISTED_DESCRIPTION`] bytes of its description, so that one change
+/// cannot make a read of many too large for its client (#422).
+pub(super) fn listed(mut change: v1::Change) -> v1::Change {
+    let end = change
+        .description
+        .floor_char_boundary(MAX_LISTED_DESCRIPTION);
+    change.description.truncate(end);
+    // The inbox board holds what it lists.
+    change.description.shrink_to_fit();
+    change
+}
+
 /// A change as a message: Reef workspaces' working copies by id, others by
 /// jj name.
 pub(super) fn change(info: &ChangeInfo) -> v1::Change {
