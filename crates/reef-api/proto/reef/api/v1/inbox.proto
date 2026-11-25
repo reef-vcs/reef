@@ -187,7 +187,8 @@ message InboxItem {
   repeated string next = 8;
   // The record, as its own read returns it.
   oneof record {
-    // A proposal, as ListProposals returns it.
+    // A proposal, as ListProposals returns it, but for its change's
+    // description: at most its first 1,024 bytes.
     ProposalEntry proposal = 10;
     // A help request or an instruction, as ListComments returns it.
     Comment comment = 11;

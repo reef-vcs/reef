@@ -131,7 +131,7 @@ message GetStatusResponse {
 // A repository's state.
 message RepositoryStatus {
   // The default start's commit, `trunk()`; unset when no default start
-  // bookmark exists.
+  // bookmark exists. At most the first 1,024 bytes of its description.
   Change trunk = 1;
   // The default start's bookmark; empty when none exists.
   string trunk_bookmark = 2;
@@ -140,7 +140,8 @@ message RepositoryStatus {
   repeated Workspace active_workspaces = 3;
   // Active workspaces, in all.
   uint32 active_workspace_count = 4;
-  // Visible mutable heads outside trunk's ancestry, newest 100.
+  // Visible mutable heads outside trunk's ancestry, newest 100; at most
+  // the first 1,024 bytes of each description.
   repeated Change heads = 5;
   // Such heads, in all.
   uint32 head_count = 6;
@@ -158,7 +159,8 @@ message WorkspaceStatus {
   Workspace workspace = 1;
   // Its working-copy commit.
   Change working_copy = 2;
-  // That commit's parents.
+  // That commit's parents; at most the first 1,024 bytes of each
+  // description.
   repeated Change parents = 3;
   // Paths that differ from the parents, merged; at most `max_files`.
   repeated FileChange changed_files = 4;

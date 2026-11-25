@@ -15,10 +15,10 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use reef_api::v1::{
-    self, CommentKind, CreateCommentRequest, CreateIdentityRequest, EditFilesRequest, FileEdit,
-    GetInboxRequest, HelpInput, HelpReason, IdentityKind, InboxMark, InboxReason,
-    LandChangeRequest, MarkInboxSeenRequest, RemoteScope, TransitionChangeRequest,
-    edit_files_request, file_edit,
+    self, CommentKind, CreateCommentRequest, CreateIdentityRequest, DescribeChangeRequest,
+    EditFilesRequest, FileEdit, GetInboxRequest, GetStatusRequest, HelpInput, HelpReason,
+    IdentityKind, InboxMark, InboxReason, LandChangeRequest, MarkInboxSeenRequest, RemoteScope,
+    TransitionChangeRequest, edit_files_request, file_edit,
 };
 use reef_daemon::client::remote::{RemoteTarget, RemoteUrl, Token};
 use reef_daemon::client::{Client, ClientError};
@@ -469,6 +469,61 @@ async fn a_policy_change_waits_on_its_owners() {
         item(&read, &key).unwrap().headline,
         "Needs a sign-off from alice"
     );
+}
+
+// #422: long commit messages, over a client's 4 MiB together, leave the inbox
+// and the status readable.
+#[tokio::test(flavor = "multi_thread")]
+async fn long_descriptions_do_not_stop_the_inbox_or_status() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let main = setup(&daemon, &repo, OWNERS_ONLY).await;
+    // 1,023 bytes, then two-byte characters: the bound falls inside one.
+    let long = format!("{}{}", "a".repeat(1023), "é".repeat(1 << 20));
+    let mut keys = Vec::new();
+    for n in 0..3 {
+        let change = commit_on(
+            client,
+            &repo.id,
+            &main.commit_id,
+            &[(&format!("f{n}"), "x\n")],
+        )
+        .await;
+        let change = client
+            .describe_change(DescribeChangeRequest {
+                repo: repo.id.clone(),
+                revision: change.commit_id.clone(),
+                description: long.clone(),
+                ..DescribeChangeRequest::default()
+            })
+            .await
+            .unwrap()
+            .change
+            .unwrap();
+        propose(client, &repo.id, &change).await;
+        keys.push(format!("proposal:{}:{}", repo.id, change.change_id));
+    }
+    let read = inbox_until(client, &[&repo.id], "every proposal is shown", |read| {
+        keys.iter().all(|key| item(read, key).is_some())
+    })
+    .await;
+    for key in &keys {
+        let Some(v1::inbox_item::Record::Proposal(entry)) = &item(&read, key).unwrap().record
+        else {
+            panic!("{key} is no proposal");
+        };
+        assert_eq!(entry.change.as_ref().unwrap().description, "a".repeat(1023));
+    }
+    let status = client
+        .get_status(GetStatusRequest {
+            repo: repo.id.clone(),
+            ..GetStatusRequest::default()
+        })
+        .await
+        .unwrap();
+    let heads = status.repository_status.unwrap().heads;
+    let cut = |head: &&v1::Change| head.description == "a".repeat(1023);
+    assert_eq!(heads.iter().filter(cut).count(), 3);
 }
 
 // The digest counts what landed after the mark; the mark moves forward
