@@ -221,8 +221,10 @@ fn overlap_hint(ws: &Workspace) -> Option<String> {
 /// [`advise`], with the disk's word where it matters (#272): a `low` disk
 /// after divergence, attention and an expiring lease; then a conflict to
 /// resolve or a person to wait for (steps `resolve`, `ask`, `await_help`),
-/// or being behind trunk; then missing dependencies (#195); then a `warn`
-/// disk.
+/// or being behind trunk; then missing dependencies (#195) while the step is
+/// `work`, where the agent is about to build; then a `warn` disk. At the
+/// steps that may still build, the install is a sentence after the hint; at
+/// the rest it is left out (#333).
 fn advise_with_disk(
     ws: &Workspace,
     in_run: bool,
@@ -247,7 +249,7 @@ fn advise_with_disk(
         return disk_advice(ws, disk, true);
     }
     // A conflict, and a person the change waits for, come before
-    // dependencies and a `warn` disk.
+    // dependencies and a `warn` disk, and alone.
     if matches!(
         ws.step.as_deref(),
         Some("resolve" | "ask" | "await_help" | "dependency")
@@ -255,9 +257,38 @@ fn advise_with_disk(
     {
         return advise(ws, in_run, held);
     }
-    if let Some(advice) = dependency_advice(ws) {
-        return advice;
+    let advice = || advise_with_warn_disk(ws, in_run, held, disk);
+    let Some((missing, install)) = missing_install(ws) else {
+        return advice();
+    };
+    match ws.step.as_deref() {
+        None | Some("work" | "unknown") => (
+            format!(
+                "{missing}: each workspace installs its own. Install them, or declare a shared store in reef.toml (`reef store --help`)."
+            ),
+            install,
+        ),
+        Some("describe" | "propose" | "revise") => {
+            let (hint, next) = advice();
+            (
+                format!(
+                    "{hint} {missing}; to build here, run `{}`.",
+                    shell_line(&install)
+                ),
+                next,
+            )
+        }
+        Some(_) => advice(),
     }
+}
+
+/// [`advise`], with a `warn` disk first.
+fn advise_with_warn_disk(
+    ws: &Workspace,
+    in_run: bool,
+    held: bool,
+    disk: Option<&DiskStatus>,
+) -> (String, Vec<String>) {
     if let Some(disk) = disk.filter(|disk| disk.level == "warn") {
         let (hint, next) = disk_advice(ws, disk, false);
         if !next.is_empty() {
@@ -330,7 +361,7 @@ const RUST_HINT_BYTES: u64 = 2 << 30;
 
 /// #195: the first directory whose declared dependencies are not
 /// installed in this workspace, and the command that installs them.
-fn dependency_advice(ws: &Workspace) -> Option<(String, Vec<String>)> {
+fn missing_install(ws: &Workspace) -> Option<(String, Vec<String>)> {
     let dir = ws.disk.as_ref()?.missing_dependencies.first()?;
     let root = Path::new(&ws.path).join(dir);
     let has = |name: &str| root.join(name).exists();
@@ -388,12 +419,7 @@ fn dependency_advice(ws: &Workspace) -> Option<(String, Vec<String>)> {
     } else {
         missing.clone()
     };
-    Some((
-        format!(
-            "{place} has {lockfile} but no {installed}: each workspace installs its own. Install them, or declare a shared store in reef.toml (`reef store --help`)."
-        ),
-        next,
-    ))
+    Some((format!("{place} has {lockfile} but no {installed}"), next))
 }
 
 /// What to do in `ws`, by its state: release a healthy one when done (or
@@ -1319,7 +1345,7 @@ mod tests {
             }
             // Without the step's wait, the dependencies come first.
             let mut work = ws.clone();
-            work.step = Some("describe".into());
+            work.step = Some("work".into());
             let (_, next) = advise_with_disk(&work, false, false, None);
             assert_eq!(next[..2], ["npm", "ci"], "{step:?}");
         }
@@ -1626,5 +1652,58 @@ mod tests {
         );
         let web = temp.path().join("web").display().to_string();
         assert_eq!(next, ["npm", "ci", "--prefix", web.as_str()]);
+    }
+
+    // #333: a docs-only change learned to install packages, never to
+    // describe itself.
+    #[test]
+    fn a_missing_install_is_beside_the_step_once_there_is_work() {
+        use v1::{ChangeStep as Step, LifecycleState as State};
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("uv.lock"), "").unwrap();
+        let missing = Some(reef_client::json::WorkspaceDisk {
+            tracked_bytes: 0,
+            build_bytes: 0,
+            unshared_bytes: Some(0),
+            files: 1,
+            measured_at: None,
+            incomplete: false,
+            largest: Vec::new(),
+            missing_dependencies: vec![".".into()],
+        });
+        for (step, state, beside) in [
+            (Step::Describe, State::Draft, true),
+            (Step::Propose, State::Draft, true),
+            (Step::Revise, State::Declined, true),
+            (Step::Land, State::Proposed, false),
+            (Step::Wait, State::Proposed, false),
+            (Step::Publish, State::Draft, false),
+            (Step::Done, State::Landed, false),
+        ] {
+            let mut ws = stepped(step, state, false);
+            let alone = advise_with_disk(&ws, false, false, None);
+            ws.path = temp.path().display().to_string();
+            ws.disk.clone_from(&missing);
+            let (hint, next) = advise_with_disk(&ws, false, false, None);
+            assert_eq!(next, alone.1, "{step:?}: {hint}");
+            if beside {
+                assert_eq!(
+                    hint,
+                    format!(
+                        "{} This workspace has uv.lock but no .venv; to build here, run `uv sync --frozen --directory {}/.`.",
+                        alone.0, ws.path
+                    ),
+                    "{step:?}"
+                );
+            } else {
+                assert_eq!(hint, alone.0, "{step:?}");
+            }
+        }
+        // A newer daemon's step, which this CLI does not know.
+        let mut ws = stepped(Step::Work, State::Draft, false);
+        ws.step = Some("unknown".into());
+        ws.path = temp.path().display().to_string();
+        ws.disk = missing;
+        assert_eq!(advise_with_disk(&ws, false, false, None).1[0], "uv");
     }
 }
