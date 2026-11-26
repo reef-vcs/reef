@@ -282,22 +282,31 @@ fn advise_with_disk(
     }
 }
 
-/// [`advise`], with a `warn` disk first.
+/// [`advise`], with a `warn` disk first in the hint. The step keeps
+/// `next`: a `warn` disk refuses nothing, so releasing another workspace
+/// is a sentence, not the step (#432).
 fn advise_with_warn_disk(
     ws: &Workspace,
     in_run: bool,
     held: bool,
     disk: Option<&DiskStatus>,
 ) -> (String, Vec<String>) {
-    if let Some(disk) = disk.filter(|disk| disk.level == "warn") {
-        let (hint, next) = disk_advice(ws, disk, false);
-        if !next.is_empty() {
-            return (hint, next);
-        }
-        let (rest, next) = advise(ws, in_run, held);
-        return (format!("{hint} {rest}"), next);
+    let Some(disk) = disk.filter(|disk| disk.level == "warn") else {
+        return advise(ws, in_run, held);
+    };
+    let (mut hint, release) = disk_advice(ws, disk, false);
+    if let Some(idle) = disk.largest_idle.as_ref().filter(|_| !release.is_empty()) {
+        let _ = write!(
+            hint,
+            " The largest idle workspace is {} ({}, {}); `{}` frees it.",
+            idle.workspace,
+            idle.owner,
+            human_bytes(idle.bytes),
+            shell_line(&release)
+        );
     }
-    advise(ws, in_run, held)
+    let (rest, next) = advise(ws, in_run, held);
+    (format!("{hint} {rest}"), next)
 }
 
 /// What a `low` or `warn` disk asks for: release the largest idle
@@ -1626,6 +1635,51 @@ mod tests {
         let json = serde_json::to_value(&loud).unwrap();
         assert_eq!(json["disk_status"]["level"], "low", "{json}");
         assert!(json.get("disk").is_some(), "{json}");
+    }
+
+    /// #432: a `warn` disk with an idle workspace to release told a change
+    /// that needs a description only to release someone's workspace. The
+    /// release is now a sentence in the hint, and the step keeps `next`.
+    #[test]
+    fn a_warn_disk_names_the_release_and_keeps_the_step() {
+        use v1::{ChangeStep as Step, LifecycleState as State};
+        let warn = DiskStatus {
+            level: "warn".into(),
+            reasons: vec!["free_near_floor".into()],
+            ..low_disk(Some("idle1"))
+        };
+        let ws = stepped(Step::Describe, State::Draft, false);
+        let (alone, step) = advise_with_disk(&ws, false, false, None);
+        let (hint, next) = advise_with_disk(&ws, false, false, Some(&warn));
+        assert_eq!(next, step, "{hint}");
+        assert!(
+            hint.starts_with("Free disk space is getting low (18 GiB free, floor 24 GiB)."),
+            "{hint}"
+        );
+        assert!(
+            hint.contains("idle1 (bot, 5.0 GiB); `reef ws release idle1` frees it"),
+            "{hint}"
+        );
+        assert!(hint.ends_with(&alone), "{hint}");
+        // At `work`, the step's own release, not the idle workspace's.
+        let mut work = ws.clone();
+        work.step = Some("work".into());
+        let (hint, next) = advise_with_disk(&work, false, false, Some(&warn));
+        assert_eq!(
+            next,
+            advise_with_disk(&work, false, false, None).1,
+            "{hint}"
+        );
+        assert!(hint.contains("`reef ws release idle1` frees it"), "{hint}");
+        // This workspace is the idle one: no sentence about it.
+        let mut own = warn.clone();
+        own.largest_idle
+            .as_mut()
+            .unwrap()
+            .workspace
+            .clone_from(&ws.id);
+        let (hint, _) = advise_with_disk(&ws, false, false, Some(&own));
+        assert!(!hint.contains("largest idle"), "{hint}");
     }
 
     #[test]
