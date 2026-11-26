@@ -719,7 +719,12 @@ async fn release(ctx: &Ctx, global: &Global, args: ReleaseArgs) -> Result<(), Cl
     {
         return kept;
     }
-    let response = if found.state() == WorkspaceState::Active {
+    // A `releasing` one is a release a crash interrupted: finish it now,
+    // as `reef ws release` does, rather than wait for its lease (#322).
+    let response = if matches!(
+        found.state(),
+        WorkspaceState::Active | WorkspaceState::Releasing
+    ) {
         ctx.call_within(
             // Deliberately a create's bound: the 300 s the provider's
             // release has always had.
@@ -741,8 +746,13 @@ async fn release(ctx: &Ctx, global: &Global, args: ReleaseArgs) -> Result<(), Cl
     let response = match response {
         Ok(response) => response,
         // Releasing, released or reclaimed already, or a reclaim that
-        // started first: by id, not an error (the contract).
-        Err(error) if error.kind() == reef_error::ErrorKind::Conflict => {
+        // started first: by id, not an error (the contract). So is a
+        // `releasing` one the daemon could not load, as before #322.
+        Err(error)
+            if error.kind() == reef_error::ErrorKind::Conflict
+                || (found.state() == WorkspaceState::Releasing
+                    && error.kind() == reef_error::ErrorKind::Unavailable) =>
+        {
             let now = ctx
                 .call(ctx.client.inspect_workspace("", &found.id, false))
                 .await?

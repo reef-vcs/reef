@@ -686,7 +686,6 @@ impl Manager {
                 rematerialize_failed |= rematerialize;
                 continue;
             };
-            let missing = std::fs::symlink_metadata(&record.path).is_err();
             if rematerialize {
                 if let Err(error) = self.rematerialize(&mut record, &handle).await {
                     tracing::error!(
@@ -697,19 +696,7 @@ impl Manager {
                     rematerialize_failed = true;
                     continue;
                 }
-            } else if missing {
-                if let Err(error) = self
-                    .reclaim_missing(
-                        &record,
-                        &handle,
-                        ReclaimReason::Gc,
-                        DIRECTORY_MISSING,
-                        &record.owner,
-                    )
-                    .await
-                {
-                    tracing::error!(workspace_id = %id, error = %ErrorChain(&error), "cannot record the reclaim");
-                }
+            } else if !self.directory_found_at_start(&record, &handle).await {
                 continue;
             }
             let kind = match record.backend.parse::<BackendKind>() {
@@ -888,6 +875,44 @@ impl Manager {
             .await?;
         }
         Ok((head, with))
+    }
+
+    /// At start, whether `record`'s directory is there to load. One that
+    /// is gone is reclaimed. Any other error reading it, such as a
+    /// permissions error or a volume not mounted yet, says nothing about
+    /// the directory, so the workspace is left unloaded rather than ended
+    /// with its files still there (#323).
+    async fn directory_found_at_start(
+        &self,
+        record: &WorkspaceRecord,
+        handle: &RepoHandle,
+    ) -> bool {
+        let id = record.id;
+        let Err(error) = std::fs::symlink_metadata(&record.path) else {
+            return true;
+        };
+        if error.kind() != io::ErrorKind::NotFound {
+            tracing::error!(
+                workspace_id = %id,
+                path = %record.path.display(),
+                error = %error,
+                "cannot read the workspace directory; workspace not loaded"
+            );
+            return false;
+        }
+        if let Err(error) = self
+            .reclaim_missing(
+                record,
+                handle,
+                ReclaimReason::Gc,
+                DIRECTORY_MISSING,
+                &record.owner,
+            )
+            .await
+        {
+            tracing::error!(workspace_id = %id, error = %ErrorChain(&error), "cannot record the reclaim");
+        }
+        false
     }
 
     /// Reclaims a workspace whose directory is gone, for `reason`: forgets

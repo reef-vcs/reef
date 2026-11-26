@@ -56,7 +56,7 @@ Takes `workspace` (required) and `hold_while`. It snapshots the workspace, remov
  "snapshot_taken": true, "final_op_id": "…", "held_by": 0}
 ```
 
-By id, releasing a workspace that already ended, or is being released or reclaimed, is not an error: it prints `released: false` and the state it is in. By path, a directory that is gone is `not_found`, exit 3.
+By id, releasing a workspace that already ended, or that a reclaim is ending right now, is not an error: it prints `released: false` and the state it is in. A workspace an earlier release left `releasing`, after a crash or a failure partway through, is finished now as `reef ws release` finishes it: it prints `released: true`, or that command's error. One the daemon could not load at start still prints `released: false`. By path, a directory that is gone is `not_found`, exit 3.
 
 ### Errors
 

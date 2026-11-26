@@ -386,7 +386,9 @@ Crash ==
 \* a failed forget or finish_workspace and removes the state directory.
 \* Otherwise the entry is loaded in the row's state, tracked if `active`,
 \* with a jj handle when reopen finds the state directory. A `releasing`
-\* one is left for the next reclaim, which retries it.
+\* one is left for the next reclaim, which retries it. A directory that is
+\* there but cannot be read (#323) leaves the row as it is, unloaded, until
+\* the next start; the model leaves that out, as the step writes nothing.
 StartLease == IF lease = "past" THEN "live" ELSE lease
 
 Start ==
