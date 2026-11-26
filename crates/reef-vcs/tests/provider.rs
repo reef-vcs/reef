@@ -368,6 +368,33 @@ async fn create_attach_release() {
     .await;
 }
 
+// #322: a release a crash interrupted leaves the workspace `releasing`.
+// The provider's release finishes it, as `reef ws release` does, instead
+// of reporting it already releasing until the lease ends.
+#[tokio::test(flavor = "multi_thread")]
+async fn release_finishes_an_interrupted_release() {
+    let (daemon, repo) = daemon().await;
+    let created = ok(
+        &daemon,
+        &["ws", "create", "--repo", &repo.id, "--lease", "60s"],
+    )
+    .await;
+    let id = text(&created["id"]);
+    daemon
+        .handle
+        .state()
+        .manager
+        .strand_releasing(id.parse().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(inspect(&daemon, &id).await["state"], "releasing");
+
+    let released = ok(&daemon, &["ws", "provider", "release", "--workspace", &id]).await;
+    assert_eq!(released["released"], true, "{released}");
+    assert_eq!(released["state"], "released");
+    assert_eq!(inspect(&daemon, &id).await["state"], "released");
+}
+
 // 7
 #[tokio::test(flavor = "multi_thread")]
 async fn holder_death_reclaims() {

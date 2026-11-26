@@ -967,3 +967,37 @@ async fn failed_reclaim_of_a_missing_directory_is_retried() {
     let detail = assert_released_without_snapshot(&daemon, &repo, &ws).await;
     assert!(detail.contains("workspace root missing"), "{detail}");
 }
+
+// #323: at start, any error reading a workspace's directory counted as a
+// missing directory, so a permissions error or a volume not mounted yet
+// reclaimed a workspace whose files were still there. It is now left
+// unloaded, and the next start loads it.
+#[tokio::test(flavor = "multi_thread")]
+async fn unreadable_directory_at_start_is_not_reclaimed() {
+    if nix::unistd::geteuid().is_root() {
+        eprintln!("skipped: root ignores directory permissions");
+        return;
+    }
+    let (daemon, repo) = fixture_without_ticks().await;
+    let ws = create_with(&daemon, &repo, 10_000).await;
+    let parent = Path::new(&ws.path).parent().unwrap().to_owned();
+    let stopped = daemon.stop_keeping().await;
+    // No search permission: reading the directory's metadata fails with
+    // EACCES, not ENOENT.
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let daemon = stopped.start().await;
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(
+        inspect(&daemon.client, &ws).await.state(),
+        v1::WorkspaceState::Active
+    );
+    let reclaims = reclaims_of(&daemon, &ws);
+    assert_eq!(reclaims.len(), 0, "{reclaims:?}");
+
+    let daemon = daemon.restart().await;
+    daemon
+        .client
+        .snapshot_workspace("", &ws.id, "")
+        .await
+        .expect("loaded once its directory can be read");
+}
