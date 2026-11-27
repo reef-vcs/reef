@@ -96,8 +96,8 @@ async fn commit_on(client: &Client, repo: &str, on: &str, files: &[(&str, &str)]
 }
 
 /// Describes `commit` with `text` outside the daemon, as another jj client
-/// would; an answer carrying the text would pass the client's 4 MiB decode
-/// limit (#441). Returns the rewritten commit.
+/// would; `text` may be over the client's 4 MiB limit, which no describe
+/// request could carry (#441). Returns the rewritten commit.
 async fn describe_outside(repo: &SyntheticRepo, commit: &str, text: &str) -> String {
     let (root, commit, text) = (repo.root.clone(), commit.to_owned(), text.to_owned());
     tokio::task::spawn_blocking(move || {
@@ -452,9 +452,10 @@ async fn a_long_description_reads_whole() {
     let (daemon, repo) = fixture().await;
     let client = &daemon.client;
     let Setup { change, .. } = setup(&daemon, &repo).await;
-    // 5 MiB: over the client's 4 MiB limit on its own. Another jj client
-    // writes it, as `jj describe` would.
-    let huge = "a".repeat(5 << 20);
+    // Over the client's 4 MiB limit on its own, with a two-byte character
+    // where the first 1 MiB chunk would end. Another jj client writes it, as
+    // `jj describe` would.
+    let huge = format!("{}{}", "a".repeat((1 << 20) - 1), "é".repeat(2 << 20));
     let commit = describe_outside(&repo, &change.commit_id, &huge).await;
 
     // GetChange carries the whole description, and says it is whole.
@@ -483,9 +484,8 @@ async fn a_long_description_reads_whole() {
         revision: commit.clone(),
         ..DescribeChangeRequest::default()
     };
-    let near = "b".repeat(
-        reef_daemon::client::MAX_REQUEST_BYTES - prost::Message::encoded_len(&base) - 8,
-    );
+    let near =
+        "b".repeat(reef_daemon::client::MAX_REQUEST_BYTES - prost::Message::encoded_len(&base) - 8);
     let described = client
         .describe_change(DescribeChangeRequest {
             description: near.clone(),
@@ -503,7 +503,8 @@ async fn a_long_description_reads_whole() {
         described.description.len() <= 3 << 20,
         "the answer fits its budget"
     );
-    let whole = change_at(client, &repo.id, &commit).await;
+    // The describe rewrote the commit; the change names the new one.
+    let whole = change_at(client, &repo.id, &change.change_id).await;
     assert_eq!(whole.description, format!("{near}\n"));
     assert!(!whole.description_cut);
 }

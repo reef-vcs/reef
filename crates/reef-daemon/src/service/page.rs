@@ -22,9 +22,10 @@ pub const DEFAULT_PAGE_SIZE: usize = 100;
 pub const MAX_PAGE_SIZE: usize = 1000;
 /// The token format's version.
 const TOKEN_VERSION: u32 = 1;
-/// A page stops before its encoded response would pass this, under tonic's
-/// 4 MiB message limit (R2.02); it may then hold fewer than `page_size`
-/// items.
+/// A paged or bounded read stops before its encoded response would pass
+/// this, under tonic's 4 MiB message limit (R2.02, #441): a page may hold
+/// fewer than `page_size` items, and a one-change answer cuts its
+/// description to fit.
 pub const MAX_PAGE_BYTES: usize = 3 << 20;
 
 /// A page token that does not decode, or was sent with different request

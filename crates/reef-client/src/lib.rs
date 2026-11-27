@@ -120,6 +120,7 @@ use reef_api::v1::{
     GetChangeRequest, GetChangeResponse, GetDiffRequest, GetDiffResponse, GetOperationRequest,
     GetOperationResponse, GetStatusRequest, GetStatusResponse, ListChangesRequest,
     ListChangesResponse, ListOperationsRequest, ListOperationsResponse, LogEntry, Operation,
+    ReadChangeDescriptionRequest,
 };
 use reef_api::v1::{
     IndexSymbolsRequest, IndexSymbolsResponse, ListSymbolsRequest, ListSymbolsResponse,
@@ -1258,14 +1259,65 @@ impl Client {
         }
     }
 
-    /// `ChangeService.GetChange`.
+    /// `ChangeService.GetChange`, with the whole description: an answer
+    /// whose text was cut (#441) is read out through `ReadChangeDescription`.
     pub async fn get_change(
         &self,
         request: GetChangeRequest,
     ) -> Result<GetChangeResponse, ClientError> {
+        let (repo, workspace, revision) = (
+            request.repo.clone(),
+            request.workspace.clone(),
+            request.revision.clone(),
+        );
         let mut client =
             ChangeServiceClient::with_interceptor(self.channel.clone(), self.agent.clone());
-        self.call("GetChange", client.get_change(request)).await
+        let mut response: GetChangeResponse =
+            self.call("GetChange", client.get_change(request)).await?;
+        let at_operation = response.at_operation.clone();
+        if let Some(change) = response
+            .change
+            .as_mut()
+            .filter(|change| change.description_cut)
+        {
+            let revision = if change.commit_id.is_empty() {
+                revision
+            } else {
+                change.commit_id.clone()
+            };
+            change.description = self
+                .read_change_description(ReadChangeDescriptionRequest {
+                    repo,
+                    workspace,
+                    revision,
+                    at_operation,
+                    skip_snapshot: true,
+                })
+                .await?;
+            change.description_cut = false;
+        }
+        Ok(response)
+    }
+
+    /// `ChangeService.ReadChangeDescription` (#441): a change's whole
+    /// description, collected from the messages of at most 1 MiB.
+    pub async fn read_change_description(
+        &self,
+        request: ReadChangeDescriptionRequest,
+    ) -> Result<String, ClientError> {
+        let mut client =
+            ChangeServiceClient::with_interceptor(self.channel.clone(), self.agent.clone());
+        let mut stream = self
+            .call(
+                "ReadChangeDescription",
+                client.read_change_description(request),
+            )
+            .await?;
+        let mut description = String::new();
+        while let Some(message) = stream.message().await.map_err(ClientError::from)? {
+            description.push_str(&message.description);
+        }
+        Ok(description)
     }
 
     /// `DiffService.GetDiff`: one page of files.

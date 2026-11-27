@@ -51,14 +51,29 @@ service ChangeService {
     option (reef.api.v1.access) = ACCESS_READ;
     option idempotency_level = IDEMPOTENT;
   }
-  // One change. Errors: also INVALID_ARGUMENT with reason
+  // One change (#441). Its answer keeps at most 3 MiB of the description, so
+  // that one change cannot make it too large for a client; `description_cut`
+  // says so, and ReadChangeDescription has the whole.
+  //
+  // Errors: also INVALID_ARGUMENT with reason
   // REVISION_REQUIRED for an empty `revision`.
   rpc GetChange(GetChangeRequest) returns (GetChangeResponse) {
     option (reef.api.v1.access) = ACCESS_READ;
     option idempotency_level = IDEMPOTENT;
   }
+  // One change's whole description (#441), in messages of at most 1 MiB. The
+  // first message carries the change's ids and the operation read; every
+  // message says where its `description` starts.
+  //
+  // Errors: as for GetChange.
+  rpc ReadChangeDescription(ReadChangeDescriptionRequest) returns (stream ReadChangeDescriptionResponse) {
+    option (reef.api.v1.access) = ACCESS_READ;
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
   // Sets one commit's description, rebasing its descendants onto the new
   // commit with their trees unchanged; bookmarks and working copies follow.
+  // The answer's change keeps at most 3 MiB of the new description, as
+  // `description_cut` says (#441); ReadChangeDescription has the whole.
   // The author stays; the committer becomes the daemon's identity, now. A
   // description already equal (after the trailing newline is added) records
   // no operation: `operation` is unset and `change` is the current commit.
@@ -117,6 +132,9 @@ service ChangeService {
   // in, with the same commit and destination, records nothing: `operation`
   // is unset. When `revision` involves `@`, the workspace is snapshotted
   // first unless `skip_snapshot`, and the snapshot is `snapshot`.
+  //
+  // The answer's change keeps at most 3 MiB of its description, as
+  // `description_cut` says (#441); ReadChangeDescription has the whole.
   //
   // PROPOSED refuses an immutable, hidden, empty or conflicted change, and
   // one commit of a divergent change. A recorded change with no visible
@@ -240,8 +258,8 @@ message Change {
   repeated string parent_commit_ids = 3;
   // Its parents' changes, in the order of `parent_commit_ids`.
   repeated string parent_change_ids = 4;
-  // Its description: whole from `GetChange`, and in a list or a status the
-  // first bytes of it, as `description_cut` says (#431).
+  // Its description: whole when the answer has room for it, and otherwise
+  // the first bytes, as `description_cut` says (#431, #441).
   string description = 5;
   // The author.
   Signature author = 6;
@@ -271,10 +289,11 @@ message Change {
   // Its lifecycle (R3.09), as of the operation read: the latest transition
   // recorded by that operation's end.
   ChangeLifecycle lifecycle = 18;
-  // `description` is cut from the change's whole text (#431): it is the
-  // first bytes, ending at a character boundary, because a list or a status
-  // carries other changes and one must not make it too large for a client.
-  // Read the whole with GetChange, and never write a cut one back.
+  // `description` is cut from the change's whole text (#431, #441): it is
+  // the first bytes, ending at a character boundary, because the answer
+  // carries other changes, or is one change's answer over its budget, and
+  // one description must not make it too large for a client. Read the whole
+  // with ReadChangeDescription, and never write a cut one back.
   bool description_cut = 19;
 }
 
@@ -362,6 +381,35 @@ message GetChangeResponse {
   Change change = 1;
   // The operation it was read at.
   string at_operation = 2;
+}
+
+// One change's whole description.
+message ReadChangeDescriptionRequest {
+  // The repository; may be empty when `workspace` is named.
+  string repo = 1;
+  // The workspace `@` refers to; empty for none.
+  string workspace = 2;
+  // The revision.
+  string revision = 3;
+  // Read at this operation; empty for the head.
+  string at_operation = 4;
+  // Answer from the last recorded snapshot instead of snapshotting first.
+  bool skip_snapshot = 5;
+}
+
+// One message of a change's whole description.
+message ReadChangeDescriptionResponse {
+  // The change, in hex; on the first message only.
+  string change_id = 1;
+  // The commit, in hex; on the first message only.
+  string commit_id = 2;
+  // The operation the description was read at; on the first message only.
+  string at_operation = 3;
+  // Where `description` starts in the whole, in bytes; 0 for the start.
+  uint64 offset = 4;
+  // At most 1 MiB of the description, from `offset`, ending at a character
+  // boundary; empty only when the description is.
+  string description = 5;
 }
 
 // Set a change's description.

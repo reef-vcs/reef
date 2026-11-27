@@ -71,6 +71,7 @@ describe("codegen", () => {
       "Backup",
       "BuildStore",
       "ReadArtifact",
+      "ReadChangeDescription",
       "SubscribeOperations",
       "SubscribePresence",
       "WatchInbox",
