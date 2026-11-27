@@ -565,7 +565,7 @@ jobs:
       - name: Rust toolchain (self-hosted)
         if: runner.environment == 'self-hosted'
         run: rustup toolchain install && rustc --version
-      - uses: astral-sh/setup-uv@v10.3.3   # no moving v10 tag
+      - uses: astral-sh/setup-uv@v10.4.0   # no moving v10 tag
         with:
           version: "0.13.6"
           python-version: ${{ matrix.python }}

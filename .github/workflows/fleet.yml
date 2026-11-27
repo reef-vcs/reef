@@ -90,11 +90,11 @@ jobs:
           build-warnings: warn
       - name: Install fuse-overlayfs
         run: sudo apt-get update && sudo apt-get install -y fuse-overlayfs
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.27"
           cache: false
-      - uses: astral-sh/setup-uv@v10.3.3   # no moving v10 tag
+      - uses: astral-sh/setup-uv@v10.4.0   # no moving v10 tag
       - uses: actions/setup-node@v7
         with:
           node-version: 22
