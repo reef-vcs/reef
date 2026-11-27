@@ -240,11 +240,17 @@ impl From<WorkspaceView<'_>> for v1::Workspace {
             }
             None => v1::WatchState::Unspecified,
         };
+        // A row written before the create refused these is cut on read, so a
+        // legacy one cannot stop a list (#431).
+        let mut owner = record.owner.clone();
+        let mut purpose = record.purpose.clone();
+        cut(&mut owner, crate::workspace::MAX_OWNER_BYTES);
+        cut(&mut purpose, crate::workspace::MAX_PURPOSE_BYTES);
         Self {
             id: record.id.as_hex(),
             repo_id: record.repo_id.as_hex(),
-            owner: record.owner.clone(),
-            purpose: record.purpose.clone(),
+            owner,
+            purpose,
             change_id: record.change_id.clone(),
             commit_id: record.commit_id.clone(),
             backend: record
@@ -458,18 +464,51 @@ pub(super) fn unread_operation(id: &str, repo: RepoId, written: Written<'_>) -> 
 
 /// The most of a description [`listed`] keeps.
 pub(super) const MAX_LISTED_DESCRIPTION: usize = 1 << 10;
+/// The most of an author's or committer's name or email [`listed`] keeps.
+pub(super) const MAX_LISTED_SIGNATURE: usize = 1 << 8;
+/// The most bookmarks or tags [`listed`] keeps.
+pub(super) const MAX_LISTED_REFS: usize = 32;
+/// The most of one bookmark's or tag's name [`listed`] keeps.
+pub(super) const MAX_LISTED_REF_NAME: usize = 1 << 8;
 
-/// `change` as an entry among others' work: at most
-/// [`MAX_LISTED_DESCRIPTION`] bytes of its description, so that one change
-/// cannot make a read of many too large for its client (#422).
+/// `change` as an entry among others' work (#422, #431): at most
+/// [`MAX_LISTED_DESCRIPTION`] bytes of its description, marked with
+/// `description_cut`, and bounded names and refs, so that one change cannot
+/// make a read of many too large for its client.
 pub(super) fn listed(mut change: v1::Change) -> v1::Change {
-    let end = change
-        .description
-        .floor_char_boundary(MAX_LISTED_DESCRIPTION);
-    change.description.truncate(end);
-    // The inbox board holds what it lists.
-    change.description.shrink_to_fit();
+    change.description_cut = cut(&mut change.description, MAX_LISTED_DESCRIPTION);
+    bound(&mut change);
     change
+}
+
+/// Bounds the text [`listed`] bounds besides the description, which a paged
+/// list cuts to its own budget instead (#431).
+pub(super) fn bound(change: &mut v1::Change) {
+    for signature in [change.author.as_mut(), change.committer.as_mut()]
+        .into_iter()
+        .flatten()
+    {
+        cut(&mut signature.name, MAX_LISTED_SIGNATURE);
+        cut(&mut signature.email, MAX_LISTED_SIGNATURE);
+    }
+    for names in [&mut change.bookmarks, &mut change.tags] {
+        names.truncate(MAX_LISTED_REFS);
+        for name in names.iter_mut() {
+            cut(name, MAX_LISTED_REF_NAME);
+        }
+    }
+}
+
+/// Cuts `text` to at most `max` bytes, at a character boundary; whether it
+/// cut.
+pub(super) fn cut(text: &mut String, max: usize) -> bool {
+    let end = text.floor_char_boundary(max);
+    if end >= text.len() {
+        return false;
+    }
+    text.truncate(end);
+    text.shrink_to_fit();
+    true
 }
 
 /// A change as a message: Reef workspaces' working copies by id, others by
@@ -503,6 +542,8 @@ pub(super) fn change(info: &ChangeInfo) -> v1::Change {
         workspace_ids,
         jj_workspaces,
         lifecycle: None,
+        // Set by `listed`, which cuts the text (#431).
+        description_cut: false,
     }
 }
 
@@ -910,6 +951,39 @@ mod tests {
                 "{millis}"
             );
         }
+    }
+
+    /// #431: an entry among others carries bounded text in every field.
+    #[test]
+    fn listed_bounds_description_signatures_and_refs() {
+        let long = |prefix: &str, bytes: usize| format!("{prefix}{}", "x".repeat(bytes));
+        let change = v1::Change {
+            // 1,023 bytes, then a two-byte character: the cut is at it.
+            description: format!("{}é", "a".repeat(MAX_LISTED_DESCRIPTION - 1)),
+            author: Some(v1::Signature {
+                name: long("n", MAX_LISTED_SIGNATURE),
+                email: long("e", MAX_LISTED_SIGNATURE),
+                at: None,
+            }),
+            committer: None,
+            bookmarks: (0..MAX_LISTED_REFS + 5).map(|n| format!("b{n}")).collect(),
+            tags: vec![long("t", MAX_LISTED_REF_NAME)],
+            ..v1::Change::default()
+        };
+        let bounded = listed(change);
+        assert!(bounded.description_cut);
+        assert_eq!(bounded.description, "a".repeat(MAX_LISTED_DESCRIPTION - 1));
+        let author = bounded.author.unwrap();
+        assert_eq!(author.name.len(), MAX_LISTED_SIGNATURE);
+        assert_eq!(author.email.len(), MAX_LISTED_SIGNATURE);
+        assert_eq!(bounded.bookmarks.len(), MAX_LISTED_REFS);
+        assert_eq!(bounded.tags[0].len(), MAX_LISTED_REF_NAME);
+        // A short entry is not marked.
+        let short = listed(v1::Change {
+            description: "short".to_owned(),
+            ..v1::Change::default()
+        });
+        assert!(!short.description_cut);
     }
 
     #[test]

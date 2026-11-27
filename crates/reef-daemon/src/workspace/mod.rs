@@ -237,6 +237,14 @@ pub enum Start {
     Default,
 }
 
+/// The most bytes a workspace's `purpose` may hold (#431): a list carries
+/// many workspaces, and one must not make it too large for a client.
+pub const MAX_PURPOSE_BYTES: usize = 1 << 10;
+
+/// The most bytes a workspace's `owner` may hold (#431), the same limit an
+/// agent's request metadata has.
+pub const MAX_OWNER_BYTES: usize = 1 << 8;
+
 /// What [`Manager::create`] is asked for.
 #[derive(Clone, Debug)]
 pub struct CreateSpec {
@@ -496,6 +504,22 @@ pub enum ManagerError {
     /// agent on operations, and no agent holds one (R2.08).
     #[error("owner must not contain control characters")]
     InvalidOwner,
+    /// An owner over [`MAX_OWNER_BYTES`].
+    #[error("owner must be at most {max} bytes (got {bytes})")]
+    OwnerTooLong {
+        /// Its length.
+        bytes: usize,
+        /// [`MAX_OWNER_BYTES`].
+        max: usize,
+    },
+    /// A purpose over [`MAX_PURPOSE_BYTES`].
+    #[error("purpose must be at most {max} bytes (got {bytes})")]
+    PurposeTooLong {
+        /// Its length.
+        bytes: usize,
+        /// [`MAX_PURPOSE_BYTES`].
+        max: usize,
+    },
     /// The lease could not be issued.
     #[error(transparent)]
     Lease(#[from] LeaseError),
@@ -678,6 +702,8 @@ impl Classify for ManagerError {
             Self::PathNotAbsolute(_)
             | Self::EmptyOwner
             | Self::InvalidOwner
+            | Self::OwnerTooLong { .. }
+            | Self::PurposeTooLong { .. }
             | Self::RepoRequired
             | Self::WorkspaceRequired => ErrorKind::InvalidArgument,
             Self::RepoNotOpen(_) | Self::RepoGone { .. } | Self::NotLoaded(_) => {

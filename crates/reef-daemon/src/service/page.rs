@@ -13,6 +13,7 @@
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use prost::Message as _;
+use reef_api::v1;
 use reef_lib::error::{Classify, ErrorKind};
 
 /// Page size when the request says 0.
@@ -190,6 +191,25 @@ impl Classify for PageError {
     fn kind(&self) -> ErrorKind {
         ErrorKind::InvalidArgument
     }
+}
+
+/// Cuts `change`'s description until a message encoded to `size` bytes fits
+/// `budget`, at a character boundary, and sets `description_cut` (#431).
+/// Whether it cut; a change whose other fields alone pass `budget` is left
+/// as it is.
+pub fn cut_description_to_fit(change: &mut v1::Change, size: usize, budget: usize) -> bool {
+    if size <= budget || change.description.is_empty() {
+        return false;
+    }
+    let excess = size - budget;
+    // `description_cut` costs a tag and a byte, and the string's length
+    // prefix may not shrink with the bytes, so take a little more.
+    let keep = change.description.len().saturating_sub(excess + 8);
+    let end = change.description.floor_char_boundary(keep);
+    change.description.truncate(end);
+    change.description.shrink_to_fit();
+    change.description_cut = true;
+    true
 }
 
 /// A sort key in ascending order of `millis` (non-negative), then `id`.

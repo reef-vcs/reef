@@ -221,7 +221,10 @@ impl StatusService for StatusHandler {
                         diff::conflicted_paths(repo, &wc.commit_id, MAX_CONFLICTED_PATHS)
                             .map_err(status)?;
                     Some(WorkspaceRead {
-                        working_copy: convert::change(&info),
+                        // The one change a status is mostly about, still cut
+                        // as a list entry: one change over 4 MiB would stop
+                        // the whole status (#431).
+                        working_copy: convert::listed(convert::change(&info)),
                         parents,
                         changed: changed.files.iter().map(convert::file_change).collect(),
                         changed_count: changed.total,

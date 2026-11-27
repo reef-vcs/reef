@@ -188,7 +188,8 @@ pub fn workspaces_with_repo(list: &[json::Workspace]) -> Vec<Workspace<'_>> {
 
 /// A change. Always `change_id_reverse_hex`; `commit_id` only when
 /// `divergent`, since then the change id names more than one commit; the
-/// description and flags when set. Dropped: `change_id`,
+/// description and flags when set, `description_cut` when the daemon cut
+/// the description to its listed bound (#431). Dropped: `change_id`,
 /// `parent_commit_ids`, `parent_change_ids`, `author`, `committer`,
 /// `tree_id`, `jj_workspaces`, and `subject`, except in
 /// [`Change::summary`], which keeps `subject` and drops `description`.
@@ -204,6 +205,8 @@ pub struct Change<'a> {
     commit_id: Option<&'a str>,
     #[serde(skip_serializing_if = "str::is_empty")]
     description: &'a str,
+    #[serde(skip_serializing_if = "is_false")]
+    description_cut: bool,
     #[serde(skip_serializing_if = "str::is_empty")]
     subject: &'a str,
     #[serde(skip_serializing_if = "is_false")]
@@ -437,6 +440,8 @@ impl<'a> Change<'a> {
     pub fn summary(change: &'a json::Change) -> Self {
         Self {
             description: "",
+            // No description, so none of it is cut.
+            description_cut: false,
             subject: &change.subject,
             ..Self::from(change)
         }
@@ -449,6 +454,7 @@ impl<'a> From<&'a json::Change> for Change<'a> {
             change_id_reverse_hex: &change.change_id_reverse_hex,
             commit_id: change.divergent.then_some(change.commit_id.as_str()),
             description: &change.description,
+            description_cut: change.description_cut,
             subject: "",
             empty: change.empty,
             conflict: change.conflict,
@@ -903,6 +909,7 @@ mod tests {
             parent_commit_ids: vec!["ef01".into()],
             parent_change_ids: vec!["4567".into()],
             description: description.into(),
+            description_cut: false,
             subject: json::subject(description).to_owned(),
             author: Some(signature()),
             committer: Some(signature()),
@@ -1168,6 +1175,34 @@ mod tests {
             ..plain
         };
         assert_eq!(value(&Change::from(&divergent))["commit_id"], "abcd");
+    }
+
+    // #431: a status over a pipe says when the daemon cut a description.
+    #[test]
+    fn brief_change_says_when_its_description_is_cut() {
+        let whole = full_status(true);
+        let brief = value(&WorkspaceStatus::from(
+            whole.workspace_status.as_ref().unwrap(),
+        ));
+        assert!(
+            brief["working_copy"].get("description_cut").is_none(),
+            "{brief}"
+        );
+
+        let mut cut = full_status(true);
+        let working_copy = cut
+            .workspace_status
+            .as_mut()
+            .unwrap()
+            .working_copy
+            .as_mut()
+            .unwrap();
+        working_copy.description = "a".repeat(1 << 10);
+        working_copy.description_cut = true;
+        let brief = value(&WorkspaceStatus::from(
+            cut.workspace_status.as_ref().unwrap(),
+        ));
+        assert_eq!(brief["working_copy"]["description_cut"], true);
     }
 
     #[test]

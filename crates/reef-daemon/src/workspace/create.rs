@@ -65,8 +65,8 @@ use reef_lib::telemetry::elapsed_ms;
 use super::manager::{forget_jj_workspace, remove_state_dir};
 use super::stores::{StorePlan, StoreTarget, TreeAt, store_targets};
 use super::{
-    CreateSpec, CreateTimings, Created, Manager, ManagerError, SnapshotSpec, Start, WorkspaceEntry,
-    op_meta,
+    CreateSpec, CreateTimings, Created, MAX_OWNER_BYTES, MAX_PURPOSE_BYTES, Manager, ManagerError,
+    SnapshotSpec, Start, WorkspaceEntry, op_meta,
 };
 use crate::backend::{Backend, BackendChoice, BackendError, BaseEntry, WorkspacePaths, select};
 use crate::model::{Attention, RepoId, Timestamp, WorkspaceId, WorkspaceRecord, WorkspaceState};
@@ -129,6 +129,20 @@ impl Manager {
         // them: no owner may carry the mark (R2.08).
         if spec.owner.chars().any(char::is_control) {
             return Err(ManagerError::InvalidOwner);
+        }
+        // Bounded here too: a list or status carries many workspaces, and
+        // one over 4 MiB would stop it for everyone (#431).
+        if spec.owner.len() > MAX_OWNER_BYTES {
+            return Err(ManagerError::OwnerTooLong {
+                bytes: spec.owner.len(),
+                max: MAX_OWNER_BYTES,
+            });
+        }
+        if spec.purpose.len() > MAX_PURPOSE_BYTES {
+            return Err(ManagerError::PurposeTooLong {
+                bytes: spec.purpose.len(),
+                max: MAX_PURPOSE_BYTES,
+            });
         }
         // Checked before any work; the length is settled at step 2.
         self.leases.length_for(spec.lease)?;

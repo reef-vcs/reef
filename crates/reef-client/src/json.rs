@@ -2321,9 +2321,12 @@ pub struct Change {
     pub parent_commit_ids: Vec<String>,
     /// Its parents' changes, in hex.
     pub parent_change_ids: Vec<String>,
-    /// Its description, verbatim; in a status's trunk, heads and parents, at
-    /// most its first 1,024 bytes (#422).
+    /// Its description; in a list or a status at most its first bytes, as
+    /// `description_cut` says (#422, #431).
     pub description: String,
+    /// `description` is only the first bytes of the change's; read the whole
+    /// with `reef change show` and never write a cut one back (#431).
+    pub description_cut: bool,
     /// The description's first line, as `git log --oneline` shows it;
     /// empty when there is none (#262: what brief views keep of a change
     /// that is not the reader's own).
@@ -2845,6 +2848,7 @@ impl From<&v1::Change> for Change {
             parent_commit_ids: change.parent_commit_ids.clone(),
             parent_change_ids: change.parent_change_ids.clone(),
             description: change.description.clone(),
+            description_cut: change.description_cut,
             subject: subject(&change.description).to_owned(),
             author: change.author.as_ref().map(Signature::from),
             committer: change.committer.as_ref().map(Signature::from),
