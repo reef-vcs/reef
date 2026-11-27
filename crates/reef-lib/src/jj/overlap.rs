@@ -1,19 +1,21 @@
 //! Other open changes that change the paths a workspace's change changes
 //! (#263, ADR 0079), read from the view a read holds. A path whose content
 //! in the other change equals trunk's does not count: that change adds
-//! nothing there.
+//! nothing there. Neither does a change whose line already landed.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::SystemTime;
 
 use futures::StreamExt as _;
-use jj_lib::backend::{ChangeId, CommitId};
+use jj_lib::backend::{ChangeId, CommitId, TreeId};
 use jj_lib::commit::Commit;
 use jj_lib::matchers::EverythingMatcher;
 use jj_lib::merged_tree::MergedTree;
+use jj_lib::op_store::OperationId;
 use jj_lib::repo::{ReadonlyRepo, Repo as _};
 use jj_lib::repo_path::{RepoPath, RepoPathBuf};
+use jj_lib::revset::walk_revs;
 use jj_lib::rewrite::merge_commit_trees;
 
 use super::diff::DiffError;
@@ -32,6 +34,13 @@ pub const MAX_OVERLAPS: usize = 10;
 pub const MAX_LISTED_PATHS: usize = 10;
 /// Paths the cache holds in all before it is cleared.
 pub const CACHE_BUDGET: usize = 250_000;
+/// Trunk commits read to remember the trees they had; past this, no
+/// landed line is recognized.
+pub const MAX_TRUNK_TREES: usize = 1_000;
+/// Landed line heads recognized per read; past this, no tree check is made.
+pub const MAX_LANDED_HEADS: usize = 100;
+/// Repository operations whose landed heads the cache keeps.
+const MAX_LANDED_CACHE: usize = 16;
 
 /// The candidate set: open commits on another line of work than `@`.
 const CANDIDATES: &str = "mutable() ~ (::@ | @::)";
@@ -54,6 +63,16 @@ impl ChangedPaths {
         self.paths
             .binary_search_by(|stored| stored.as_ref().cmp(path))
             .is_ok()
+    }
+
+    /// Whether every path `self` changes is one `cover` changes too. A cut
+    /// list does not hold every path it changes, so it is never covered:
+    /// the caller keeps the change rather than risk hiding one.
+    fn covered_by(&self, cover: &ChangedPaths) -> bool {
+        if self.cut {
+            return false;
+        }
+        self.paths.iter().all(|path| cover.contains(path.as_ref()))
     }
 
     /// The stored paths after `other`'s last stored one when `other` is cut:
@@ -83,16 +102,30 @@ fn common<'a>(a: &'a ChangedPaths, b: &'a ChangedPaths) -> Vec<&'a RepoPath> {
         .collect()
 }
 
+/// A mutable line tip whose whole tree is a state trunk reached after the
+/// line's base on trunk.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LandedHead {
+    /// The mutable commit.
+    pub commit: CommitId,
+    /// The trunk commits with that tree, each below or at the line's base.
+    pub trunks: Vec<CommitId>,
+}
+
 #[derive(Debug, Default)]
 struct CacheInner {
     map: HashMap<CommitId, Arc<ChangedPaths>>,
     total: usize,
+    landed: HashMap<(OperationId, CommitId), Arc<Vec<LandedHead>>>,
 }
 
-/// Changed-path lists by commit id, shared by every read. A commit id
-/// hashes its tree and parents, so an entry never goes stale: the cache is
-/// only bounded, cleared whole when it would pass its budget. Two reads
-/// that miss one commit at once both diff it and store equal lists.
+/// Changed-path lists by commit id and landed lines by operation and trunk
+/// commit, shared by every read. A commit id hashes its tree and parents,
+/// and an operation and commit id name an immutable view, so an entry never
+/// goes stale: each map is only bounded. The path map is cleared whole when
+/// it would pass its budget; the landed map when it holds too many
+/// operations. Two reads that miss one entry at once both compute it and
+/// store equal values.
 #[derive(Debug)]
 pub struct PathCache {
     inner: Mutex<CacheInner>,
@@ -170,6 +203,39 @@ impl PathCache {
             inner.total += size;
         }
         Ok(found)
+    }
+
+    /// The landed line tips at `repo`'s operation, keyed by the operation
+    /// and trunk commit: both are immutable, so an entry never goes stale,
+    /// and the map is only bounded. A read `should_stop` cut is returned
+    /// but not stored.
+    async fn landed(
+        &self,
+        repo: &ReadonlyRepo,
+        scope: &RevsetScope<'_>,
+        trunk: &CommitIdHex,
+        should_stop: &dyn Fn() -> bool,
+    ) -> Result<Arc<Vec<LandedHead>>, OverlapError> {
+        let key = (repo.op_id().clone(), trunk.to_id());
+        if let Some(hit) = self
+            .inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .landed
+            .get(&key)
+        {
+            return Ok(Arc::clone(hit));
+        }
+        let (heads, complete) = landed_heads(repo, scope, trunk, should_stop).await?;
+        let heads = Arc::new(heads);
+        if complete {
+            let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+            if inner.landed.len() == MAX_LANDED_CACHE {
+                inner.landed.clear();
+            }
+            inner.landed.insert(key, Arc::clone(&heads));
+        }
+        Ok(heads)
     }
 }
 
@@ -273,7 +339,7 @@ pub async fn find(
     if my_paths.is_empty() {
         return Ok(found);
     }
-    let trunk = match trunk {
+    let trunk_tree = match &trunk {
         Some(trunk) => Some(
             store
                 .get_commit_async(&trunk.commit_id.to_id())
@@ -282,6 +348,9 @@ pub async fn find(
         ),
         None => None,
     };
+    // Read the landed lines only once a candidate shares a path: a status
+    // with no overlap pays nothing for them.
+    let mut landed: Option<Arc<Vec<LandedHead>>> = None;
     for candidate in candidates {
         if should_stop() {
             break;
@@ -295,12 +364,26 @@ pub async fn find(
             repo,
             (&mine, &my_paths),
             (&candidate.commit, &theirs),
-            trunk.as_ref(),
+            trunk_tree.as_ref(),
             !listed,
         )
         .await?;
         if shared.is_empty() {
             continue;
+        }
+        if let Some(trunk) = &trunk {
+            let heads = if let Some(heads) = &landed {
+                Arc::clone(heads)
+            } else {
+                let heads = cache
+                    .landed(repo, scope, &trunk.commit_id, should_stop)
+                    .await?;
+                landed = Some(Arc::clone(&heads));
+                heads
+            };
+            if candidate_landed(repo, cache, &candidate.commit, &theirs, &heads).await? {
+                continue;
+            }
         }
         found.count += 1;
         if listed {
@@ -320,6 +403,146 @@ pub async fn find(
         }
     }
     Ok(found)
+}
+
+/// The trees trunk's newest commits had, by tree, with every trunk commit
+/// that had one. The second value is false when `should_stop` cut the walk,
+/// so the result must not be cached.
+async fn trunk_trees(
+    repo: &ReadonlyRepo,
+    trunk: &CommitIdHex,
+    should_stop: &dyn Fn() -> bool,
+) -> Result<(HashMap<TreeId, Vec<CommitId>>, bool), OverlapError> {
+    let wanted = [trunk.to_id()];
+    let revset = walk_revs(repo, &wanted, &[])
+        .map_err(|error| OverlapError::Revision(RevisionError::Other(error.into())))?;
+    let store = repo.store();
+    let mut trees: HashMap<TreeId, Vec<CommitId>> = HashMap::new();
+    let mut stream = revset.stream();
+    let mut read = 0;
+    let mut complete = true;
+    while let Some(id) = stream.next().await {
+        if should_stop() {
+            complete = false;
+            break;
+        }
+        if read == MAX_TRUNK_TREES {
+            break;
+        }
+        let id = id.map_err(RevisionError::Evaluation)?;
+        let commit = store.get_commit_async(&id).await?;
+        read += 1;
+        if let Some(tree) = commit.tree_ids().as_resolved() {
+            trees.entry(tree.clone()).or_default().push(id);
+        }
+    }
+    Ok((trees, complete))
+}
+
+/// Mutable line tips whose whole tree is a state trunk reached after the
+/// line's base on trunk, a squash merge's source among them. The base is
+/// the merge-base of the tip and trunk, so only a trunk commit below or at
+/// the base can name a landed line: a clock cannot. The second value is
+/// false when `should_stop` cut the read, so the result must not be cached.
+async fn landed_heads(
+    repo: &ReadonlyRepo,
+    scope: &RevsetScope<'_>,
+    trunk: &CommitIdHex,
+    should_stop: &dyn Fn() -> bool,
+) -> Result<(Vec<LandedHead>, bool), OverlapError> {
+    let (trees, mut complete) = trunk_trees(repo, trunk, should_stop).await?;
+    if trees.is_empty() {
+        return Ok((Vec::new(), complete));
+    }
+    let trunk_id = trunk.to_id();
+    let text = format!("mutable() ~ ::{trunk}");
+    let parsed = revset::parse(repo, &text, scope)?;
+    let evaluated = revset::evaluate(repo, &parsed)?;
+    let store = repo.store();
+    let mut heads: Vec<LandedHead> = Vec::new();
+    let mut stream = evaluated.stream();
+    let mut read = 0;
+    while let Some(id) = stream.next().await {
+        if should_stop() {
+            complete = false;
+            break;
+        }
+        if read == MAX_CANDIDATES || heads.len() == MAX_LANDED_HEADS {
+            break;
+        }
+        let id = id.map_err(RevisionError::Evaluation)?;
+        read += 1;
+        let commit = store.get_commit_async(&id).await?;
+        let Some(tree) = commit.tree_ids().as_resolved() else {
+            continue;
+        };
+        let Some(matches) = trees.get(tree) else {
+            continue;
+        };
+        let bases = repo
+            .index()
+            .common_ancestors(
+                std::slice::from_ref(commit.id()),
+                std::slice::from_ref(&trunk_id),
+            )
+            .await
+            .map_err(|error| RevisionError::Other(error.into()))?;
+        let mut trunks = Vec::new();
+        for found in matches {
+            for base in &bases {
+                if repo
+                    .index()
+                    .is_ancestor(base, found)
+                    .await
+                    .map_err(|error| RevisionError::Other(error.into()))?
+                {
+                    trunks.push(found.clone());
+                    break;
+                }
+            }
+        }
+        if !trunks.is_empty() {
+            heads.push(LandedHead {
+                commit: commit.id().clone(),
+                trunks,
+            });
+        }
+    }
+    Ok((heads, complete))
+}
+
+/// Whether `commit`'s line landed: it is a landed tip itself, whose whole
+/// tree is a trunk state after its base, or it is below one and the trunk
+/// commit with the tip's tree changed every path `paths` changes. A change
+/// below a tip on a path trunk's matching commit did not change stays live.
+async fn candidate_landed(
+    repo: &ReadonlyRepo,
+    cache: &PathCache,
+    commit: &Commit,
+    paths: &ChangedPaths,
+    heads: &[LandedHead],
+) -> Result<bool, OverlapError> {
+    for head in heads {
+        if commit.id() == &head.commit {
+            return Ok(true);
+        }
+        if !repo
+            .index()
+            .is_ancestor(commit.id(), &head.commit)
+            .await
+            .map_err(|error| RevisionError::Other(error.into()))?
+        {
+            continue;
+        }
+        for trunk in &head.trunks {
+            let trunk = repo.store().get_commit_async(trunk).await?;
+            let cover = cache.paths(repo, &trunk).await?;
+            if paths.covered_by(&cover) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 /// [`CANDIDATES`] less `::trunk` (landed commits `mutable()` holds when
@@ -400,8 +623,9 @@ async fn candidates(
 }
 
 /// The paths both commits change, in path order, less those where
-/// `theirs`' content equals `trunk`'s. Paths past a cut list are asked of
-/// that commit's tree. With `first_only`, stops at the first.
+/// `theirs`' content equals `trunk`'s or is conflicted. Paths past a cut
+/// list are asked of that commit's tree. With `first_only`, stops at the
+/// first.
 async fn shared_paths(
     repo: &ReadonlyRepo,
     mine: (&Commit, &ChangedPaths),
@@ -432,8 +656,14 @@ async fn shared_paths(
     let their_tree = theirs.0.tree();
     let mut kept = Vec::new();
     for path in shared {
+        let their_value = their_tree.path_value(&path).await?;
+        // A conflicted path cannot be landed as it is; status reports the
+        // conflict itself, so an overlap there is not a live collision.
+        if !their_value.is_resolved() {
+            continue;
+        }
         if let Some(trunk) = trunk
-            && their_tree.path_value(&path).await? == trunk.path_value(&path).await?
+            && their_value == trunk.path_value(&path).await?
         {
             continue;
         }
