@@ -60,6 +60,21 @@ export function holdRead(held: HeldBucket | null, facts: ReadFacts): HeldBucket 
   return { rows, fresh, total: facts.total };
 }
 
+/**
+ * The page answered `key`: a row that left before the answer's response came
+ * back says "Answered", not why it left. A row still in the bucket keeps its
+ * item, and says "Answered" when it leaves.
+ */
+export function sayAnswered(held: HeldBucket, key: string): HeldBucket {
+  const rows = held.rows.map((row) =>
+    row.key === key && row.departed !== null && row.departed !== "answered"
+      ? { ...row, departed: "answered" as const }
+      : row,
+  );
+  const changed = rows.some((row, index) => row !== held.rows[index]);
+  return changed ? { ...held, rows } : held;
+}
+
 /** "Show": new items go on top, newest first, and rows that left go. */
 export function showNew(held: HeldBucket): HeldBucket {
   return {

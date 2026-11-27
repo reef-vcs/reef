@@ -20,7 +20,7 @@ import {
 } from "../gen/reef/api/v1/inbox_pb";
 import { RepositoryService } from "../gen/reef/api/v1/repositories_pb";
 import { holdDigest, shown, type VisitDigest } from "../inbox/digest";
-import { holdRead, showNew, type HeldBucket } from "../inbox/held";
+import { holdRead, sayAnswered, showNew, type HeldBucket } from "../inbox/held";
 import { after, Backoff, type Cancel } from "../live/backoff";
 import { FrameNotifier, type FrameScheduler } from "../live/frame";
 import type { InboxStore, SectionState } from "../live/inbox";
@@ -138,6 +138,13 @@ export class InboxModel {
   /** The page answered the help request `key`: its row says so when it leaves. */
   answeredItem(key: string) {
     this.answered.add(key);
+    // The read that removed the row can land before this answer's response:
+    // the row kept the reason it left ("done"), and no later read need come.
+    const needs = this.snapshot.needs && sayAnswered(this.snapshot.needs, key);
+    const watching = this.snapshot.watching && sayAnswered(this.snapshot.watching, key);
+    if (needs !== this.snapshot.needs || watching !== this.snapshot.watching) {
+      this.update({ needs, watching });
+    }
   }
 
   /**

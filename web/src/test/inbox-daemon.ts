@@ -100,6 +100,8 @@ export class InboxDaemon {
   /** The keys last sent, by repository. */
   private sent = new Map<string, Set<string>>();
   answers: CreateCommentRequest[] = [];
+  /** An answer waits on this before it resolves: a response slower than the stream. */
+  holdAnswer: Promise<void> | null = null;
   /** Thrown by `MarkInboxSeen`, as a remote token the daemon keeps no mark for gets. */
   refuseMarks: Error | null = null;
   markCalls = 0;
@@ -158,7 +160,8 @@ export class InboxDaemon {
         },
       });
       router.service(CommentService, {
-        createComment: (request) => {
+        createComment: async (request) => {
+          if (this.holdAnswer) await this.holdAnswer;
           this.answers.push(request);
           return { comment: { id: "cmt_answer", kind: CommentKind.INSTRUCTION } };
         },
