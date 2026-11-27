@@ -17,7 +17,7 @@ use reef_api::v1::{
 use tonic::{Request, Response, Status};
 
 use super::convert::{self, Written};
-use super::page::PageRequest;
+use super::page::{PageRequest, fit_one_change};
 use super::reading::{bad_token, snapshot_first, target, uses_working_copy};
 use super::written_operation;
 use crate::daemon::AppState;
@@ -103,15 +103,18 @@ impl LandingService for LandingHandler {
                 let mut change = Some(convert::change(&change));
                 crate::lifecycle::messages::fill(state, target.repo.id, change.iter_mut(), None)
                     .await;
-                return Ok(Response::new(LandChangeResponse {
-                    landing: None,
-                    enqueue: None,
-                    operation: None,
-                    snapshot,
-                    change,
-                    stack: Vec::new(),
-                    waiting: Some(crate::landing::messages::automatic_message(&status)),
-                }));
+                return Ok(Response::new(fit_one_change(
+                    LandChangeResponse {
+                        landing: None,
+                        enqueue: None,
+                        operation: None,
+                        snapshot,
+                        change,
+                        stack: Vec::new(),
+                        waiting: Some(crate::landing::messages::automatic_message(&status)),
+                    },
+                    |response| response.change.as_mut(),
+                )));
             }
         };
         let workspace_id = target.workspace.as_ref().map(|record| record.id.as_hex());
@@ -190,15 +193,18 @@ impl LandingService for LandingHandler {
                 .map(|member| &member.row)
                 .zip(stack.iter_mut()),
         );
-        Ok(Response::new(LandChangeResponse {
-            landing: Some(landing),
-            enqueue,
-            operation,
-            snapshot,
-            change,
-            stack,
-            waiting: None,
-        }))
+        Ok(Response::new(fit_one_change(
+            LandChangeResponse {
+                landing: Some(landing),
+                enqueue,
+                operation,
+                snapshot,
+                change,
+                stack,
+                waiting: None,
+            },
+            |response| response.change.as_mut(),
+        )))
     }
 
     #[tracing::instrument(skip_all, fields(repo))]

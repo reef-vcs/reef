@@ -785,6 +785,10 @@ pub(super) const NOT_TOOLS: &[(&str, &str)] = &[
         "agents never approve: a person approves in the web UI with a passkey (R3.43)",
     ),
     (
+        "/reef.api.v1.ChangeService/ReadChangeDescription",
+        "a stream; get_change reads the whole through it when the answer says description_cut",
+    ),
+    (
         "/reef.api.v1.ChangeService/ListProposals",
         "an agent runs `reef proposal list`; wait_for_operations with kind transition follows a proposal",
     ),
@@ -1457,15 +1461,17 @@ tool!(describe_change, args::DescribeChange, |call, args| {
         .scope(args.repo.as_ref(), args.workspace.as_ref())
         .await?;
     let response = ctx
-        .call(ctx.client.describe_change(DescribeChangeRequest {
-            repo: scope.repo_id.clone(),
-            workspace: scope.workspace_id(),
-            revision: at(args.revision),
-            description: args.description,
-            expected_commit_id: args.expected_commit_id.unwrap_or_default(),
-            signoff: false,
-            reset_author: false,
-        }))
+        .call(Box::pin(ctx.client.describe_change(
+            DescribeChangeRequest {
+                repo: scope.repo_id.clone(),
+                workspace: scope.workspace_id(),
+                revision: at(args.revision),
+                description: args.description,
+                expected_commit_id: args.expected_commit_id.unwrap_or_default(),
+                signoff: false,
+                reset_author: false,
+            },
+        )))
         .await?;
     let workspace = workspace_after(ctx, scope.workspace_ref()).await;
     to_value(&Described::from_response(&response, workspace))
@@ -1737,14 +1743,14 @@ tool!(edit_files, args::EditFiles, |call, args| {
         })
         .collect();
     let response = ctx
-        .call(ctx.client.edit_files(EditFilesRequest {
+        .call(Box::pin(ctx.client.edit_files(EditFilesRequest {
             repo: scope.repo_id.clone(),
             workspace: scope.workspace_id(),
             target: Some(target),
             expected_commit_id: args.expected_commit_id.unwrap_or_default(),
             edits,
             description: args.description,
-        }))
+        })))
         .await?;
     let workspace = workspace_after(ctx, scope.workspace_ref()).await;
     to_value(&Edited::from_response(&response, workspace))

@@ -121,15 +121,17 @@ pub(crate) async fn describe(ctx: &Ctx, args: DescribeArgs) -> Result<(), CliErr
         ..AdviceCtx::new(&scope)
     };
     let response = ctx
-        .call(ctx.client.describe_change(DescribeChangeRequest {
-            repo: scope.repo_id.clone(),
-            workspace: scope.workspace_id(),
-            revision,
-            description: join_paragraphs(&args.message),
-            expected_commit_id: args.expected_commit.unwrap_or_default(),
-            signoff: args.signoff,
-            reset_author: args.reset_author,
-        }))
+        .call(Box::pin(ctx.client.describe_change(
+            DescribeChangeRequest {
+                repo: scope.repo_id.clone(),
+                workspace: scope.workspace_id(),
+                revision,
+                description: join_paragraphs(&args.message),
+                expected_commit_id: args.expected_commit.unwrap_or_default(),
+                signoff: args.signoff,
+                reset_author: args.reset_author,
+            },
+        )))
         .await
         .map_err(|error| advice.refine(error))?;
     let workspace = workspace_after(ctx, scope.workspace_ref()).await;

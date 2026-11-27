@@ -323,11 +323,14 @@ pub(super) async fn claim(
     .await?;
     let change = change_of(state, &target, &outcome.row.change_id).await;
     let mut names = Names::default();
-    Ok(Response::new(ClaimConflictResponse {
-        assignment: Some(assignment_message(state, &mut names, &outcome.row, 0)),
-        change,
-        operation,
-    }))
+    Ok(Response::new(super::page::fit_one_change(
+        ClaimConflictResponse {
+            assignment: Some(assignment_message(state, &mut names, &outcome.row, 0)),
+            change,
+            operation,
+        },
+        |response| response.change.as_mut(),
+    )))
 }
 
 /// The change `change_id` at the head, as `GetChange` gives it; `None`

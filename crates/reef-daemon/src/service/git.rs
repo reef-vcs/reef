@@ -17,6 +17,7 @@ use tonic::{Request, Response, Status};
 
 use super::changes::write_change;
 use super::convert::{self, Written};
+use super::page::fit_one_change;
 use super::reading::{snapshot_first, target, uses_working_copy};
 use super::written_operation;
 use crate::daemon::AppState;
@@ -259,14 +260,17 @@ impl GitService for GitHandler {
         );
         let mut change = outcome.info.as_ref().map(convert::change);
         crate::lifecycle::messages::fill(state, target.repo.id, change.iter_mut(), None).await;
-        Ok(Response::new(PublishChangeResponse {
-            publication: Some(publication),
-            operation,
-            snapshot,
-            describe,
-            change,
-            notes,
-        }))
+        Ok(Response::new(fit_one_change(
+            PublishChangeResponse {
+                publication: Some(publication),
+                operation,
+                snapshot,
+                describe,
+                change,
+                notes,
+            },
+            |response| response.change.as_mut(),
+        )))
     }
 }
 

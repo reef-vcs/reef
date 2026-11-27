@@ -20,7 +20,7 @@ use tonic::{Request, Response, Status};
 
 use super::changes::write_change;
 use super::convert;
-use super::page::{MAX_PAGE_BYTES, PageRequest};
+use super::page::{MAX_PAGE_BYTES, PageRequest, fit_one_change};
 use super::reading::{bad_token, op_id, repo_at, snapshot_first, target, uses_working_copy};
 use crate::daemon::AppState;
 use crate::error::status;
@@ -286,6 +286,9 @@ impl FileService for FilesHandler {
         let mut change = rewritten.change.as_ref().map(convert::change);
         crate::lifecycle::messages::fill(&self.state, target.repo.id, change.iter_mut(), None)
             .await;
-        Ok(Response::new(EditFilesResponse { change, operation }))
+        Ok(Response::new(fit_one_change(
+            EditFilesResponse { change, operation },
+            |response| response.change.as_mut(),
+        )))
     }
 }

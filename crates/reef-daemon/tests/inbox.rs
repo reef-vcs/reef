@@ -108,8 +108,8 @@ async fn bookmark(repo: &SyntheticRepo, name: &str, commit: &str) {
 }
 
 /// Describes `commit` with `text` outside the daemon, as another jj client
-/// would; returns the rewritten commit. A daemon answer carrying the text
-/// would pass the client's 4 MiB limit, which is the bug this sets up.
+/// would; returns the rewritten commit. `text` may be over the client's
+/// 4 MiB limit, which no describe request could carry (#441).
 async fn describe_outside(repo: &SyntheticRepo, commit: &str, text: &str) -> String {
     let (root, commit, text) = (repo.root.clone(), commit.to_owned(), text.to_owned());
     tokio::task::spawn_blocking(move || {
@@ -623,21 +623,21 @@ async fn long_text_cannot_stop_a_list_for_everyone() {
     let (daemon, repo) = fixture().await;
     let client = &daemon.client;
     let main = setup(&daemon, &repo, OWNERS_ONLY).await;
-    // 5 MiB: over the client's 4 MiB limit on its own. Another jj client
-    // writes it, since a daemon answer carrying it would already fail.
+    // 5 MiB: over the client's 4 MiB limit on its own, so another jj client
+    // writes it; no describe request could carry it.
     let huge = "a".repeat(5 << 20);
     let change = commit_on(client, &repo.id, &main.commit_id, &[("huge", "x\n")]).await;
     let commit = describe_outside(&repo, &change.commit_id, &huge).await;
-    // The transition's answer carries the change and fails to decode; the
-    // write is recorded before the answer is made.
-    let _ = client
+    // The transition's answer carries the change cut to its budget (#441).
+    client
         .transition_change(TransitionChangeRequest {
             repo: repo.id.clone(),
             revision: change.change_id.clone(),
             to: v1::LifecycleState::Proposed.into(),
             ..TransitionChangeRequest::default()
         })
-        .await;
+        .await
+        .unwrap();
 
     // ListProposals gives the page a byte budget and cuts this one entry.
     let proposals = client
@@ -756,14 +756,15 @@ async fn a_cut_entry_pages_with_its_token() {
     let change = commit_on(client, &repo.id, &main.commit_id, &[("huge", "x\n")]).await;
     let commit = describe_outside(&repo, &change.commit_id, &huge).await;
     // Transitioned last, so the cut entry is the newest and the first page's.
-    let _ = client
+    client
         .transition_change(TransitionChangeRequest {
             repo: repo.id.clone(),
             revision: commit,
             to: v1::LifecycleState::Proposed.into(),
             ..TransitionChangeRequest::default()
         })
-        .await;
+        .await
+        .unwrap();
 
     let first = client
         .list_proposals_page(v1::ListProposalsRequest {

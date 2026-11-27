@@ -11,16 +11,19 @@
 //! revset there, skips as many entries, and checks it ended on that
 //! commit.
 
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Instant;
 
+use futures::Stream;
 use prost::Message as _;
 use reef_api::v1::change_service_server::ChangeService;
 use reef_api::v1::{
     self, AbandonChangeRequest, AbandonChangeResponse, DescribeChangeRequest,
     DescribeChangeResponse, GetChangeRequest, GetChangeResponse, ListChangesRequest,
     ListChangesResponse, ListProposalsRequest, ListProposalsResponse, ListTransitionsRequest,
-    ListTransitionsResponse, OperationKind, RebaseChangeRequest, RebaseChangeResponse,
+    ListTransitionsResponse, OperationKind, ReadChangeDescriptionRequest,
+    ReadChangeDescriptionResponse, RebaseChangeRequest, RebaseChangeResponse,
     TransitionChangeRequest, TransitionChangeResponse,
 };
 use reef_lib::jj::lifecycle::LifecycleState;
@@ -30,7 +33,7 @@ use tonic::{Request, Response, Status};
 
 use super::convert;
 use super::convert::Written;
-use super::page::{MAX_PAGE_BYTES, PageRequest, cut_description_to_fit};
+use super::page::{MAX_PAGE_BYTES, PageRequest, cut_description_to_fit, fit_one_change};
 use super::reading::{
     bad_token, op_id, positional, repo_at, snapshot_first, target, uses_working_copy,
 };
@@ -42,6 +45,14 @@ use crate::workspace::{Write, WriteRequest};
 const LIST_CHANGES: &str = "/reef.api.v1.ChangeService/ListChanges";
 const LIST_PROPOSALS: &str = "/reef.api.v1.ChangeService/ListProposals";
 const LIST_TRANSITIONS: &str = "/reef.api.v1.ChangeService/ListTransitions";
+
+/// The most of a description one `ReadChangeDescription` message carries
+/// (#441), under gRPC's 4 MiB limit as an artifact's messages are.
+const MAX_DESCRIPTION_CHUNK: usize = 1 << 20;
+
+/// The stream `ReadChangeDescription` answers with.
+type DescriptionStream =
+    Pin<Box<dyn Stream<Item = Result<ReadChangeDescriptionResponse, Status>> + Send>>;
 
 /// Serves `ChangeService`.
 #[derive(Debug)]
@@ -58,6 +69,8 @@ impl ChangesHandler {
 
 #[tonic::async_trait]
 impl ChangeService for ChangesHandler {
+    type ReadChangeDescriptionStream = DescriptionStream;
+
     #[tracing::instrument(skip_all, fields(repo, workspace_id))]
     async fn rebase_change(
         &self,
@@ -246,10 +259,90 @@ impl ChangeService for ChangesHandler {
             as_of,
         )
         .await;
-        Ok(Response::new(GetChangeResponse {
-            change: Some(change),
-            at_operation: at,
-        }))
+        Ok(Response::new(fit_one_change(
+            GetChangeResponse {
+                change: Some(change),
+                at_operation: at,
+            },
+            |response| response.change.as_mut(),
+        )))
+    }
+
+    #[tracing::instrument(skip_all, fields(repo, workspace_id))]
+    async fn read_change_description(
+        &self,
+        request: Request<ReadChangeDescriptionRequest>,
+    ) -> Result<Response<Self::ReadChangeDescriptionStream>, Status> {
+        let arrived = Instant::now();
+        let agent = super::caller_of(&request)?;
+        let request = request.into_inner();
+        if request.revision.trim().is_empty() {
+            return Err(status(RevisionError::Required));
+        }
+        let state = &self.state;
+        let target = target(state, &request.repo, &request.workspace)?;
+        if request.at_operation.is_empty() && !request.skip_snapshot {
+            let needed = uses_working_copy(state, &target, vec![request.revision.clone()]).await?;
+            snapshot_first(state, &target, needed, arrived, agent).await?;
+        }
+        let head = state.reads.current(&target.handle).await.map_err(status)?;
+        let reads = Arc::clone(&state.reads);
+        let read_target = target.clone();
+        let (change_id, commit_id, description, at) = state
+            .reads
+            .run(&target.handle, move || async move {
+                let target = read_target;
+                let repo =
+                    repo_at(&reads, target.repo.id, &head, None, &request.at_operation).await?;
+                let resolved = revset::resolve_revision(&repo, &request.revision, &target.scope())
+                    .await
+                    .map_err(status)?;
+                let info = Describer::new(&repo, &target.scope())
+                    .map_err(status)?
+                    .describe(&resolved.commit_id)
+                    .await
+                    .map_err(status)?;
+                Ok::<_, Status>((
+                    info.change_id.to_string(),
+                    info.commit_id.to_string(),
+                    info.description,
+                    op_id(&repo),
+                ))
+            })
+            .await
+            .map_err(status)??;
+        let mut messages = Vec::new();
+        let mut offset: usize = 0;
+        loop {
+            let end = description.floor_char_boundary(
+                offset
+                    .saturating_add(MAX_DESCRIPTION_CHUNK)
+                    .min(description.len()),
+            );
+            let first = offset == 0;
+            messages.push(ReadChangeDescriptionResponse {
+                change_id: if first {
+                    change_id.clone()
+                } else {
+                    String::new()
+                },
+                commit_id: if first {
+                    commit_id.clone()
+                } else {
+                    String::new()
+                },
+                at_operation: if first { at.clone() } else { String::new() },
+                offset: offset as u64,
+                description: description[offset..end].to_owned(),
+            });
+            offset = end;
+            if offset == description.len() {
+                break;
+            }
+        }
+        Ok(Response::new(Box::pin(futures::stream::iter(
+            messages.into_iter().map(Ok),
+        ))))
     }
 
     #[tracing::instrument(skip_all, fields(repo, workspace_id))]
@@ -291,7 +384,10 @@ impl ChangeService for ChangesHandler {
         let mut change = rewritten.change.as_ref().map(convert::change);
         crate::lifecycle::messages::fill(&self.state, target.repo.id, change.iter_mut(), None)
             .await;
-        Ok(Response::new(DescribeChangeResponse { change, operation }))
+        Ok(Response::new(fit_one_change(
+            DescribeChangeResponse { change, operation },
+            |response| response.change.as_mut(),
+        )))
     }
 
     #[tracing::instrument(skip_all, fields(repo, workspace_id))]
@@ -396,7 +492,7 @@ impl ChangeService for ChangesHandler {
                 crate::lifecycle::messages::lifecycle_message(row, last, None)
             }),
         };
-        Ok(Response::new(TransitionChangeResponse {
+        let response = TransitionChangeResponse {
             lifecycle,
             transition: outcome
                 .transition
@@ -411,7 +507,10 @@ impl ChangeService for ChangesHandler {
                 .map(crate::lifecycle::messages::transition_message)
                 .collect(),
             moved: outcome.moved.iter().map(moved_message).collect(),
-        }))
+        };
+        Ok(Response::new(fit_one_change(response, |response| {
+            response.change.as_mut()
+        })))
     }
 
     #[tracing::instrument(skip_all, fields(repo))]

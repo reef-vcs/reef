@@ -120,6 +120,7 @@ use reef_api::v1::{
     GetChangeRequest, GetChangeResponse, GetDiffRequest, GetDiffResponse, GetOperationRequest,
     GetOperationResponse, GetStatusRequest, GetStatusResponse, ListChangesRequest,
     ListChangesResponse, ListOperationsRequest, ListOperationsResponse, LogEntry, Operation,
+    ReadChangeDescriptionRequest,
 };
 use reef_api::v1::{
     IndexSymbolsRequest, IndexSymbolsResponse, ListSymbolsRequest, ListSymbolsResponse,
@@ -170,6 +171,31 @@ pub struct Client {
     remote: Option<remote::RemoteTarget>,
     /// Sent as `reef-agent`, and the bearer token, on every call.
     agent: AgentInterceptor,
+}
+
+/// Where a one-change call named its change, for reading the whole
+/// description its answer cut (#441).
+struct Named {
+    repo: String,
+    workspace: String,
+    revision: String,
+}
+
+impl Named {
+    fn of(repo: &str, workspace: &str, revision: &str) -> Self {
+        Self {
+            repo: repo.to_owned(),
+            workspace: workspace.to_owned(),
+            revision: revision.to_owned(),
+        }
+    }
+}
+
+/// The id of `operation`, or empty (the head) when the answer has none.
+fn operation_id(operation: Option<&Operation>) -> String {
+    operation
+        .map(|operation| operation.id.clone())
+        .unwrap_or_default()
 }
 
 /// Adds the `reef-agent` request metadata (R2.03) to every call, when the
@@ -1258,14 +1284,85 @@ impl Client {
         }
     }
 
-    /// `ChangeService.GetChange`.
+    /// `ChangeService.GetChange`, with the whole description: an answer
+    /// whose text was cut (#441) is read out through `ReadChangeDescription`.
     pub async fn get_change(
         &self,
         request: GetChangeRequest,
     ) -> Result<GetChangeResponse, ClientError> {
+        let named = Named::of(&request.repo, &request.workspace, &request.revision);
         let mut client =
             ChangeServiceClient::with_interceptor(self.channel.clone(), self.agent.clone());
-        self.call("GetChange", client.get_change(request)).await
+        let mut response: GetChangeResponse =
+            self.call("GetChange", client.get_change(request)).await?;
+        let at = response.at_operation.clone();
+        self.whole_description(response.change.as_mut(), named, &at)
+            .await?;
+        Ok(response)
+    }
+
+    /// Puts the whole description back into `change` when its answer cut it
+    /// (#441): an answer carries at most 3 MiB of one, and a caller of this
+    /// client never sees the cut text. Reads by commit at `at_operation`
+    /// (empty for the head), so the text is the answer's commit's.
+    async fn whole_description(
+        &self,
+        change: Option<&mut v1::Change>,
+        named: Named,
+        at_operation: &str,
+    ) -> Result<(), ClientError> {
+        let Some(change) = change.filter(|change| change.description_cut) else {
+            return Ok(());
+        };
+        let request = if change.commit_id.is_empty() {
+            ReadChangeDescriptionRequest {
+                repo: named.repo,
+                workspace: named.workspace,
+                revision: named.revision,
+                at_operation: at_operation.to_owned(),
+                skip_snapshot: true,
+            }
+        } else {
+            // A commit id needs no workspace, and one released since the
+            // first answer would fail this read.
+            let workspace = if named.repo.is_empty() {
+                named.workspace
+            } else {
+                String::new()
+            };
+            ReadChangeDescriptionRequest {
+                repo: named.repo,
+                workspace,
+                revision: change.commit_id.clone(),
+                at_operation: at_operation.to_owned(),
+                skip_snapshot: true,
+            }
+        };
+        change.description = self.read_change_description(request).await?;
+        change.description_cut = false;
+        Ok(())
+    }
+
+    /// `ChangeService.ReadChangeDescription` (#441): a change's whole
+    /// description, collected from the messages of at most 1 MiB. The
+    /// one-change calls here already read it when their answer cut it.
+    pub async fn read_change_description(
+        &self,
+        request: ReadChangeDescriptionRequest,
+    ) -> Result<String, ClientError> {
+        let mut client =
+            ChangeServiceClient::with_interceptor(self.channel.clone(), self.agent.clone());
+        let mut stream = self
+            .call(
+                "ReadChangeDescription",
+                client.read_change_description(request),
+            )
+            .await?;
+        let mut description = String::new();
+        while let Some(message) = stream.message().await.map_err(ClientError::from)? {
+            description.push_str(&message.description);
+        }
+        Ok(description)
     }
 
     /// `DiffService.GetDiff`: one page of files.
@@ -1382,8 +1479,14 @@ impl Client {
     ) -> Result<DescribeChangeResponse, ClientError> {
         let mut client =
             ChangeServiceClient::with_interceptor(self.channel.clone(), self.agent.clone());
-        self.call("DescribeChange", client.describe_change(request))
-            .await
+        let named = Named::of(&request.repo, &request.workspace, &request.revision);
+        let mut response: DescribeChangeResponse = self
+            .call("DescribeChange", client.describe_change(request))
+            .await?;
+        let at = operation_id(response.operation.as_ref());
+        self.whole_description(response.change.as_mut(), named, &at)
+            .await?;
+        Ok(response)
     }
 
     /// `ChangeService.AbandonChange` (R2.03).
@@ -1405,8 +1508,14 @@ impl Client {
     ) -> Result<v1::TransitionChangeResponse, ClientError> {
         let mut client =
             ChangeServiceClient::with_interceptor(self.channel.clone(), self.agent.clone());
-        self.call("TransitionChange", client.transition_change(request))
-            .await
+        let named = Named::of(&request.repo, &request.workspace, &request.revision);
+        let mut response: v1::TransitionChangeResponse = self
+            .call("TransitionChange", client.transition_change(request))
+            .await?;
+        let at = operation_id(response.operation.as_ref());
+        self.whole_description(response.change.as_mut(), named, &at)
+            .await?;
+        Ok(response)
     }
 
     /// `ChangeService.ListProposals` (R3.09): one page.
@@ -1631,7 +1740,17 @@ impl Client {
         }
         let mut client =
             FileServiceClient::with_interceptor(self.channel.clone(), self.agent.clone());
-        self.call("EditFiles", client.edit_files(request)).await
+        let revision = match &request.target {
+            Some(v1::edit_files_request::Target::Revision(revision)) => revision.as_str(),
+            _ => "",
+        };
+        let named = Named::of(&request.repo, &request.workspace, revision);
+        let mut response: EditFilesResponse =
+            self.call("EditFiles", client.edit_files(request)).await?;
+        let at = operation_id(response.operation.as_ref());
+        self.whole_description(response.change.as_mut(), named, &at)
+            .await?;
+        Ok(response)
     }
 
     /// `SymbolService.IndexSymbols` (R2.14).
@@ -2189,9 +2308,15 @@ impl Client {
         &self,
         request: v1::PublishChangeRequest,
     ) -> Result<v1::PublishChangeResponse, ClientError> {
+        let named = Named::of(&request.repo, &request.workspace, &request.revision);
         let mut client = self.git();
-        self.call("PublishChange", client.publish_change(request))
-            .await
+        let mut response: v1::PublishChangeResponse = self
+            .call("PublishChange", client.publish_change(request))
+            .await?;
+        let at = operation_id(response.operation.as_ref());
+        self.whole_description(response.change.as_mut(), named, &at)
+            .await?;
+        Ok(response)
     }
 
     /// `GitService.FetchGitRemote` (#259): fetches branches from a git
@@ -2213,8 +2338,14 @@ impl Client {
     ) -> Result<v1::RebaseChangeResponse, ClientError> {
         let mut client =
             ChangeServiceClient::with_interceptor(self.channel.clone(), self.agent.clone());
-        self.call("RebaseChange", client.rebase_change(request))
-            .await
+        let named = Named::of(&request.repo, &request.workspace, &request.revision);
+        let mut response: v1::RebaseChangeResponse = self
+            .call("RebaseChange", client.rebase_change(request))
+            .await?;
+        let at = operation_id(response.operation.as_ref());
+        self.whole_description(response.change.as_mut(), named, &at)
+            .await?;
+        Ok(response)
     }
 
     /// `LandingService.LandChange` (R3.13): judges a proposed change, queues
@@ -2223,8 +2354,14 @@ impl Client {
         &self,
         request: v1::LandChangeRequest,
     ) -> Result<v1::LandChangeResponse, ClientError> {
+        let named = Named::of(&request.repo, &request.workspace, &request.revision);
         let mut client = self.landing();
-        self.call("LandChange", client.land_change(request)).await
+        let mut response: v1::LandChangeResponse =
+            self.call("LandChange", client.land_change(request)).await?;
+        let at = operation_id(response.operation.as_ref());
+        self.whole_description(response.change.as_mut(), named, &at)
+            .await?;
+        Ok(response)
     }
 
     /// `LandingService.GetLanding` (R3.13).
@@ -2553,8 +2690,14 @@ impl Client {
         &self,
         request: v1::ClaimConflictRequest,
     ) -> Result<v1::ClaimConflictResponse, ClientError> {
-        self.call("ClaimConflict", self.conflicts().claim_conflict(request))
-            .await
+        // The answer's change is read at the head after the claim.
+        let named = Named::of(&request.repo, &request.workspace, "");
+        let mut response: v1::ClaimConflictResponse = self
+            .call("ClaimConflict", self.conflicts().claim_conflict(request))
+            .await?;
+        self.whole_description(response.change.as_mut(), named, "")
+            .await?;
+        Ok(response)
     }
 
     /// `ConflictService.ReleaseConflict` (R3.27): gives an assignment up to

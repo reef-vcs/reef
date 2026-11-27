@@ -22,9 +22,10 @@ pub const DEFAULT_PAGE_SIZE: usize = 100;
 pub const MAX_PAGE_SIZE: usize = 1000;
 /// The token format's version.
 const TOKEN_VERSION: u32 = 1;
-/// A page stops before its encoded response would pass this, under tonic's
-/// 4 MiB message limit (R2.02); it may then hold fewer than `page_size`
-/// items.
+/// A paged or bounded read stops before its encoded response would pass
+/// this, under tonic's 4 MiB message limit (R2.02, #441): a page may hold
+/// fewer than `page_size` items, and a one-change answer cuts its
+/// description to fit.
 pub const MAX_PAGE_BYTES: usize = 3 << 20;
 
 /// A page token that does not decode, or was sent with different request
@@ -210,6 +211,21 @@ pub fn cut_description_to_fit(change: &mut v1::Change, size: usize, budget: usiz
     change.description.shrink_to_fit();
     change.description_cut = true;
     true
+}
+
+/// `response`, with the description of the one change `change` finds in it
+/// cut so the whole answer fits [`MAX_PAGE_BYTES`] (#441). Every answer that
+/// carries one change goes through this: a write's answer must decode once
+/// the write is recorded.
+pub fn fit_one_change<M: prost::Message>(
+    mut response: M,
+    change: fn(&mut M) -> Option<&mut v1::Change>,
+) -> M {
+    let size = response.encoded_len();
+    if let Some(change) = change(&mut response) {
+        cut_description_to_fit(change, size, MAX_PAGE_BYTES);
+    }
+    response
 }
 
 /// A sort key in ascending order of `millis` (non-negative), then `id`.
