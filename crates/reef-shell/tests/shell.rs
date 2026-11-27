@@ -16,6 +16,7 @@ use reef_api::v1::{
     self, CommentKind, CreateCommentRequest, EditFilesRequest, FileEdit, HelpInput, HelpReason,
     edit_files_request, file_edit,
 };
+use reef_client::web::WebPath;
 use reef_daemon::client::Client;
 use reef_daemon::testing::{TestDaemon, no_automatic_snapshots};
 use reef_shell::menu::MenuSpec;
@@ -34,10 +35,16 @@ enum Call {
 struct Recorder {
     calls: Arc<Mutex<Vec<Call>>>,
     menus: Arc<Mutex<Vec<MenuSpec>>>,
+    pages: Arc<Mutex<Vec<Page>>>,
 }
 
 impl Platform for Recorder {
-    fn show(&self, _page: Page) {}
+    fn show(&self, page: Page) {
+        self.pages
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(page);
+    }
     fn post(&self, note: &Note) {
         self.calls
             .lock()
@@ -99,6 +106,25 @@ impl Recorder {
         let deadline = Instant::now() + Duration::from_secs(30);
         while !found(&self.calls()) {
             assert!(Instant::now() < deadline, "{what}: {:?}", self.calls());
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    async fn until_page(&self, what: &str, found: impl Fn(&Page) -> bool) -> Page {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let last = self
+                .pages
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .last()
+                .cloned();
+            if let Some(page) = last.clone()
+                && found(&page)
+            {
+                return page;
+            }
+            assert!(Instant::now() < deadline, "{what}: {last:?}");
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
@@ -227,4 +253,70 @@ async fn a_help_request_posts_once_and_a_restart_posts_nothing() {
     again.until_title("1").await;
     assert_eq!(again.calls(), []);
     shell.send(Command::WindowClosed);
+}
+
+// #413: a session the daemon ended at the cap, with the daemon's pid
+// unchanged, leaves the window on the page the daemon refuses. The page's
+// end() sends its window to `/_session-ended` and the page it was on, and
+// the shell mints a new session there.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_ended_at_the_cap_is_minted_again() {
+    let (daemon, repo) = TestDaemon::with_synthetic_repo_and(Preset::Small, |config| {
+        no_automatic_snapshots(config);
+        config.web.max_sessions = 1;
+    })
+    .await;
+    let data = tempfile::tempdir().unwrap();
+    let page = WebPath::parse(&format!("/repos/{}/inbox", repo.id)).unwrap();
+
+    let (recorder, shell) = start(&daemon, data.path());
+    shell.send(Command::Open(page.clone()));
+    let first = match recorder
+        .until_page("the window's session", |page| {
+            matches!(page, Page::Session(_))
+        })
+        .await
+    {
+        Page::Session(url) => url,
+        page => panic!("the window opened at {page:?}"),
+    };
+    let at = first.origin().to_owned();
+
+    // Another session mints at the cap and ends the shell's.
+    daemon
+        .client
+        .create_web_session(false, "/")
+        .await
+        .expect("another session ends the shell's at the cap");
+
+    // The pid is unchanged, so the recorded session is reused: the window
+    // navigates with a session the daemon has already ended.
+    shell.send(Command::Open(page.clone()));
+    let stale = format!("{at}{page}");
+    recorder
+        .until_page("the stale session reused", |page| {
+            page == &Page::Navigate(stale.clone())
+        })
+        .await;
+
+    // The page reports the refusal with the page it was on; the shell mints
+    // a new session there.
+    shell.send(Command::Visited(format!("{at}/_session-ended{page}")));
+    let second = match recorder
+        .until_page(
+            "a new session at the page it was on",
+            |page| matches!(page, Page::Session(url) if url.expose() != first.expose()),
+        )
+        .await
+    {
+        Page::Session(url) => url,
+        page => panic!("the window showed {page:?}"),
+    };
+    let head = format!("{at}{page}#session=");
+    assert!(
+        second.expose().starts_with(&head),
+        "{} does not open {page}",
+        second.expose()
+    );
+    assert!(second.expose().ends_with("&embedded=1"));
 }
