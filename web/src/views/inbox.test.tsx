@@ -214,6 +214,36 @@ describe("the inbox", () => {
     });
   });
 
+  it("says a row was answered when its read lands before the answer's response", async () => {
+    const daemon = new InboxDaemon();
+    daemon.sections = [
+      section(REPO, { needsYouNow: [helpItem("h1", 2_000)], needsYouNowTotal: 1 }),
+    ];
+    const stream = await open(daemon);
+    let release = () => {};
+    daemon.holdAnswer = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Answer" }));
+    fireEvent.change(screen.getByLabelText("Your answer"), { target: { value: "TOML" } });
+    fireEvent.click(screen.getByRole("button", { name: "Answer" }));
+    // The daemon records the answer and the stream reports the item gone
+    // while the response is still on its way back.
+    daemon.sections = [section(REPO)];
+    await act(() => {
+      stream.send();
+    });
+    expect(screen.getByText(/No longer waiting/)).toBeTruthy();
+    await act(async () => {
+      release();
+      await settle(20);
+    });
+    await waitFor(() => {
+      expect(screen.getByText(/Answered/)).toBeTruthy();
+    });
+    expect(screen.queryByText(/No longer waiting/)).toBeNull();
+  });
+
   it("marks a digest seen after it was on screen, and keeps what it showed for the visit", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     const tick = async (ms: number) => {
