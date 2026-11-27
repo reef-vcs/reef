@@ -30,7 +30,7 @@ use tonic::{Request, Response, Status};
 
 use super::convert;
 use super::convert::Written;
-use super::page::{MAX_PAGE_BYTES, PageRequest};
+use super::page::{MAX_PAGE_BYTES, PageRequest, cut_description_to_fit};
 use super::reading::{
     bad_token, op_id, positional, repo_at, snapshot_first, target, uses_working_copy,
 };
@@ -160,11 +160,22 @@ impl ChangeService for ChangesHandler {
         let mut kept = Vec::with_capacity(entries.len());
         let mut bytes = 0;
         let mut trimmed = false;
-        for entry in entries {
-            let size = entry.encoded_len();
+        for mut entry in entries {
+            if let Some(change) = entry.change.as_mut() {
+                convert::bound(change);
+            }
+            let mut size = entry.encoded_len();
             if !kept.is_empty() && bytes + size > MAX_PAGE_BYTES {
                 trimmed = true;
                 break;
+            }
+            // The first entry has to go in, so one over the budget alone has
+            // its description cut instead (#431).
+            if size > MAX_PAGE_BYTES
+                && let Some(change) = entry.change.as_mut()
+            {
+                cut_description_to_fit(change, size, MAX_PAGE_BYTES);
+                size = entry.encoded_len();
             }
             bytes += size;
             kept.push(entry);
@@ -460,18 +471,14 @@ impl ChangeService for ChangesHandler {
         crate::lifecycle::messages::await_pending(state, target.repo.id, None).await;
         let mut rows = crate::lifecycle::proposals(state, target.repo.id, &filter, after, size + 1)
             .map_err(status)?;
-        let more = rows.len() > size;
+        let mut more = rows.len() > size;
         rows.truncate(size);
-        let next_page_token = match (more, rows.last()) {
-            (true, Some(last)) => {
-                page.token_at(&format!("{}:{}", last.updated_at.0, last.change_id), "")
-            }
-            _ => String::new(),
-        };
         let changes = changes_at_head(state, &target, &rows).await?;
         let mut dependencies =
             crate::lifecycle::dependents::dependencies(state, target.repo.id, &rows).await;
         let mut entries = Vec::with_capacity(rows.len());
+        let mut kept = Vec::with_capacity(rows.len());
+        let mut bytes = 0;
         for row in &rows {
             let last = state
                 .db
@@ -489,7 +496,7 @@ impl ChangeService for ChangesHandler {
                 change.lifecycle = Some(lifecycle.clone());
                 change
             });
-            entries.push(v1::ProposalEntry {
+            let mut entry = v1::ProposalEntry {
                 change_id: row.change_id.clone(),
                 lifecycle: Some(lifecycle),
                 change,
@@ -506,8 +513,34 @@ impl ChangeService for ChangesHandler {
                     .map(|resolved| crate::assign::messages::resolution_message(state, resolved))
                     .collect(),
                 dependencies: dependencies.remove(&row.change_id).unwrap_or_default(),
-            });
+            };
+            if let Some(change) = entry.change.as_mut() {
+                convert::bound(change);
+            }
+            // A page stops before its response passes `MAX_PAGE_BYTES`
+            // (#431); the first entry has to go in, so one over it alone has
+            // its description cut.
+            let mut size = entry.encoded_len();
+            if !kept.is_empty() && bytes + size > MAX_PAGE_BYTES {
+                more = true;
+                break;
+            }
+            if size > MAX_PAGE_BYTES
+                && let Some(change) = entry.change.as_mut()
+            {
+                cut_description_to_fit(change, size, MAX_PAGE_BYTES);
+                size = entry.encoded_len();
+            }
+            bytes += size;
+            kept.push(row);
+            entries.push(entry);
         }
+        let next_page_token = match (more, kept.last()) {
+            (true, Some(last)) => {
+                page.token_at(&format!("{}:{}", last.updated_at.0, last.change_id), "")
+            }
+            _ => String::new(),
+        };
         Ok(Response::new(ListProposalsResponse {
             entries,
             next_page_token,

@@ -727,6 +727,20 @@ fn reason_and_metadata(
                 reef_api::error::REPOSITORY_DIRECTORY_GONE,
                 meta(&[("repo", id.as_hex()), ("path", root.display().to_string())]),
             ))
+        } else if let Some(ManagerError::OwnerTooLong { bytes, max }) =
+            error.downcast_ref::<ManagerError>()
+        {
+            Some((
+                reef_api::error::INVALID_OWNER,
+                meta(&[("bytes", bytes.to_string()), ("max_bytes", max.to_string())]),
+            ))
+        } else if let Some(ManagerError::PurposeTooLong { bytes, max }) =
+            error.downcast_ref::<ManagerError>()
+        {
+            Some((
+                reef_api::error::INVALID_PURPOSE,
+                meta(&[("bytes", bytes.to_string()), ("max_bytes", max.to_string())]),
+            ))
         } else if let Some(db) = wrapped_db(error) {
             db_reason(db)
         } else if let Some(error) = error.downcast_ref::<RevisionError>() {

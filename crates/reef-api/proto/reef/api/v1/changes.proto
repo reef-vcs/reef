@@ -45,7 +45,8 @@ service ChangeService {
   // The log: changes in topological order, children first, branches kept
   // together as `jj log` prints them, with graph edges. A page stops before
   // its response passes 3 MiB, so it may hold fewer than `page_size`
-  // entries.
+  // entries. An entry larger than that alone has its description cut, and
+  // `description_cut` says so (#431).
   rpc ListChanges(ListChangesRequest) returns (ListChangesResponse) {
     option (reef.api.v1.access) = ACCESS_READ;
     option idempotency_level = IDEMPOTENT;
@@ -169,7 +170,9 @@ service ChangeService {
     option (reef.api.v1.access) = ACCESS_WRITE;
   }
   // Changes with a recorded lifecycle, newest update first (R3.09). Each
-  // entry has the change at head, unset when it has no visible commit.
+  // entry has the change at head, unset when it has no visible commit. A
+  // page stops before its response passes 3 MiB, and an entry larger than
+  // that alone has its description cut, as `description_cut` says (#431).
   //
   // Errors: INVALID_ARGUMENT with reason INVALID_CHANGE_ID (metadata
   // `change`) or INVALID_PAGE_TOKEN; NOT_FOUND with reason
@@ -237,7 +240,8 @@ message Change {
   repeated string parent_commit_ids = 3;
   // Its parents' changes, in the order of `parent_commit_ids`.
   repeated string parent_change_ids = 4;
-  // The full description.
+  // Its description: whole from `GetChange`, and in a list or a status the
+  // first bytes of it, as `description_cut` says (#431).
   string description = 5;
   // The author.
   Signature author = 6;
@@ -267,6 +271,11 @@ message Change {
   // Its lifecycle (R3.09), as of the operation read: the latest transition
   // recorded by that operation's end.
   ChangeLifecycle lifecycle = 18;
+  // `description` is cut from the change's whole text (#431): it is the
+  // first bytes, ending at a character boundary, because a list or a status
+  // carries other changes and one must not make it too large for a client.
+  // Read the whole with GetChange, and never write a cut one back.
+  bool description_cut = 19;
 }
 
 // How a log entry reaches a parent.

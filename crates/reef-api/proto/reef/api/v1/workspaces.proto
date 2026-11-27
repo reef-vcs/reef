@@ -41,6 +41,11 @@ service WorkspaceService {
   // `largest_idle_owner`, `largest_idle_bytes`). Checked before anything
   // is made. Nothing else is refused for disk: snapshots, releases, moves
   // and renewals go on below the floor.
+  //
+  // Errors (workspace text, #431): INVALID_ARGUMENT with reason
+  // INVALID_PURPOSE (metadata `bytes`, `max_bytes`) for a purpose over
+  // 1,024 bytes, or INVALID_OWNER (metadata `bytes`, `max_bytes`) for an
+  // owner over 256.
   rpc CreateWorkspace(CreateWorkspaceRequest) returns (CreateWorkspaceResponse) {
     option (reef.api.v1.access) = ACCESS_WRITE;
   }
@@ -351,9 +356,11 @@ message Workspace {
   string id = 1;
   // Its repository.
   string repo_id = 2;
-  // Who holds it.
+  // Who holds it, at most 256 bytes in a read; a row written before that
+  // limit is cut on read (#431).
   string owner = 3;
-  // Free text; empty if not given.
+  // Free text; empty if not given. At most 1,024 bytes in a read; a row
+  // written before that limit is cut on read (#431).
   string purpose = 4;
   // The jj change it is on, in hex.
   string change_id = 5;
@@ -684,9 +691,12 @@ message CreateWorkspaceRequest {
     // A new empty change on top of this revision.
     string new_on = 3;
   }
-  // Who holds the workspace. Required; clients fill in a default.
+  // Who holds the workspace. Required; clients fill in a default. At most
+  // 256 bytes, and no control characters: longer is INVALID_ARGUMENT with
+  // reason INVALID_OWNER (metadata `bytes`, `max_bytes`; #431).
   string owner = 4;
-  // Free text.
+  // Free text. At most 1,024 bytes: longer is INVALID_ARGUMENT with reason
+  // INVALID_PURPOSE (metadata `bytes`, `max_bytes`; #431).
   string purpose = 5;
   // How to materialize it; unspecified for the daemon's
   // `workspace.backend`.
