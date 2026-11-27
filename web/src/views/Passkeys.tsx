@@ -23,6 +23,7 @@ import {
   failure,
   hasPasskeySupport,
   NO_SUPPORT,
+  Refused,
   type Failure,
 } from "../sign/passkey";
 import { device } from "../device";
@@ -343,11 +344,19 @@ export function Passkeys({
       const start = await identities.startPasskeyRegistration({ identity: identity.id });
       let approval;
       if (start.needsApproval) {
+        // A passkey registered for another RP ID (`localhost` before #346)
+        // cannot assert here; the browser would only say the prompt was dismissed.
+        const approvers = passkeys.filter((passkey) => passkey.rpId === start.rpId);
+        if (approvers.length === 0) {
+          throw new Refused(
+            `${identity.name}'s passkeys are for ${passkeys[0]?.rpId ?? "another address"}, not ${start.rpId}, so none can approve adding another. Run reef identity passkey reset ${identity.name} on the daemon's machine, then add a passkey again.`,
+          );
+        }
         say(`Touch one of ${identity.name}'s passkeys to approve adding another.`);
         approval = await assert({
           challenge: start.addChallenge,
           rpId: start.rpId,
-          credentialIds: passkeys.map((passkey) => passkey.credentialId),
+          credentialIds: approvers.map((passkey) => passkey.credentialId),
         });
       }
       say("Create the new passkey on your authenticator.");

@@ -203,6 +203,22 @@ describe("the Passkeys page", () => {
     expect(daemon.registered[0]?.approval?.signature).toEqual(new Uint8Array([0x51]));
   });
 
+  it("says to reset when no live passkey is for the daemon's RP ID", async () => {
+    const daemon = new IdentityDaemon();
+    daemon.passkeys = [{ ...passkey(daemon.arsood, "Old build", 1), rpId: "127.0.0.1" }];
+    const authenticator = installAuthenticator();
+    await setup(daemon);
+    await add("arsood", "YubiKey");
+    await waitFor(() => {
+      expect(within(card("arsood")).getByRole("alert").textContent).toMatch(
+        /are for 127\.0\.0\.1, not localhost.*reef identity passkey reset arsood/,
+      );
+    });
+    expect(authenticator.gets).toEqual([]);
+    expect(authenticator.creates).toEqual([]);
+    expect(daemon.registered).toEqual([]);
+  });
+
   it("removes a passkey with a touch over its removal challenge", async () => {
     const daemon = new IdentityDaemon();
     const gone = passkey(daemon.arsood, "Old laptop", 1);
