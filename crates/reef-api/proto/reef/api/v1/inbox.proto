@@ -209,8 +209,11 @@ message InboxItem {
   // runs while a WatchInbox stream is open, has read the item since it
   // entered; but a proposal the automatic service has not judged yet keeps
   // the number its commit holds, or reads 0 until judged when it holds
-  // none. 0 otherwise. GetInbox reports numbers but never gives one: tell
-  // news from a WatchInbox stream.
+  // none. When a read's write to the raise ledger fails, every
+  // needs-you-now item that read placed carries 0 under the last known
+  // `raised_through`, and 0 there is not news; a failed read re-sends the
+  // last good board's items as they are. 0 otherwise. GetInbox reports
+  // but never gives one: tell news from a WatchInbox stream.
   uint64 raised = 15;
 }
 
@@ -348,6 +351,8 @@ message InboxSectionChange {
   // needs-you-now item of this repository whose `raised` is at most this
   // has been sent on this stream. A client that keeps the largest it saw
   // per repository treats an item raised above it as news; one that has
-  // none takes this at the listing's END. 0 on other parts.
+  // none takes this at the listing's END. 0 on other parts. It stays the
+  // repository's last known number when a read's write to the raise
+  // ledger fails, and that read's needs-you-now items then carry 0.
   uint64 raised_through = 10;
 }

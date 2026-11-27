@@ -318,6 +318,7 @@ mod tests {
             restale_at: None,
             read: true,
             raised_through: 0,
+            settled: true,
         };
         Arc::new(Board {
             repos: BTreeMap::from([(repo, Arc::new(repo_board))]),

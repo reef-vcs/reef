@@ -498,18 +498,25 @@ impl Task {
         self.reading.remove(&repo);
         self.reads.fetch_add(1, Ordering::Relaxed);
         self.pacing.finished(started, worked);
-        let board = match result {
+        let wait = self.retry.get(&repo).map(|(_, wait)| *wait);
+        let (board, again) = match result {
             Ok(board) => {
-                self.retry.remove(&repo);
-                board
+                // Read, but the ledger's write failed: the items stand, raise
+                // 0, and are read again so the write lands once it can.
+                let again = !board.settled;
+                (board, again)
             }
-            Err(error) => {
-                let wait = self.retry.get(&repo).map_or(FIRST_RETRY, |(_, wait)| *wait);
-                self.retry
-                    .insert(repo, (Instant::now() + wait, (wait * 2).min(MAX_RETRY)));
-                RepoBoard::failed(last.as_deref(), super::inbox_error(&error))
-            }
+            Err(error) => (
+                RepoBoard::failed(last.as_deref(), super::inbox_error(&error)),
+                true,
+            ),
         };
+        self.retry.remove(&repo);
+        if again {
+            let wait = wait.unwrap_or(FIRST_RETRY);
+            self.retry
+                .insert(repo, (Instant::now() + wait, (wait * 2).min(MAX_RETRY)));
+        }
         // A repository forgotten during the read leaves with `reconcile`.
         let registered = super::registered(&self.state).ok();
         let kept = registered
@@ -575,8 +582,14 @@ async fn snapshot(
         _ => Arc::new(super::read_subjects(state, &hex, &newest).await?),
     };
     let mut board = RepoBoard::read(repo, buckets, subjects);
-    crate::inbox::raises::settle(&state.db, repo, &mut board, last)
-        .map_err(crate::error::status)?;
+    if let Err(error) = crate::inbox::raises::settle(&state.db, repo, &mut board, last) {
+        // The items stand, unnumbered; the next read writes the ledger again.
+        tracing::warn!(
+            repo = %hex,
+            error = %reef_lib::error::ErrorChain(&error),
+            "the raise ledger's write failed; the inbox reads its items with raise 0"
+        );
+    }
     Ok(board)
 }
 
@@ -606,6 +619,48 @@ mod tests {
         let read = reading.next().await.unwrap();
         task.finish(read);
         assert!(task.dirty.contains(&repo), "read again after the gap");
+    }
+
+    // #400 review P2: a read the ledger did not settle is read again on the
+    // same backoff a failed read uses, so the write lands once it can, and a
+    // settled read ends the retries.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_read_the_ledger_did_not_settle_is_read_again_and_backs_off() {
+        let (daemon, repo) =
+            TestDaemon::with_synthetic_repo(reef_testing::synth::Preset::Small).await;
+        let repo: RepoId = repo.id.parse().unwrap();
+        let (board, _watch) = watch::channel(Arc::new(Board::default()));
+        let mut task = Task::new(
+            Arc::clone(daemon.handle.state()),
+            board,
+            Arc::new(AtomicU64::new(0)),
+        );
+        let unsettled = || {
+            let mut board = RepoBoard::failed(None, v1::InboxError::default());
+            board.error = None;
+            board.read = true;
+            board
+        };
+        let finished = |result: RepoBoard| Read {
+            repo,
+            last: None,
+            result: Ok(result),
+            started: Instant::now(),
+            worked: Duration::ZERO,
+        };
+        // Each failure doubles the wait the next read is armed with.
+        for wait in [2, 4, 8, 16, 32, 60, 60] {
+            task.finish(finished(unsettled()));
+            assert_eq!(
+                task.retry.get(&repo).map(|(_, wait)| *wait),
+                Some(Duration::from_secs(wait)),
+                "the next retry"
+            );
+        }
+        let mut settled = unsettled();
+        settled.settled = true;
+        task.finish(finished(settled));
+        assert!(!task.retry.contains_key(&repo), "a settled read ends them");
     }
 
     #[test]
