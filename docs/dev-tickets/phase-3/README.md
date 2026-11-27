@@ -36,7 +36,7 @@ Phase 2 is complete and released as 0.2.0 to 0.4.0 (0.4.2 on jj-lib 0.47.0, 2026
 | R3.18 | not yet briefed (Minimal check set computation) | L | R3.14, R2.15 | none listed |
 | R3.19 | not yet briefed (Per-target evidence) | M | R3.01 | R3.22 |
 | R3.20 | not yet briefed (Compute budgets in policy) | M | R3.07, R3.14 | none listed |
-| R3.21 | not yet briefed (Landing queue priority) | S | R3.14 | none listed |
+| R3.21 | [R3.21-landing-queue-priority.md](R3.21-landing-queue-priority.md) | S | R3.14 | R3.34 (draws each landing's priority and who waits) |
 | R3.22 | not yet briefed (Behavioral diff evidence kind) | M | R3.06, R3.19 | none listed |
 | R3.23 | not yet briefed (Test changes in the proposal view) | M | R3.31 | none listed |
 | R3.24 | not yet briefed (Independent test authorship rules) | S | R3.07, R3.10 | none listed |
