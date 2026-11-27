@@ -1024,6 +1024,110 @@ async fn session_cap_and_idle() {
     drop(stream);
 }
 
+/// A session dropped at the cap ends its open stream; a live session's
+/// stream keeps delivering (#414).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_ended_at_the_cap_ends_its_streams() {
+    let daemon = TestDaemon::start_with(|config: &mut Config| {
+        config.web.max_sessions = 1;
+    })
+    .await;
+    let dropped = session(&daemon.client, false).await;
+    let dropped_token = token_of(&dropped);
+    let (service, origin) = web_pair(&dropped, &dropped_token);
+    let mut dropped_stream = PresenceServiceClient::with_origin(service, origin)
+        .subscribe_presence(SubscribePresenceRequest::default())
+        .await
+        .unwrap()
+        .into_inner();
+    tokio::time::timeout(SECOND, async {
+        loop {
+            if dropped_stream.message().await.unwrap().unwrap().synced {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+
+    // At the cap, minting again drops the session whose stream is open.
+    let live = session(&daemon.client, false).await;
+    let refused = status_over_web(&dropped, Some(&dropped_token))
+        .await
+        .unwrap_err();
+    assert_eq!(reason(&refused), "WEB_SESSION_INVALID");
+
+    let (service, origin) = web_pair(&live, &token_of(&live));
+    let mut live_stream = PresenceServiceClient::with_origin(service, origin)
+        .subscribe_presence(SubscribePresenceRequest::default())
+        .await
+        .unwrap()
+        .into_inner();
+    tokio::time::timeout(SECOND, async {
+        loop {
+            if live_stream.message().await.unwrap().unwrap().synced {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+
+    let activity = "after the cap".to_owned();
+    daemon
+        .client
+        .report_presence(ReportPresenceRequest {
+            agent: "web-test".to_owned(),
+            kind: PresenceKind::Activity.into(),
+            activity: activity.clone(),
+            ..ReportPresenceRequest::default()
+        })
+        .await
+        .unwrap();
+    let seen = |frame: &v1::SubscribePresenceResponse| {
+        frame.events.iter().any(|event| {
+            event
+                .presence
+                .as_ref()
+                .is_some_and(|presence| presence.activity == activity)
+        })
+    };
+
+    // The dropped session's stream ends without the event.
+    let ended = tokio::time::timeout(2 * SECOND, async {
+        loop {
+            match dropped_stream.message().await {
+                Ok(Some(frame)) if seen(&frame) => break false,
+                Ok(Some(_)) => {}
+                Ok(None) => break true,
+                // The body ends without a trailer, so the client sees a
+                // truncated stream; any other error is a real failure.
+                Err(status) => {
+                    assert!(
+                        status.message().contains("missing grpc-status trailer"),
+                        "a stream on a dropped session failed: {status}"
+                    );
+                    break true;
+                }
+            }
+        }
+    })
+    .await
+    .expect("a stream on a dropped session did not end");
+    assert!(ended, "a stream on a dropped session delivered an event");
+
+    // The live session's stream is untouched.
+    tokio::time::timeout(2 * SECOND, async {
+        loop {
+            if seen(&live_stream.message().await.unwrap().unwrap()) {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn bind_failure_is_reported() {
     let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
