@@ -319,4 +319,24 @@ async fn a_session_ended_at_the_cap_is_minted_again() {
         second.expose()
     );
     assert!(second.expose().ends_with("&embedded=1"));
+
+    // A report again at once, even with the marker nested, is not answered
+    // with another session: the window goes offline instead of looping.
+    let again = second.origin().to_owned();
+    shell.send(Command::Visited(format!(
+        "{again}/_session-ended/_session-ended{page}"
+    )));
+    recorder
+        .until_page("no second mint at once", |page| {
+            matches!(page, Page::Offline(_))
+        })
+        .await;
+    let sessions = recorder
+        .pages
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .filter(|page| matches!(page, Page::Session(_)))
+        .count();
+    assert_eq!(sessions, 2, "the first open and one mint");
 }

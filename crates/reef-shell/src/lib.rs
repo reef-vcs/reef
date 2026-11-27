@@ -44,6 +44,10 @@ const START_WAIT: Duration = Duration::from_secs(10);
 /// the app (S-269), so it reports a refusal by navigating here, which
 /// `Command::Visited` carries.
 const SESSION_ENDED: &str = "/_session-ended";
+/// A second report of an ended session this soon after the shell minted one
+/// for the last is not answered with another: a daemon that refuses each new
+/// session at once would otherwise have the window mint at page-load speed.
+const REMINT_EVERY: Duration = Duration::from_secs(10);
 
 /// Where the shell finds things.
 #[derive(Clone, Debug)]
@@ -291,6 +295,9 @@ struct State<P> {
     open_at_login: login::Shown,
     menu: Option<MenuSpec>,
     asked: Option<Ask>,
+    /// When the shell last minted a session because the window reported its
+    /// session ended (#413).
+    reminted: Option<Instant>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -353,7 +360,12 @@ impl<P: Platform> State<P> {
     /// (#413), or `None` when `url` is not that report.
     fn ended_on_window(&self, url: &str) -> Option<WebPath> {
         let (_, at) = self.window.as_ref()?.session.as_ref()?;
-        let page = url.strip_prefix(at)?.strip_prefix(SESSION_ENDED)?;
+        let mut page = url.strip_prefix(at)?.strip_prefix(SESSION_ENDED)?;
+        // A page that reports again before its new session took names the
+        // marker as the page it was on.
+        while let Some(inner) = page.strip_prefix(SESSION_ENDED) {
+            page = inner;
+        }
         if !page.starts_with('/') {
             return None;
         }
@@ -434,6 +446,14 @@ impl<P: Platform> State<P> {
                     if let Some(window) = &mut self.window {
                         window.session = None;
                     }
+                    if self.reminted.is_some_and(|at| at.elapsed() < REMINT_EVERY) {
+                        self.visited = page;
+                        self.platform.show(Page::Offline(
+                            "the daemon ended the window's new web session at once; open the window again from the menu".to_owned(),
+                        ));
+                        return;
+                    }
+                    self.reminted = Some(Instant::now());
                     self.open(page).await;
                     return;
                 }
@@ -541,6 +561,7 @@ async fn run<P: Platform>(
         open_at_login: login::Shown::Off,
         menu: None,
         asked: Some(Ask::Start),
+        reminted: None,
     };
     state.redraw();
     let mut retry = FIRST_RETRY;
@@ -705,6 +726,14 @@ async fn follow<P: Platform>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // #413: the page reports an ended session at the marker this shell reads.
+    #[test]
+    fn the_page_reports_at_the_shells_marker() {
+        let page = include_str!("../../../web/src/session.ts");
+        let line = format!("export const SESSION_ENDED = \"{SESSION_ENDED}\";");
+        assert!(page.contains(&line), "web/src/session.ts lacks {line}");
+    }
 
     #[test]
     fn a_session_url_prints_its_origin_only() {
