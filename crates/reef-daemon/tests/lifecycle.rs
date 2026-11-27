@@ -95,6 +95,50 @@ async fn commit_on(client: &Client, repo: &str, on: &str, files: &[(&str, &str)]
         .unwrap()
 }
 
+/// Describes `commit` with `text` outside the daemon, as another jj client
+/// would; an answer carrying the text would pass the client's 4 MiB decode
+/// limit (#441). Returns the rewritten commit.
+async fn describe_outside(repo: &SyntheticRepo, commit: &str, text: &str) -> String {
+    let (root, commit, text) = (repo.root.clone(), commit.to_owned(), text.to_owned());
+    tokio::task::spawn_blocking(move || {
+        use jj_lib::backend::CommitId;
+        use jj_lib::default_backend_factories::{
+            default_backend_factories, default_working_copy_factories,
+        };
+        use jj_lib::object_id::ObjectId as _;
+        use jj_lib::repo::Repo as _;
+        let settings = test_settings();
+        let workspace = jj_lib::default_backend_factories::default_workspace_loader_factory()
+            .create(&root)
+            .unwrap()
+            .load(
+                &settings,
+                &default_backend_factories(),
+                &default_working_copy_factories(),
+            )
+            .unwrap();
+        let repo = pollster::block_on(workspace.repo_loader().load_at_head(None)).unwrap();
+        let old = pollster::block_on(
+            repo.store()
+                .get_commit_async(&CommitId::try_from_hex(&commit).unwrap()),
+        )
+        .unwrap();
+        let mut tx = repo.start_transaction();
+        let new = pollster::block_on(
+            tx.repo_mut()
+                .rewrite_commit(&old)
+                .set_description(&text)
+                .write(),
+        )
+        .unwrap();
+        pollster::block_on(tx.repo_mut().rebase_descendants()).unwrap();
+        pollster::block_on(tx.commit("describe long")).unwrap();
+        new.id().hex()
+    })
+    .await
+    .unwrap()
+}
+
 /// Sets a local bookmark from outside the daemon, as `jj bookmark set`
 /// would.
 fn set_bookmark(root: &Path, name: &str, commit: &str) {
@@ -398,6 +442,70 @@ async fn propose_and_read() {
         ws.id,
         "the operation names the workspace"
     );
+}
+
+// #441: a description over the client's 4 MiB decode limit reads whole
+// through GetChange, and the answers to TransitionChange and DescribeChange
+// decode instead of failing after their write was recorded.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_long_description_reads_whole() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let Setup { change, .. } = setup(&daemon, &repo).await;
+    // 5 MiB: over the client's 4 MiB limit on its own. Another jj client
+    // writes it, as `jj describe` would.
+    let huge = "a".repeat(5 << 20);
+    let commit = describe_outside(&repo, &change.commit_id, &huge).await;
+
+    // GetChange carries the whole description, and says it is whole.
+    let read = change_at(client, &repo.id, &commit).await;
+    assert_eq!(read.description, huge);
+    assert!(!read.description_cut);
+
+    // The transition is recorded, and its answer decodes: the change comes
+    // back with its description cut, flagged, and readable whole.
+    let proposed = transition(client, &repo.id, to(&commit, State::Proposed))
+        .await
+        .unwrap();
+    let answered = proposed.change.unwrap();
+    assert_eq!(state_of(&answered), State::Proposed);
+    assert!(answered.description_cut, "the answer says its text is cut");
+    assert!(
+        answered.description.len() <= 3 << 20,
+        "the answer fits its budget, not just the client's limit"
+    );
+    assert_eq!(change_at(client, &repo.id, &commit).await.description, huge);
+
+    // A description just under the request limit is accepted; the answer
+    // that carries it is cut instead of failing to decode after the write.
+    let base = DescribeChangeRequest {
+        repo: repo.id.clone(),
+        revision: commit.clone(),
+        ..DescribeChangeRequest::default()
+    };
+    let near = "b".repeat(
+        reef_daemon::client::MAX_REQUEST_BYTES - prost::Message::encoded_len(&base) - 8,
+    );
+    let described = client
+        .describe_change(DescribeChangeRequest {
+            description: near.clone(),
+            ..base
+        })
+        .await
+        .unwrap()
+        .change
+        .unwrap();
+    assert!(
+        described.description_cut,
+        "the answer to a near-limit describe is cut"
+    );
+    assert!(
+        described.description.len() <= 3 << 20,
+        "the answer fits its budget"
+    );
+    let whole = change_at(client, &repo.id, &commit).await;
+    assert_eq!(whole.description, format!("{near}\n"));
+    assert!(!whole.description_cut);
 }
 
 // 4.
