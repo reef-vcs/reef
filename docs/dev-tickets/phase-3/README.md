@@ -45,7 +45,7 @@ Phase 2 is complete and released as 0.2.0 to 0.4.0 (0.4.2 on jj-lib 0.47.0, 2026
 | R3.27 | [R3.27-resolver-assignment-and-queue.md](R3.27-resolver-assignment-and-queue.md) | M | R3.25 | R3.28 |
 | R3.28 | [R3.28-resolution-tiers-and-attempt-caps.md](R3.28-resolution-tiers-and-attempt-caps.md) | M | R3.27, R3.07 | R3.29, R3.30; R3.33 and R3.35 (tier, attempts, resolutions); R3.32 (the `ask` step's seam) |
 | R3.29 | not yet briefed (Intent conflict escalation) | M | R3.28 | none listed |
-| R3.30 | not yet briefed (Backpressure) | S | R3.28 | none listed |
+| R3.30 | [R3.30-backpressure.md](R3.30-backpressure.md) | S | R3.28 | none listed |
 | R3.31 | [R3.31-proposal-view.md](R3.31-proposal-view.md) | M | R3.43, R3.09, R2.15, R2.18 | R3.23, R3.33, R3.40; closes #350 |
 | R3.32 | [R3.32-help-requests.md](R3.32-help-requests.md) | M | R3.12, R2.13 | R3.33, R3.28 (its blocked tiers point at a help request), R3.40 |
 | R3.33 | [R3.33-triage-inbox.md](R3.33-triage-inbox.md) | L (small; decision 5) | R3.31, R3.32, R2.09 | R3.39, R3.40, R4.13; closes #145, #362 |
