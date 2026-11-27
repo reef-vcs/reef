@@ -39,7 +39,7 @@ Phase 2 is complete and released as 0.2.0 to 0.4.0 (0.4.2 on jj-lib 0.47.0, 2026
 | R3.21 | not yet briefed (Landing queue priority) | S | R3.14 | none listed |
 | R3.22 | not yet briefed (Behavioral diff evidence kind) | M | R3.06, R3.19 | none listed |
 | R3.23 | not yet briefed (Test changes in the proposal view) | M | R3.31 | none listed |
-| R3.24 | not yet briefed (Independent test authorship rules) | S | R3.07, R3.10 | none listed |
+| R3.24 | [R3.24-independent-test-authorship.md](R3.24-independent-test-authorship.md) | S | R3.07, R3.10 | none listed |
 | R3.25 | [R3.25-conflict-objects-in-the-api.md](R3.25-conflict-objects-in-the-api.md) | M | R3.04 | R3.26, R3.27, R3.35, R5.01 |
 | R3.26 | not yet briefed (Agent-scoped undo) | M | R3.25, R2.03 | none listed |
 | R3.27 | [R3.27-resolver-assignment-and-queue.md](R3.27-resolver-assignment-and-queue.md) | M | R3.25 | R3.28 |
