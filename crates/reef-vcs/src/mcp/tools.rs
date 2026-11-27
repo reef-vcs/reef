@@ -785,6 +785,10 @@ pub(super) const NOT_TOOLS: &[(&str, &str)] = &[
         "agents never approve: a person approves in the web UI with a passkey (R3.43)",
     ),
     (
+        "/reef.api.v1.ChangeService/ReadChangeDescription",
+        "a stream; get_change reads the whole through it when the answer says description_cut",
+    ),
+    (
         "/reef.api.v1.ChangeService/ListProposals",
         "an agent runs `reef proposal list`; wait_for_operations with kind transition follows a proposal",
     ),
