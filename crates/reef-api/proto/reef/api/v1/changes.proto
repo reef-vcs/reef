@@ -68,7 +68,7 @@ service ChangeService {
   // Errors: as for GetChange.
   rpc ReadChangeDescription(ReadChangeDescriptionRequest) returns (stream ReadChangeDescriptionResponse) {
     option (reef.api.v1.access) = ACCESS_READ;
-    option idempotency_level = NO_SIDE_EFFECTS;
+    option idempotency_level = IDEMPOTENT;
   }
   // Sets one commit's description, rebasing its descendants onto the new
   // commit with their trees unchanged; bookmarks and working copies follow.

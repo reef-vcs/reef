@@ -445,12 +445,15 @@ async fn propose_and_read() {
 }
 
 // #441: a description over the client's 4 MiB decode limit reads whole
-// through GetChange, and the answers to TransitionChange and DescribeChange
-// decode instead of failing after their write was recorded.
+// through the client, and every answer that carries the change decodes
+// instead of failing after its write was recorded.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_long_description_reads_whole() {
     let (daemon, repo) = fixture().await;
     let client = &daemon.client;
+    let mut raw = v1::change_service_client::ChangeServiceClient::new(
+        raw_channel(daemon.handle.socket_path()).await,
+    );
     let Setup { change, .. } = setup(&daemon, &repo).await;
     // Over the client's 4 MiB limit on its own, with a two-byte character
     // where the first 1 MiB chunk would end. Another jj client writes it, as
@@ -458,27 +461,63 @@ async fn a_long_description_reads_whole() {
     let huge = format!("{}{}", "a".repeat((1 << 20) - 1), "é".repeat(2 << 20));
     let commit = describe_outside(&repo, &change.commit_id, &huge).await;
 
-    // GetChange carries the whole description, and says it is whole.
+    // The daemon's own answer is cut to its budget and says so.
+    let get = GetChangeRequest {
+        repo: repo.id.clone(),
+        revision: commit.clone(),
+        skip_snapshot: true,
+        ..GetChangeRequest::default()
+    };
+    let answer = raw.get_change(get.clone()).await.unwrap().into_inner();
+    assert!(prost::Message::encoded_len(&answer) <= 3 << 20);
+    let cut = answer.change.unwrap();
+    assert!(cut.description_cut, "the answer says its text is cut");
+    assert!(huge.starts_with(&cut.description));
+
+    // The client reads the whole through ReadChangeDescription.
     let read = change_at(client, &repo.id, &commit).await;
     assert_eq!(read.description, huge);
     assert!(!read.description_cut);
 
-    // The transition is recorded, and its answer decodes: the change comes
-    // back with its description cut, flagged, and readable whole.
-    let proposed = transition(client, &repo.id, to(&commit, State::Proposed))
+    check_stream(&mut raw, &repo.id, &commit, &change.change_id, &huge).await;
+    check_empty_and_required(client, &mut raw, &repo.id).await;
+
+    // An edit's answer carries the rewritten change and decodes.
+    let edited = client
+        .edit_files(EditFilesRequest {
+            repo: repo.id.clone(),
+            target: Some(edit_files_request::Target::Revision(commit.clone())),
+            edits: vec![FileEdit {
+                path: "c.txt".to_owned(),
+                action: Some(file_edit::Action::Content(b"c\n".to_vec())),
+                executable: None,
+            }],
+            ..EditFilesRequest::default()
+        })
         .await
+        .unwrap()
+        .change
         .unwrap();
+    assert_eq!(edited.description, huge);
+    assert!(!edited.description_cut);
+    let commit = edited.commit_id;
+
+    // The transition is recorded, and its answer decodes, cut and flagged.
+    let proposed = raw
+        .transition_change(TransitionChangeRequest {
+            repo: repo.id.clone(),
+            ..to(&commit, State::Proposed)
+        })
+        .await
+        .unwrap()
+        .into_inner();
     let answered = proposed.change.unwrap();
     assert_eq!(state_of(&answered), State::Proposed);
     assert!(answered.description_cut, "the answer says its text is cut");
-    assert!(
-        answered.description.len() <= 3 << 20,
-        "the answer fits its budget, not just the client's limit"
-    );
-    assert_eq!(change_at(client, &repo.id, &commit).await.description, huge);
+    assert!(answered.description.len() <= 3 << 20);
 
-    // A description just under the request limit is accepted; the answer
-    // that carries it is cut instead of failing to decode after the write.
+    // A description just under the request limit is accepted; the client
+    // hands back the whole, read at the describe's operation.
     let base = DescribeChangeRequest {
         repo: repo.id.clone(),
         revision: commit.clone(),
@@ -495,18 +534,93 @@ async fn a_long_description_reads_whole() {
         .unwrap()
         .change
         .unwrap();
-    assert!(
-        described.description_cut,
-        "the answer to a near-limit describe is cut"
-    );
-    assert!(
-        described.description.len() <= 3 << 20,
-        "the answer fits its budget"
-    );
-    // The describe rewrote the commit; the change names the new one.
+    assert_eq!(described.description, format!("{near}\n"));
+    assert!(!described.description_cut);
     let whole = change_at(client, &repo.id, &change.change_id).await;
     assert_eq!(whole.description, format!("{near}\n"));
     assert!(!whole.description_cut);
+}
+
+type RawChanges = v1::change_service_client::ChangeServiceClient<tonic::transport::Channel>;
+
+/// `commit`'s description streams as `huge`: messages of at most 1 MiB,
+/// each starting where the last ended, with the ids and the operation on
+/// the first only (#441).
+async fn check_stream(raw: &mut RawChanges, repo: &str, commit: &str, change_id: &str, huge: &str) {
+    let mut stream = raw
+        .read_change_description(v1::ReadChangeDescriptionRequest {
+            repo: repo.to_owned(),
+            revision: commit.to_owned(),
+            skip_snapshot: true,
+            ..v1::ReadChangeDescriptionRequest::default()
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let mut whole = String::new();
+    let mut count = 0;
+    while let Some(message) = stream.message().await.unwrap() {
+        assert!(message.description.len() <= 1 << 20);
+        assert_eq!(message.offset, whole.len() as u64);
+        assert_eq!(!message.change_id.is_empty(), count == 0, "{count}");
+        assert_eq!(!message.at_operation.is_empty(), count == 0, "{count}");
+        if count == 0 {
+            assert_eq!(message.commit_id, commit);
+            assert_eq!(message.change_id, change_id);
+        }
+        whole.push_str(&message.description);
+        count += 1;
+    }
+    assert_eq!(whole, huge);
+    assert_eq!(
+        count, 5,
+        "1 MiB less the split character, then four whole MiB"
+    );
+}
+
+/// An empty description streams as one empty message, and a read without a
+/// revision is refused (#441).
+async fn check_empty_and_required(client: &Client, raw: &mut RawChanges, repo: &str) {
+    let mut empty = raw
+        .read_change_description(v1::ReadChangeDescriptionRequest {
+            repo: repo.to_owned(),
+            revision: "root()".to_owned(),
+            skip_snapshot: true,
+            ..v1::ReadChangeDescriptionRequest::default()
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let only = empty.message().await.unwrap().unwrap();
+    assert_eq!((only.offset, only.description.as_str()), (0, ""));
+    assert!(empty.message().await.unwrap().is_none());
+    let error = client
+        .read_change_description(v1::ReadChangeDescriptionRequest {
+            repo: repo.to_owned(),
+            ..v1::ReadChangeDescriptionRequest::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(
+        reason(&error),
+        (Code::InvalidArgument, "REVISION_REQUIRED".to_owned())
+    );
+}
+
+/// A plain channel to the daemon, for answers the client would reassemble.
+async fn raw_channel(socket: &Path) -> tonic::transport::Channel {
+    let path = socket.to_owned();
+    tonic::transport::Endpoint::from_static("http://[::]:0")
+        .connect_with_connector(tower::service_fn(move |_: tonic::transport::Uri| {
+            let path = path.clone();
+            async move {
+                Ok::<_, std::io::Error>(hyper_util::rt::TokioIo::new(
+                    tokio::net::UnixStream::connect(path).await?,
+                ))
+            }
+        }))
+        .await
+        .unwrap()
 }
 
 // 4.

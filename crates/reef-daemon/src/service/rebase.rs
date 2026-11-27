@@ -16,6 +16,7 @@ use tonic::{Request, Response, Status};
 
 use super::changes::write_change;
 use super::convert::{self, Written};
+use super::page::fit_one_change;
 use super::reading::{Target, target};
 use super::written_operation;
 use crate::daemon::AppState;
@@ -101,15 +102,18 @@ pub(super) async fn rebase_change(
     let mut change = rewritten.change.as_ref().map(convert::change);
     crate::lifecycle::messages::fill(state, target.repo.id, change.iter_mut(), None).await;
     let Some(outcome) = rewritten.rebase else {
-        return Ok(Response::new(RebaseChangeResponse {
-            change,
-            operation,
-            snapshot,
-            fetched,
-            fetch_operation,
-            notes,
-            ..RebaseChangeResponse::default()
-        }));
+        return Ok(Response::new(fit_one_change(
+            RebaseChangeResponse {
+                change,
+                operation,
+                snapshot,
+                fetched,
+                fetch_operation,
+                notes,
+                ..RebaseChangeResponse::default()
+            },
+            |response| response.change.as_mut(),
+        )));
     };
     let mut response = report(state, &target, &outcome, notes).await;
     response.change = change;
@@ -117,7 +121,9 @@ pub(super) async fn rebase_change(
     response.snapshot = snapshot;
     response.fetched = fetched;
     response.fetch_operation = fetch_operation;
-    Ok(Response::new(response))
+    Ok(Response::new(fit_one_change(response, |response| {
+        response.change.as_mut()
+    })))
 }
 
 /// The rebase's fetch, unless `skip_fetch`; never through the remote

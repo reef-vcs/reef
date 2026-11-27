@@ -33,7 +33,7 @@ use tonic::{Request, Response, Status};
 
 use super::convert;
 use super::convert::Written;
-use super::page::{MAX_PAGE_BYTES, PageRequest, cut_description_to_fit};
+use super::page::{MAX_PAGE_BYTES, PageRequest, cut_description_to_fit, fit_one_change};
 use super::reading::{
     bad_token, op_id, positional, repo_at, snapshot_first, target, uses_working_copy,
 };
@@ -259,17 +259,13 @@ impl ChangeService for ChangesHandler {
             as_of,
         )
         .await;
-        let mut response = GetChangeResponse {
-            change: Some(change),
-            at_operation: at,
-        };
-        // One change's answer carries one description; over its budget it is
-        // cut rather than too large for the client to decode (#441).
-        let size = response.encoded_len();
-        if let Some(change) = response.change.as_mut() {
-            cut_description_to_fit(change, size, MAX_PAGE_BYTES);
-        }
-        Ok(Response::new(response))
+        Ok(Response::new(fit_one_change(
+            GetChangeResponse {
+                change: Some(change),
+                at_operation: at,
+            },
+            |response| response.change.as_mut(),
+        )))
     }
 
     #[tracing::instrument(skip_all, fields(repo, workspace_id))]
@@ -388,14 +384,10 @@ impl ChangeService for ChangesHandler {
         let mut change = rewritten.change.as_ref().map(convert::change);
         crate::lifecycle::messages::fill(&self.state, target.repo.id, change.iter_mut(), None)
             .await;
-        let mut response = DescribeChangeResponse { change, operation };
-        // The write is recorded; its answer must decode, so a description
-        // over the answer's budget is cut and flagged (#441).
-        let size = response.encoded_len();
-        if let Some(change) = response.change.as_mut() {
-            cut_description_to_fit(change, size, MAX_PAGE_BYTES);
-        }
-        Ok(Response::new(response))
+        Ok(Response::new(fit_one_change(
+            DescribeChangeResponse { change, operation },
+            |response| response.change.as_mut(),
+        )))
     }
 
     #[tracing::instrument(skip_all, fields(repo, workspace_id))]
@@ -500,7 +492,7 @@ impl ChangeService for ChangesHandler {
                 crate::lifecycle::messages::lifecycle_message(row, last, None)
             }),
         };
-        let mut response = TransitionChangeResponse {
+        let response = TransitionChangeResponse {
             lifecycle,
             transition: outcome
                 .transition
@@ -516,13 +508,9 @@ impl ChangeService for ChangesHandler {
                 .collect(),
             moved: outcome.moved.iter().map(moved_message).collect(),
         };
-        // The transition is recorded; its answer must decode, so a
-        // description over the answer's budget is cut and flagged (#441).
-        let size = response.encoded_len();
-        if let Some(change) = response.change.as_mut() {
-            cut_description_to_fit(change, size, MAX_PAGE_BYTES);
-        }
-        Ok(Response::new(response))
+        Ok(Response::new(fit_one_change(response, |response| {
+            response.change.as_mut()
+        })))
     }
 
     #[tracing::instrument(skip_all, fields(repo))]

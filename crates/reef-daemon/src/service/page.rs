@@ -213,6 +213,21 @@ pub fn cut_description_to_fit(change: &mut v1::Change, size: usize, budget: usiz
     true
 }
 
+/// `response`, with the description of the one change `change` finds in it
+/// cut so the whole answer fits [`MAX_PAGE_BYTES`] (#441). Every answer that
+/// carries one change goes through this: a write's answer must decode once
+/// the write is recorded.
+pub fn fit_one_change<M: prost::Message>(
+    mut response: M,
+    change: fn(&mut M) -> Option<&mut v1::Change>,
+) -> M {
+    let size = response.encoded_len();
+    if let Some(change) = change(&mut response) {
+        cut_description_to_fit(change, size, MAX_PAGE_BYTES);
+    }
+    response
+}
+
 /// A sort key in ascending order of `millis` (non-negative), then `id`.
 pub fn oldest_first(millis: i64, id: &str) -> String {
     format!("{:019}:{id}", millis.max(0))

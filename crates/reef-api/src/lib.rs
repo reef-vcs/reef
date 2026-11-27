@@ -226,7 +226,7 @@ pub const API_DIGESTS: &[&str] = &[
     "0094935907bcdf0469d171f4fbd2314a12e5679416c3782b49fd32ccff488a06",
     // #441: `ChangeService.ReadChangeDescription`,
     // `ReadChangeDescriptionRequest` and `ReadChangeDescriptionResponse`.
-    "ac097269e6ee6d3e163d9b4f70c580f9396e93fa046d27c9dc09c48a4669ae2f",
+    "5db5419bea5fc87a0eaefc814653166450ad4b005b30ce46f6fff197d35eef86",
 ];
 
 /// blake3 of the v1 descriptors without comments, as of [`API_REVISION`]:
