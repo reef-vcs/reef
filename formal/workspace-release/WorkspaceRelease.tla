@@ -12,7 +12,9 @@
 (* Left out: GC and restore, which reclaim through the same pipeline;      *)
 (* other workspaces (each reclaim is per workspace); lease supersession;   *)
 (* ReleaseSpec's force and skip_final_snapshot; the shared stores; disk    *)
-(* accounting; the change lifecycle (lifecycle/).                          *)
+(* accounting; the change lifecycle (lifecycle/); a repository whose       *)
+(* directory is gone, which leaves its workspaces unloaded until an        *)
+(* explicit release (#428).                                                *)
 (***************************************************************************)
 EXTENDS Naturals
 
@@ -117,7 +119,10 @@ ReleaseCall ==
     /\ UNCHANGED <<up, dbState, lease, entry, lock, disk, leftReleasing, env, budgets>>
 
 \* An unfinished row with no entry and no directory: a start's
-\* reclaim_missing could not record its end.
+\* reclaim_missing could not record its end. A row whose repository is not
+\* open is left out: the model's Start always opens the repository, so this
+\* covers only a repository that is open (#428 leaves the other case to an
+\* explicit release, and an expiry reclaim refuses it).
 MissingRow == ~loaded /\ ~dir /\ dbState \in {"active", "releasing"}
 
 \* Manager::reclaim's self.entry(id), then lock_for_reclaim's first state

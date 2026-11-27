@@ -576,6 +576,41 @@ pub enum ManagerError {
         #[source]
         source: Box<ManagerError>,
     },
+    /// A release of a workspace whose directory still exists cannot record
+    /// its final snapshot: the repository's directory is gone, so there is
+    /// no repository to snapshot into. The workspace is kept; releasing it
+    /// without a snapshot discards its edits.
+    #[error(
+        "cannot snapshot workspace {id}: repository {repo}'s directory is gone: {}",
+        root.display()
+    )]
+    FinalSnapshotRepositoryGone {
+        /// The workspace.
+        id: WorkspaceId,
+        /// Its repository.
+        repo: RepoId,
+        /// The directory it was registered at.
+        root: PathBuf,
+    },
+    /// The repository still has `active` or `releasing` workspaces, so it
+    /// cannot be forgotten. Names them, and whether its thread is open and
+    /// whether its directory is gone, which decide the command that ends
+    /// them.
+    #[error(
+        "repository {id} has active workspaces: {}",
+        workspace_list(workspaces)
+    )]
+    RepositoryHasWorkspaces {
+        /// The repository.
+        id: RepoId,
+        /// The workspaces holding it.
+        workspaces: Vec<WorkspaceId>,
+        /// Whether its thread is running, so a release can reach it.
+        repository_open: bool,
+        /// Whether its directory is gone, so releasing without a final
+        /// snapshot is the way to end them.
+        repository_gone: bool,
+    },
     /// A stored workspace or commit value does not parse (a row this
     /// binary did not write, R1.18's rematerialization).
     #[error("workspace {id} has an invalid {what} {value:?}")]
@@ -706,12 +741,15 @@ impl Classify for ManagerError {
             | Self::PurposeTooLong { .. }
             | Self::RepoRequired
             | Self::WorkspaceRequired => ErrorKind::InvalidArgument,
-            Self::RepoNotOpen(_) | Self::RepoGone { .. } | Self::NotLoaded(_) => {
-                ErrorKind::Unavailable
-            }
-            Self::NotActive { .. } | Self::LeaseNotExpired(_) | Self::WriteInFlight { .. } => {
-                ErrorKind::Conflict
-            }
+            Self::RepoNotOpen(_)
+            | Self::RepoGone { .. }
+            | Self::NotLoaded(_)
+            | Self::FinalSnapshotRepositoryGone { .. } => ErrorKind::Unavailable,
+            Self::NotActive { .. }
+            | Self::LeaseNotExpired(_)
+            | Self::WriteInFlight { .. }
+            | Self::RepositoryHasWorkspaces { .. }
+            | Self::RewriteSnapshot { .. } => ErrorKind::Conflict,
             Self::NotRegistered(_) => ErrorKind::NotFound,
             Self::Task(_) | Self::InvalidRecord { .. } => ErrorKind::Internal,
             Self::Watcher(error) => error.kind(),
@@ -730,7 +768,6 @@ impl Classify for ManagerError {
             Self::Rebase(error) => error.kind(),
             Self::Edit(error) => error.kind(),
             Self::OpLookup(error) => error.kind(),
-            Self::RewriteSnapshot { .. } => ErrorKind::Conflict,
         }
     }
 }
@@ -749,6 +786,16 @@ impl Advise for ManagerError {
                 reef_api::error::REPOSITORY_DIRECTORY_GONE_HINT,
                 ["reef", "repo", "list"],
             )),
+            Self::RepoNotOpen(_) => Some(Advice::run(
+                "The repository's thread is not running: it failed to open at start, or its directory cannot be read. Restore access to the directory, restart the daemon (`reef daemon stop`; the next command starts it), then retry. `reef repo list` shows the directory.",
+                ["reef", "repo", "list"],
+            )),
+            Self::NotLoaded(id) => Some(Advice::run(
+                format!(
+                    "Workspace {id} is not loaded yet, or its jj workspace could not be reopened. Retry the release; if it persists, restart the daemon (`reef daemon stop`; the next command starts it)."
+                ),
+                ["reef", "ws", "inspect", &id.as_hex()],
+            )),
             Self::WorkspaceRoot(error) => Some(Advice::hint(format!(
                 "Reef keeps {} private to the daemon's user (#260); give it back to that user, or set [workspace] root in config.toml to a directory of your own",
                 error.path().display()
@@ -764,6 +811,41 @@ impl Advise for ManagerError {
                 "The workspace is kept; `reef ws release --no-snapshot` discards its unsnapshotted edits.",
                 ["reef", "ws", "inspect", &id.as_hex()],
             )),
+            Self::FinalSnapshotRepositoryGone { id, .. } => Some(Advice::run(
+                "The workspace is kept. Restore the repository's directory and restart the daemon to snapshot it, or release it with --no-snapshot to discard its unsnapshotted edits.",
+                ["reef", "ws", "release", "--no-snapshot", &id.as_hex()],
+            )),
+            Self::RepositoryHasWorkspaces {
+                workspaces,
+                repository_open,
+                repository_gone,
+                ..
+            } => {
+                let ids = workspace_list(workspaces);
+                let Some(first) = workspaces.first().map(WorkspaceId::as_hex) else {
+                    return Some(Advice::hint(format!("Workspaces still hold it: {ids}.")));
+                };
+                if *repository_gone {
+                    Some(Advice::run(
+                        format!(
+                            "Release them with `reef ws release --no-snapshot <id>`: the repository's directory is gone, so no final snapshot can be recorded and each workspace's edits are discarded. Restore it first to keep them. Workspaces: {ids}."
+                        ),
+                        ["reef", "ws", "release", "--no-snapshot", first.as_str()],
+                    ))
+                } else if *repository_open {
+                    Some(Advice::run(
+                        format!("Release them with `reef ws release <id>`. Workspaces: {ids}."),
+                        ["reef", "ws", "release", first.as_str()],
+                    ))
+                } else {
+                    Some(Advice::run(
+                        format!(
+                            "The repository is not open, so releasing its workspaces would fail. Restore access to its directory, restart the daemon (`reef daemon stop`; the next command starts it), then release them. `reef repo list` shows the directory. Workspaces: {ids}."
+                        ),
+                        ["reef", "repo", "list"],
+                    ))
+                }
+            }
             Self::TreeName(_) => Some(Advice::hint(
                 "The commit has a tree entry git itself never writes, which jj cannot read; start from another revision.",
             )),
@@ -780,6 +862,15 @@ impl Advise for ManagerError {
             _ => None,
         }
     }
+}
+
+/// The workspace ids, comma-separated, as an error names them.
+fn workspace_list(workspaces: &[WorkspaceId]) -> String {
+    workspaces
+        .iter()
+        .map(WorkspaceId::as_hex)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// The advice for a path in no registered repository: register it if it

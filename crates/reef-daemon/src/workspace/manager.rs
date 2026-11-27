@@ -37,6 +37,12 @@ use crate::watcher::{WatchError, select_watcher};
 /// The `reclaims.detail` of a workspace whose directory was gone at start.
 pub(super) const DIRECTORY_MISSING: &str = "directory missing at start";
 
+/// The `reclaims.detail` of an entry-less workspace whose root still has a
+/// mount point under it, so its tear-down was skipped and its directory
+/// kept.
+#[cfg(target_os = "linux")]
+const TEAR_DOWN_SKIPPED_MOUNTS: &str = "tear-down skipped: mounts remain";
+
 /// Owns every loaded workspace and runs the workspace operations. One per
 /// daemon, in [`crate::AppState::manager`].
 pub struct Manager {
@@ -504,6 +510,23 @@ impl Manager {
             Some(artifacts) => Some(artifacts.acquire(crate::artifacts::Holder::Forget).await),
             None => None,
         };
+        // Refused here, under the create lock, so the refusal can name the
+        // workspaces and the command that ends them. The database guard in
+        // `delete_repository` stays as the backstop.
+        let live = self.db.workspaces(
+            Some(id),
+            &[WorkspaceState::Active, WorkspaceState::Releasing],
+        )?;
+        if !live.is_empty() {
+            let repository_open = self.repos.get(id).is_some();
+            return Err(ManagerError::RepositoryHasWorkspaces {
+                id,
+                workspaces: live.into_iter().map(|record| record.id).collect(),
+                repository_open,
+                repository_gone: !repository_open
+                    && matches!(self.db.repository(id), Ok(record) if matches!(record.root.try_exists(), Ok(false))),
+            });
+        }
         let record = self.repos.forget(&self.db, id)?;
         self.presence.end_repository(id);
         self.bases
@@ -903,10 +926,11 @@ impl Manager {
         if let Err(error) = self
             .reclaim_missing(
                 record,
-                handle,
+                Some(handle),
                 ReclaimReason::Gc,
                 DIRECTORY_MISSING,
                 &record.owner,
+                false,
             )
             .await
         {
@@ -915,37 +939,55 @@ impl Manager {
         false
     }
 
-    /// Reclaims a workspace whose directory is gone, for `reason`: forgets
-    /// its jj workspace as `agent` (a failure is logged), removes its state
-    /// directory, then ends its lease and logs the reclaim with `detail`.
-    /// Returns the operation that forgot the jj workspace, if any. If the
-    /// end cannot be recorded, the row stays as it was, and the next reclaim
-    /// of it, or the next start, retries.
+    /// Reclaims a workspace whose directory is gone, or whose repository has
+    /// no handle, for `reason`: forgets its jj workspace as `agent` when
+    /// there is a handle (a failure is logged), removes its state directory,
+    /// tears its directory down if `root_exists`, then ends its lease and
+    /// logs the reclaim with `detail`. Returns the operation that forgot the
+    /// jj workspace, if any. If the end cannot be recorded, the row stays as
+    /// it was, and the next reclaim of it, or the next start, retries.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one record, its optional thread, and the release spec's fields"
+    )]
     pub(super) async fn reclaim_missing(
         &self,
         record: &WorkspaceRecord,
-        handle: &RepoHandle,
+        handle: Option<&RepoHandle>,
         reason: ReclaimReason,
         detail: &str,
         agent: &str,
+        root_exists: bool,
     ) -> Result<Option<String>, ManagerError> {
         let id = record.id;
         tracing::error!(
             workspace_id = %id,
             path = %record.path.display(),
-            "workspace directory is missing; reclaiming it"
+            "workspace has no loaded entry; reclaiming it"
         );
-        let release_op_id = forget_jj_workspace(
-            handle,
-            id,
-            "reef: release workspace {id} (directory missing)",
-            agent,
-        )
-        .await
-        .unwrap_or_else(|error| {
-            tracing::error!(workspace_id = %id, error = %ErrorChain(&error), "cannot forget the jj workspace");
+        let release_op_id = if let Some(handle) = handle {
+            forget_jj_workspace(
+                handle,
+                id,
+                "reef: release workspace {id} (directory missing)",
+                agent,
+            )
+            .await
+            .unwrap_or_else(|error| {
+                tracing::error!(workspace_id = %id, error = %ErrorChain(&error), "cannot forget the jj workspace");
+                None
+            })
+        } else {
+            tracing::warn!(
+                workspace_id = %id,
+                "the workspace's repository is not open; cannot forget its jj workspace"
+            );
             None
-        });
+        };
+        let mut details = vec![detail.to_owned()];
+        if root_exists {
+            self.tear_down_orphan(record, &mut details).await;
+        }
         remove_state_dir(&record.state_dir).await;
         let (state, lease_end) = ending(reason);
         let reclaim = ReclaimRecord {
@@ -957,7 +999,7 @@ impl Manager {
             snapshot_taken: false,
             freed_bytes: None,
             at: Timestamp::now(),
-            detail: Some(detail.to_owned()),
+            detail: Some(details.join("; ")),
         };
         self.db.finish_workspace(id, state, lease_end, &reclaim)?;
         self.disk.forget(id);
@@ -967,6 +1009,97 @@ impl Manager {
         }
         Ok(release_op_id)
     }
+
+    /// Tears down a workspace with no loaded entry, whose repository is not
+    /// open, using the backend its row names. A failure is logged and
+    /// recorded in `details`: the reclaim still ends the workspace, and the
+    /// directory then stays for a person to remove.
+    ///
+    /// With no entry there are no `entry.stores`, and
+    /// [`WorkspacePaths::at`] leaves `store_mounts` empty, so a Linux
+    /// workspace whose read-only bind-mount stores are still mounted inside
+    /// its root is not unmounted first. The clone and copy backends' tear
+    /// down renames the root to `<root>.trash-<nanos>`: `vfs_rename` checks
+    /// only whether the renamed dentry is a mountpoint, not a mount below it,
+    /// so the rename succeeds. The background `delete_trash` then walks the
+    /// trash with `remove_dir_all`, which treats mounts as directories: it
+    /// unlinks the sealed store's files through the mount, fails the `rmdir`
+    /// of the mount point with `EBUSY`, and logs `cannot delete trash; the
+    /// next daemon start retries`. This function has already seen `Ok(())`,
+    /// so the reclaim reports success, not a tear-down failure. The files
+    /// removed are the store's cache under `<state>/stores/<name>/<hash>`,
+    /// which is rebuildable; no workspace edit is touched, and the trash
+    /// directory and mount remain until a person removes them. A loaded
+    /// workspace unmounts its stores (`Manager::unmount_stores`) first. For
+    /// an overlay workspace the root is itself a mountpoint, so
+    /// `unmount_root` runs first and no rename happens.
+    ///
+    /// On Linux this now checks `/proc/self/mounts` for a mount point
+    /// strictly under the root. If one is there it skips the backend's tear
+    /// down and records `tear-down skipped: mounts remain`, keeping the
+    /// directory and its mounts for a person. Unmounting them is a follow-up
+    /// (#449).
+    async fn tear_down_orphan(&self, record: &WorkspaceRecord, details: &mut Vec<String>) {
+        #[cfg(target_os = "linux")]
+        if let Some(mount) = mount_under(&record.path) {
+            tracing::warn!(
+                workspace_id = %record.id,
+                mount = %mount.display(),
+                "a mount remains under the workspace; keeping its directory"
+            );
+            details.push(TEAR_DOWN_SKIPPED_MOUNTS.to_owned());
+            return;
+        }
+        let kind = match record.backend.parse::<BackendKind>() {
+            Ok(kind) => kind,
+            Err(error) => {
+                tracing::error!(workspace_id = %record.id, %error, "cannot tell the workspace's backend; keeping its directory");
+                details.push(format!("workspace directory kept: {error}"));
+                return;
+            }
+        };
+        let paths = WorkspacePaths::at(record.id, record.path.clone(), record.state_dir.clone());
+        let backend = backend_for(kind, &self.config.file.workspace.overlay());
+        match tokio::task::spawn_blocking(move || backend.tear_down(&paths)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::error!(
+                    workspace_id = %record.id,
+                    error = %ErrorChain(&error),
+                    "cannot remove the workspace directory"
+                );
+                details.push(format!("tear-down failed: {}", ErrorChain(&error)));
+            }
+            Err(error) => {
+                tracing::error!(workspace_id = %record.id, %error, "the tear-down task failed");
+                details.push(format!("tear-down task failed: {error}"));
+            }
+        }
+    }
+}
+
+/// On Linux, a mount point strictly under `root`, as `/proc/self/mounts`
+/// names it. None if the mount table cannot be read: the caller then tears
+/// down as before.
+#[cfg(target_os = "linux")]
+fn mount_under(root: &Path) -> Option<PathBuf> {
+    let mounts: Vec<PathBuf> = crate::backend::overlay::mounts()
+        .ok()?
+        .into_iter()
+        .map(|mount| mount.mountpoint)
+        .collect();
+    mount_under_in(root, &mounts)
+}
+
+/// [`mount_under`] over a given list: strictly under `root`, compared by
+/// path components. Neither path is resolved, so a symlink ancestor is not
+/// followed.
+#[cfg(target_os = "linux")]
+fn mount_under_in(root: &Path, mounts: &[PathBuf]) -> Option<PathBuf> {
+    mounts
+        .iter()
+        .find(|mount| mount.as_path() != root && mount.starts_with(root))
+        .cloned()
 }
 
 /// Removes the trash under `ws_root`, then `ws_root` itself if that left
@@ -1153,6 +1286,63 @@ mod tests {
         clear_workspace_root(&dir).unwrap();
         assert!(!dir.exists());
         clear_workspace_root(&dir).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn mounts_under_a_root_are_strictly_under_it() {
+        let root = Path::new("/state/repos/a3dda866c7e8f343/ws/00000000000000aa");
+        assert_eq!(
+            mount_under_in(root, &[root.to_path_buf()]),
+            None,
+            "the root itself is the backend's mountpoint"
+        );
+        assert_eq!(
+            mount_under_in(
+                root,
+                &[PathBuf::from(
+                    "/state/repos/a3dda866c7e8f343/ws/00000000000000aab"
+                )]
+            ),
+            None,
+            "a sibling whose name shares the prefix is not under it"
+        );
+        let store = root.join("store");
+        assert_eq!(
+            mount_under_in(root, std::slice::from_ref(&store)),
+            Some(store)
+        );
+        let deep = root.join("store/deep");
+        assert_eq!(
+            mount_under_in(root, std::slice::from_ref(&deep)),
+            Some(deep)
+        );
+    }
+
+    #[cfg(all(target_os = "linux", feature = "privileged-tests"))]
+    #[test]
+    fn overlay_store_mount_under_a_root_is_detected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        let source = tmp.path().join("source");
+        let store = root.join("store");
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::create_dir_all(&source).unwrap();
+        if !nix::unistd::geteuid().is_root() {
+            return;
+        }
+        nix::mount::mount(
+            Some(source.as_path()),
+            store.as_path(),
+            None::<&str>,
+            nix::mount::MsFlags::MS_BIND,
+            None::<&str>,
+        )
+        .unwrap();
+        let root = std::fs::canonicalize(&root).unwrap();
+        let found = mount_under(&root);
+        nix::mount::umount2(store.as_path(), nix::mount::MntFlags::MNT_DETACH).unwrap();
+        assert_eq!(found, Some(root.join("store")));
     }
 
     fn manager(state: &Path) -> Arc<Manager> {

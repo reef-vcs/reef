@@ -342,6 +342,29 @@ async fn expired_lease_is_reclaimed() {
     );
 }
 
+// #428 (P3a): an expiry reclaim that cannot snapshot because the
+// repository's directory is gone says the workspace waits for the
+// repository or an explicit release, not that the next tick will differ.
+#[tokio::test(flavor = "multi_thread")]
+async fn expiry_with_a_gone_repository_says_it_waits() {
+    let logs = common::logs();
+    let (daemon, repo) = fixture().await;
+    let ws = create(&daemon, &repo).await;
+
+    let stopped = daemon.stop_keeping().await;
+    std::fs::rename(&repo.root, repo.root.with_extension("gone")).unwrap();
+    let daemon = stopped.start().await;
+
+    wait_for(RECLAIM_BOUND, "the expiry log", || async {
+        logs.has_line(&[ws.id.as_str(), "kept until", "restored"])
+    })
+    .await;
+    assert_eq!(
+        inspect(&daemon.client, &ws).await.state(),
+        v1::WorkspaceState::Active
+    );
+}
+
 // 3
 #[tokio::test(flavor = "multi_thread")]
 async fn grace_revives() {
