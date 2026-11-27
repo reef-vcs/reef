@@ -39,6 +39,11 @@ const MAX_RETRY: Duration = Duration::from_secs(30);
 const TOO_OLD_POLL: Duration = Duration::from_secs(60);
 const STATUS_EVERY: Duration = Duration::from_secs(15);
 const START_WAIT: Duration = Duration::from_secs(10);
+/// The path an embedded window's `end()` opens when the daemon refuses its
+/// session (#413), followed by the page it was on. The window has no IPC into
+/// the app (S-269), so it reports a refusal by navigating here, which
+/// `Command::Visited` carries.
+const SESSION_ENDED: &str = "/_session-ended";
 
 /// Where the shell finds things.
 #[derive(Clone, Debug)]
@@ -344,6 +349,17 @@ impl<P: Platform> State<P> {
         page_of(at, url)
     }
 
+    /// The page this window's report says the daemon ended its session on
+    /// (#413), or `None` when `url` is not that report.
+    fn ended_on_window(&self, url: &str) -> Option<WebPath> {
+        let (_, at) = self.window.as_ref()?.session.as_ref()?;
+        let page = url.strip_prefix(at)?.strip_prefix(SESSION_ENDED)?;
+        if !page.starts_with('/') {
+            return None;
+        }
+        Some(WebPath::parse(page).unwrap_or_else(|| self.visited.clone()))
+    }
+
     fn run_step(&self, step: &Step) {
         for note in &step.post {
             self.platform.post(note);
@@ -411,6 +427,16 @@ impl<P: Platform> State<P> {
                 }
             }
             Command::Visited(url) => {
+                if let Some(page) = self.ended_on_window(&url) {
+                    // The daemon ended the session the window held; its pid
+                    // has not changed, so the recorded session cannot be
+                    // reused. Open the page it was on with a new one.
+                    if let Some(window) = &mut self.window {
+                        window.session = None;
+                    }
+                    self.open(page).await;
+                    return;
+                }
                 if let Some(path) = self.path_on_window(&url) {
                     self.visited = path;
                 }

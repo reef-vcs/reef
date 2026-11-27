@@ -9,6 +9,25 @@
 export const SESSION_KEY = "reef.session";
 export const EMBEDDED_KEY = "reef.embedded";
 
+/**
+ * The path an embedded page sends its window to when the daemon refuses its
+ * session (#413), followed by the page it was on. The desktop shell reads it
+ * as `Command::Visited`, mints a session over the socket, and opens that
+ * page. The page has no other way to reach the app (S-269).
+ */
+export const SESSION_ENDED = "/_session-ended";
+
+/**
+ * Reports to the desktop shell that the daemon ended this page's session. A
+ * browser tab has no shell to ask, so only the app's webview leaves.
+ */
+export function leaveEndedSession(
+  embeddedNow: boolean = embedded(),
+  location: Pick<Location, "replace" | "pathname"> = window.location,
+) {
+  if (embeddedNow) location.replace(SESSION_ENDED + location.pathname);
+}
+
 const FRAGMENT = /^#session=([A-Za-z0-9_-]+)(&embedded=1)?$/;
 
 function read(storage: Storage | null): string | null {
