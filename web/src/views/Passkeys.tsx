@@ -348,8 +348,19 @@ export function Passkeys({
         // cannot assert here; the browser would only say the prompt was dismissed.
         const approvers = passkeys.filter((passkey) => passkey.rpId === start.rpId);
         if (approvers.length === 0) {
+          // The page read its passkeys once. A daemon passkey the page has not
+          // seen makes the list stale, and then neither an RP ID nor a reset
+          // order is safe to claim.
+          const seen = (credentialId: Uint8Array) =>
+            passkeys.some((held) => equal(held.credentialId, credentialId));
+          if (start.credentialIds.some((credentialId) => !seen(credentialId))) {
+            throw new Refused(
+              "The passkey list this page showed was out of date; it has been reloaded. Add a passkey again.",
+            );
+          }
+          const origins = [...new Set(passkeys.map((held) => held.rpId))].join(" and ");
           throw new Refused(
-            `${identity.name}'s passkeys are for ${passkeys[0]?.rpId ?? "another address"}, not ${start.rpId}, so none can approve adding another. Run reef identity passkey reset ${identity.name} on the daemon's machine, then add a passkey again.`,
+            `${identity.name}'s passkeys are for ${origins}, not ${start.rpId}, so none can approve adding another. Run reef identity passkey reset ${identity.name} on the daemon's machine, then add a passkey again.`,
           );
         }
         say(`Touch one of ${identity.name}'s passkeys to approve adding another.`);

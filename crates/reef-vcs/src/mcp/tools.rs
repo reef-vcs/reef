@@ -770,7 +770,7 @@ pub(super) const NOT_TOOLS: &[(&str, &str)] = &[
     ),
     (
         "/reef.api.v1.IdentityService/ResetPasskeys",
-        "ADMIN is never an MCP tool: the daemon's user runs `reef identity passkey reset` (R3.43)",
+        "ADMIN is never an MCP tool: the daemon's user runs `reef identity passkey reset <identity>` (R3.43)",
     ),
     (
         "/reef.api.v1.IdentityService/RequestApproval",

@@ -99,6 +99,8 @@ type Method =
 export class IdentityDaemon {
   /** What a policy pins; empty when `[ui] listen` names no port. */
   site = "http://reef.localhost:17333";
+  /** The RP ID the daemon's registration start names. */
+  rpId = "localhost";
   readonly arsood = person("arsood", { isDefault: true });
   identities: Identity[] = [this.arsood, person("ci-bot", { kind: IdentityKind.CI })];
   passkeys: Passkey[] = [];
@@ -205,7 +207,7 @@ export class IdentityDaemon {
         const live = this.passkeys.filter((p) => p.identityId === identity.id);
         return {
           challenge: new Uint8Array(32).fill(0x0c),
-          rpId: "localhost",
+          rpId: this.rpId,
           identityId: identity.id,
           identity: identity.name,
           userName: `Reef: ${identity.name}`,

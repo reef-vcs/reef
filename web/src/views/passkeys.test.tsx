@@ -205,18 +205,53 @@ describe("the Passkeys page", () => {
 
   it("says to reset when no live passkey is for the daemon's RP ID", async () => {
     const daemon = new IdentityDaemon();
-    daemon.passkeys = [{ ...passkey(daemon.arsood, "Old build", 1), rpId: "127.0.0.1" }];
+    daemon.rpId = "reef.localhost";
+    daemon.passkeys = [passkey(daemon.arsood, "Old build", 1)];
     const authenticator = installAuthenticator();
     await setup(daemon);
     await add("arsood", "YubiKey");
     await waitFor(() => {
       expect(within(card("arsood")).getByRole("alert").textContent).toMatch(
-        /are for 127\.0\.0\.1, not localhost.*reef identity passkey reset arsood/,
+        /are for localhost, not reef\.localhost.*reef identity passkey reset arsood/,
       );
     });
     expect(authenticator.gets).toEqual([]);
     expect(authenticator.creates).toEqual([]);
     expect(daemon.registered).toEqual([]);
+  });
+
+  it("says the list was out of date when the daemon holds a passkey the page has not seen", async () => {
+    const daemon = new IdentityDaemon();
+    daemon.rpId = "reef.localhost";
+    const authenticator = installAuthenticator();
+    await setup(daemon);
+    expect(within(card("arsood")).getByText(/^No passkeys\./)).toBeTruthy();
+    daemon.passkeys = [{ ...passkey(daemon.arsood, "Added elsewhere", 1), rpId: "reef.localhost" }];
+    await add("arsood", "YubiKey");
+    await waitFor(() => {
+      const alert = within(card("arsood")).getByRole("alert").textContent;
+      expect(alert).toMatch(/out of date/);
+      expect(alert).not.toMatch(/passkey reset/);
+    });
+    expect(authenticator.gets).toEqual([]);
+    expect(authenticator.creates).toEqual([]);
+    expect(daemon.registered).toEqual([]);
+  });
+
+  it("offers only the passkeys for the daemon's RP ID when approving an add", async () => {
+    const daemon = new IdentityDaemon();
+    daemon.rpId = "reef.localhost";
+    daemon.passkeys = [
+      passkey(daemon.arsood, "Old build", 1),
+      { ...passkey(daemon.arsood, "Current build", 2), rpId: "reef.localhost" },
+    ];
+    const authenticator = installAuthenticator();
+    await setup(daemon);
+    await add("arsood", "YubiKey");
+    await waitFor(() => {
+      expect(within(card("arsood")).getByRole("status").textContent).toMatch(/^Added “YubiKey”/);
+    });
+    expect(authenticator.gets[0]?.allowCredentials).toHaveLength(1);
   });
 
   it("removes a passkey with a touch over its removal challenge", async () => {
