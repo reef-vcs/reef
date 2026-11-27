@@ -4,7 +4,7 @@
 [build-system]
 # Exact, so a build is reproducible. Bumping grpcio-tools raises the runtime floors below in the
 # same change; tests/unit/test_codegen.py's test_floors_match_the_generator checks they agree.
-requires = ["hatchling==1.33.0", "grpcio-tools==1.85.1", "mypy-protobuf==5.1.0"]
+requires = ["hatchling==1.33.0", "grpcio-tools==1.85.3", "mypy-protobuf==5.1.0"]
 build-backend = "hatchling.build"
 
 [project]
@@ -48,16 +48,16 @@ Changelog = "https://github.com/reef-vcs/reef/blob/main/CHANGELOG.md"
 
 [dependency-groups]
 dev = [
-    "grpcio-tools==1.85.1",
+    "grpcio-tools==1.85.3",
     "mypy-protobuf==5.1.0",
     "hatchling==1.33.0",
     "pytest==9.2.0",
-    "pytest-asyncio==1.4.1.post1",
-    "ruff==0.17.3",
+    "pytest-asyncio==1.5.0",
+    "ruff==0.17.6",
     "mypy==2.4.1",
     "twine==7.0.0",
-    "types-protobuf==7.35.1.20260906",
-    "types-grpcio==1.85.0.20261028",
+    "types-protobuf==7.35.1.20261122",
+    "types-grpcio==1.85.0.20261122",
 ]
 
 [tool.hatch.metadata.hooks.custom]
