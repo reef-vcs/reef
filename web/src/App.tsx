@@ -12,7 +12,7 @@ import { device, endDevice } from "./device";
 import { DaemonService, type GetDaemonStatusResponse } from "./gen/reef/api/v1/daemon_pb";
 import { animationFrame, type FrameScheduler } from "./live/frame";
 import { Live, type LiveEnvironment } from "./live/share";
-import { endSession, SESSION_KEY, storedSession } from "./session";
+import { endSession, leaveEndedSession, SESSION_KEY, storedSession } from "./session";
 import { AppBar } from "./ui/AppBar";
 import { ErrorView } from "./ui/ErrorView";
 import { HeaderSlots } from "./ui/header-slots";
@@ -206,6 +206,9 @@ export function App({
     const refused = session?.connection.refused;
     if (refused?.reason === REMOTE_ORIGIN_CHANGED) setMoved(refused);
     else forget();
+    // In the desktop app the page reports the refusal by leaving for the
+    // shell's marker; a browser tab has no shell to ask (#413).
+    leaveEndedSession();
     setEnded(true);
   });
   const [unpair] = useState(() => () => {

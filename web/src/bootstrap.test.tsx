@@ -2,7 +2,14 @@
 // stored one is reused, and with neither the app shows the no-session page.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
-import { EMBEDDED_KEY, embedded, SESSION_KEY, takeSession } from "./session";
+import {
+  EMBEDDED_KEY,
+  embedded,
+  leaveEndedSession,
+  SESSION_ENDED,
+  SESSION_KEY,
+  takeSession,
+} from "./session";
 import { cleanup, render, screen } from "./test/testing-library";
 
 afterEach(() => {
@@ -62,6 +69,22 @@ describe("takeSession", () => {
     } as unknown as Storage;
     expect(takeSession(window.location, window.history, storage)).toBe("tok");
     expect(takeSession(window.location, window.history, storage)).toBeNull();
+  });
+});
+
+describe("an ended session", () => {
+  it("asks the desktop shell for a new one at the page it was on", () => {
+    const replace = vi.fn();
+    const location = { replace, pathname: "/repos/r/inbox" };
+    leaveEndedSession(true, location);
+    expect(replace).toHaveBeenCalledWith(`${SESSION_ENDED}/repos/r/inbox`);
+  });
+
+  it("leaves a browser tab where it is", () => {
+    const replace = vi.fn();
+    const location = { replace, pathname: "/repos/r/inbox" };
+    leaveEndedSession(false, location);
+    expect(replace).not.toHaveBeenCalled();
   });
 });
 
