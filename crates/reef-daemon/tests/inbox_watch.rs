@@ -18,6 +18,7 @@ use reef_api::v1::{
     LandChangeRequest, MarkInboxSeenRequest, TransitionChangeRequest, WatchInboxRequest,
     WatchInboxResponse, edit_files_request, file_edit,
 };
+use reef_client::inbox::News;
 use reef_daemon::client::Client;
 use reef_daemon::testing::{SyntheticRepo, TestDaemon, no_automatic_snapshots};
 use reef_testing::synth::Preset;
@@ -210,6 +211,12 @@ struct Watched {
     frames: usize,
     /// The last frame's raise ledger.
     epoch: String,
+    /// Each repository's `raised_through` as its last section sent it, 0
+    /// included.
+    through: BTreeMap<String, u64>,
+    /// The keys this stream announced as news, by `News`'s rule.
+    news: News,
+    announced: Vec<String>,
 }
 
 impl Watched {
@@ -226,6 +233,9 @@ impl Watched {
             synced: false,
             frames: 0,
             epoch: String::new(),
+            through: BTreeMap::new(),
+            news: News::default(),
+            announced: Vec::new(),
         };
         while !watched.synced {
             watched.next().await;
@@ -241,6 +251,12 @@ impl Watched {
             "every frame names the ledger"
         );
         self.epoch = frame.raise_epoch;
+        self.news.epoch(&self.epoch);
+        for section in &frame.sections {
+            for item in self.news.section(section) {
+                self.announced.push(item.key.clone());
+            }
+        }
         for section in frame.sections {
             if section.removed {
                 let held = self.repos.remove(&section.repo_id).unwrap_or_default();
@@ -267,6 +283,18 @@ impl Watched {
             held.watching_total = section.watching_total;
             held.landed = section.landed;
             held.error = section.error;
+            self.through
+                .insert(section.repo_id.clone(), section.raised_through);
+            // A read whose raise-ledger write failed keeps every needs-you-now
+            // item at 0 under the number the ledger last gave, and ADR 0093
+            // says 0 is not news. Any other frame numbers every item it can,
+            // so a non-provisional 0 there is still a bug.
+            let outage = section.raised_through > 0
+                && held
+                    .items
+                    .values()
+                    .filter(|item| item.bucket() == InboxBucket::NeedsYouNow)
+                    .all(|item| item.raised == 0);
             if section.raised_through > 0 {
                 for item in held.items.values() {
                     if item.bucket() == InboxBucket::NeedsYouNow {
@@ -279,7 +307,7 @@ impl Watched {
                                 )
                         );
                         assert!(
-                            (item.raised > 0 || provisional)
+                            (item.raised > 0 || provisional || outage)
                                 && item.raised <= section.raised_through,
                             "{item:?} against {}",
                             section.raised_through
@@ -882,6 +910,194 @@ async fn a_board_started_while_a_repository_is_busy_sends_the_others_first() {
     assert!(named_first < quick, "{report}");
     assert!(b_first.is_some_and(|at| at < quick), "{report}");
     assert!(every_synced + quick >= STALL, "{report}");
+}
+
+/// Makes every write to the raise ledger fail, as a disk that cannot take one
+/// does, until [`accept_ledger_writes`].
+fn refuse_ledger_writes(daemon: &TestDaemon) {
+    let ledger = rusqlite::Connection::open(daemon.state_dir().join("reef.sqlite3")).unwrap();
+    ledger
+        .execute_batch(
+            "CREATE TRIGGER fail_ledger_writes BEFORE INSERT ON inbox_raises
+             BEGIN SELECT RAISE(ABORT, 'ledger write failed'); END;",
+        )
+        .unwrap();
+}
+
+fn accept_ledger_writes(daemon: &TestDaemon) {
+    let ledger = rusqlite::Connection::open(daemon.state_dir().join("reef.sqlite3")).unwrap();
+    ledger
+        .execute_batch("DROP TRIGGER fail_ledger_writes")
+        .unwrap();
+}
+
+/// #400: a failed write to the raise ledger keeps the repository's items
+/// visible, raise 0, and the next read writes them.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_ledger_write_keeps_the_items_and_the_next_read_writes() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let main = setup(&daemon, &repo).await;
+    let draft = commit_on(client, &repo.id, &main.commit_id, &[("b.txt", "b\n")]).await;
+    let asked = ask(client, &repo.id, &draft.commit_id, "agent-a").await;
+    let key = format!("help:{}:{}", repo.id, asked.id);
+
+    // Another connection's write holds the ledger, as SQLITE_BUSY from
+    // another process does: every write to it fails until it lets go.
+    refuse_ledger_writes(&daemon);
+
+    let mut watched = Watched::open(client, &[]).await;
+    let item = watched.item(&key).expect("the help request stays visible");
+    assert_eq!(item.bucket(), InboxBucket::NeedsYouNow);
+    assert_eq!(item.raised, 0, "a failed write numbers nothing");
+    assert!(
+        watched.repos[&repo.id].error.is_none(),
+        "a failed write is no read error"
+    );
+    assert!(
+        !watched.repos[&repo.id].listed,
+        "a first read whose write failed is no listing"
+    );
+    agrees(&mut watched, client, "with the ledger's write failing").await;
+
+    accept_ledger_writes(&daemon);
+    let second = ask(client, &repo.id, &draft.commit_id, "agent-b").await;
+    let second = format!("help:{}:{}", repo.id, second.id);
+    watched
+        .until("the second help request", |w| w.item(&second).is_some())
+        .await;
+    assert!(
+        watched.item(&key).unwrap().raised > 0,
+        "the first ask is numbered"
+    );
+    assert!(watched.item(&second).unwrap().raised > 0);
+    assert!(
+        watched.repos[&repo.id].listed,
+        "the read that writes lists the repository"
+    );
+    agrees(&mut watched, client, "after the ledger's write").await;
+}
+
+/// #400 review P2: the retry a failed write arms numbers the items it left at
+/// 0 once the write heals, with no other event.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_ledger_write_that_heals_is_read_again_without_another_event() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let main = setup(&daemon, &repo).await;
+    let draft = commit_on(client, &repo.id, &main.commit_id, &[("b.txt", "b\n")]).await;
+    let first = ask(client, &repo.id, &draft.commit_id, "agent-a").await;
+    let first = format!("help:{}:{}", repo.id, first.id);
+    let mut watched = Watched::open(client, &[]).await;
+    let listed = watched.item(&first).expect("the listing").raised;
+    assert!(listed > 0, "the first ask is numbered");
+
+    refuse_ledger_writes(&daemon);
+    let second = ask(client, &repo.id, &draft.commit_id, "agent-b").await;
+    let second = format!("help:{}:{}", repo.id, second.id);
+    watched
+        .until("the second ask, unnumbered", |w| {
+            w.item(&second).is_some_and(|item| item.raised == 0)
+        })
+        .await;
+    assert_eq!(
+        watched.through.get(&repo.id),
+        Some(&listed),
+        "the frame carries the number the ledger last gave"
+    );
+    assert!(!watched.announced.contains(&second), "raise 0 is not news");
+
+    // Nothing else happens: the read the failure armed is the one that
+    // numbers the item.
+    accept_ledger_writes(&daemon);
+    watched
+        .until("the retry numbers the second ask", |w| {
+            w.item(&second).is_some_and(|item| item.raised > listed)
+        })
+        .await;
+    assert!(
+        watched.announced.contains(&second),
+        "news once the ledger takes it"
+    );
+}
+
+/// #400 review round 3: a stream that opens while the ledger's write fails
+/// lists the waiting items at 0 under the number the ledger last gave, so
+/// healing the write does not announce them again; only what arrived is news.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stream_that_opens_during_a_failed_write_does_not_announce_old_items() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let main = setup(&daemon, &repo).await;
+    let draft = commit_on(client, &repo.id, &main.commit_id, &[("b.txt", "b\n")]).await;
+    let first = ask(client, &repo.id, &draft.commit_id, "agent-a").await;
+    let first = format!("help:{}:{}", repo.id, first.id);
+    // One stream lists and settles the repository.
+    let mut before = Watched::open(client, &[]).await;
+    let listed = before.item(&first).expect("the listing").raised;
+    assert!(listed > 0, "the first ask is numbered");
+
+    // The write fails, and a second ask arrives while it does.
+    refuse_ledger_writes(&daemon);
+    let second = ask(client, &repo.id, &draft.commit_id, "agent-b").await;
+    let second = format!("help:{}:{}", repo.id, second.id);
+    before
+        .until("the second ask, unnumbered", |w| {
+            w.item(&second).is_some_and(|item| item.raised == 0)
+        })
+        .await;
+
+    // A stream that opens now lists both at 0 under the last known number.
+    let mut during = Watched::open(client, &[]).await;
+    let listed_through = during.through.get(&repo.id).copied();
+    assert_eq!(during.item(&first).unwrap().raised, 0);
+    assert_eq!(during.item(&second).unwrap().raised, 0);
+    assert!(during.announced.is_empty(), "a listing announces nothing");
+    let client_through = during.repos[&repo.id].raised_through;
+
+    // The write heals; nothing else happens.
+    accept_ledger_writes(&daemon);
+    during
+        .until("the retry numbers both", |w| {
+            w.item(&second).is_some_and(|item| item.raised > listed)
+        })
+        .await;
+    assert_eq!(
+        during.item(&first).unwrap().raised,
+        listed,
+        "its number held"
+    );
+    assert_eq!(
+        during.item(&second).unwrap().raised,
+        listed + 1,
+        "the new episode takes the next number"
+    );
+    assert_eq!(
+        during.through.get(&repo.id),
+        Some(&(listed + 1)),
+        "the healed frame carries the newest number"
+    );
+    assert!(
+        !during.announced.contains(&first),
+        "the item waiting at the listing is not news: {:?}",
+        during.announced
+    );
+    assert_eq!(
+        during
+            .announced
+            .iter()
+            .filter(|key| *key == &second)
+            .count(),
+        1,
+        "the new item is announced once: {:?}",
+        during.announced
+    );
+    assert_eq!(
+        listed_through,
+        Some(listed),
+        "the listing carried the number the ledger last gave"
+    );
+    assert_eq!(client_through, listed, "the client's number stood");
 }
 
 #[tokio::test(flavor = "multi_thread")]

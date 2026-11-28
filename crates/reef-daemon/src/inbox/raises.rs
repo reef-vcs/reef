@@ -9,6 +9,11 @@
 //! row lives while its key is in either bucket, past the cap included. Only
 //! the board task writes the ledger (`settle`); `GetInbox` reads it
 //! (`lookup`).
+//!
+//! A read whose write fails keeps its items, raise 0, and the last board's
+//! newest raise, and is no listing when it is the first read. The next read
+//! writes, because a board a failed write did not settle takes no numbers
+//! from (#400).
 
 use reef_api::v1;
 
@@ -53,7 +58,7 @@ pub(crate) fn settle(
 ) -> Result<(), DbError> {
     let episodes = episodes(board);
     // The same read as the last takes its numbers: nothing to number or prune.
-    if let Some(last) = last.filter(|last| last.read && last.error.is_none())
+    if let Some(last) = last.filter(|last| last.read && last.error.is_none() && last.settled)
         && last.keys == board.keys
         && self::episodes(last) == episodes
     {
@@ -61,11 +66,23 @@ pub(crate) fn settle(
             item.raised = last.items.get(key).map_or(0, |last| last.raised);
         }
         board.raised_through = last.raised_through;
+        board.settled = true;
         return Ok(());
     }
-    let (raises, through) = db.settle_inbox_raises(repo, &episodes, &board.keys)?;
+    let (raises, through) = match db.settle_inbox_raises(repo, &episodes, &board.keys) {
+        Ok(written) => written,
+        Err(error) => {
+            // The items stand, unnumbered, and the last board's newest raise
+            // does too; a first read is no listing, so nothing it was
+            // waiting on is news once the ledger takes it.
+            board.raised_through = last.map_or(0, |last| last.raised_through);
+            board.read = last.is_some_and(|last| last.read);
+            return Err(error);
+        }
+    };
     number(board, &episodes, &raises);
     board.raised_through = through.max(last.map_or(0, |last| last.raised_through));
+    board.settled = true;
     Ok(())
 }
 
@@ -168,6 +185,7 @@ mod tests {
             restale_at: None,
             read: true,
             raised_through: 0,
+            settled: false,
         }
     }
 
@@ -340,6 +358,82 @@ mod tests {
         let mut again = board(&[signoff("a", "c1"), signoff("x", "c1")]);
         settle(&db, repo, &mut again, Some(&whole)).unwrap();
         assert!(again.items[&format!("proposal:{REPO}:x")].raised > x);
+    }
+
+    /// Makes every write to the ledger fail, as a disk that cannot take one
+    /// does.
+    fn refuse_ledger_writes(db: &Db) {
+        db.with(|conn| {
+            conn.execute_batch(
+                "CREATE TRIGGER fail_ledger_writes BEFORE INSERT ON inbox_raises
+                 BEGIN SELECT RAISE(ABORT, 'ledger write failed'); END;",
+            )
+        })
+        .unwrap();
+    }
+
+    fn accept_ledger_writes(db: &Db) {
+        db.with(|conn| conn.execute_batch("DROP TRIGGER fail_ledger_writes"))
+            .unwrap();
+    }
+
+    fn raise(board: &RepoBoard, change: &str) -> u64 {
+        board.items[&format!("proposal:{REPO}:{change}")].raised
+    }
+
+    // #400: a write that fails keeps the read's items, raise 0, and the last
+    // board's newest raise; the next read writes rather than taking the
+    // numbers the failed one left.
+    #[test]
+    fn a_failed_write_keeps_the_items_and_the_next_read_writes() {
+        let db = Db::open_in_memory().unwrap();
+        let repo: RepoId = REPO.parse().unwrap();
+        let mut last = board(&[signoff("a", "c1")]);
+        settle(&db, repo, &mut last, None).unwrap();
+        let announced = raise(&last, "a");
+        assert!(announced > 0);
+
+        refuse_ledger_writes(&db);
+        let mut failed = board(&[signoff("a", "c1"), signoff("b", "c1")]);
+        settle(&db, repo, &mut failed, Some(&last)).unwrap_err();
+        assert_eq!(
+            (raise(&failed, "a"), raise(&failed, "b")),
+            (0, 0),
+            "a failed write numbers nothing"
+        );
+        assert_eq!(
+            failed.raised_through, last.raised_through,
+            "the newest raise is never lowered"
+        );
+
+        accept_ledger_writes(&db);
+        let mut after = board(&[signoff("a", "c1"), signoff("b", "c1")]);
+        settle(&db, repo, &mut after, Some(&failed)).unwrap();
+        assert_eq!(
+            raise(&after, "a"),
+            announced,
+            "the episode keeps its number"
+        );
+        assert!(raise(&after, "b") > announced, "the new episode is news");
+    }
+
+    // #400: a first read whose write fails is no listing, so what waited
+    // before a client arrived is not announced once the ledger takes it.
+    #[test]
+    fn a_failed_first_write_is_no_listing() {
+        let db = Db::open_in_memory().unwrap();
+        let repo: RepoId = REPO.parse().unwrap();
+        refuse_ledger_writes(&db);
+        let mut first = board(&[signoff("a", "c1")]);
+        settle(&db, repo, &mut first, None).unwrap_err();
+        assert_eq!(raise(&first, "a"), 0);
+        assert!(!first.read, "no listing until the ledger numbers it");
+
+        accept_ledger_writes(&db);
+        let mut listed = board(&[signoff("a", "c1")]);
+        settle(&db, repo, &mut listed, Some(&first)).unwrap();
+        assert!(listed.read);
+        assert!(raise(&listed, "a") > 0);
     }
 
     #[test]

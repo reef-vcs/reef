@@ -45,10 +45,15 @@ pub(crate) struct RepoBoard {
     /// When an item's words change with no event: a pending instruction's
     /// target turns unseen for `UNCLAIMED_AFTER_MS`.
     pub restale_at: Option<Timestamp>,
-    /// False only for a failed first read, whose empty items are no listing.
+    /// False for a read that is no listing: a failed first read, whose items
+    /// are empty, or a first read whose raise ledger write failed, whose
+    /// items carry no numbers yet.
     pub read: bool,
     /// The newest raise of the repository; never lower than the last board's.
     pub raised_through: u64,
+    /// These raises are the ledger's. False while a failed write holds them
+    /// at 0, so the next read writes instead of taking them.
+    pub settled: bool,
 }
 
 impl RepoBoard {
@@ -85,6 +90,7 @@ impl RepoBoard {
             restale_at,
             read: true,
             raised_through: 0,
+            settled: false,
         }
     }
 
@@ -101,6 +107,7 @@ impl RepoBoard {
             restale_at: None,
             read: false,
             raised_through: 0,
+            settled: false,
         });
         board.error = Some(error);
         // The retry governs when a failing repository is read again.
@@ -261,6 +268,7 @@ mod tests {
             restale_at: None,
             read: true,
             raised_through: 0,
+            settled: true,
         }
     }
 
