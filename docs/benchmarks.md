@@ -562,6 +562,8 @@ REEF_BENCH_PRESET=large cargo bench -p reef-daemon --features testing --bench st
 
 No row moved by more than its run-to-run spread. With nothing to find, a status's overlap work is one revset over the mutable commits. With 20 overlapping changes and a warm cache, it is a cache lookup and two tree lookups per change, and two of three runs were within 0.3 ms of `index_clean`. The 28.7 ms run came in the same run as the 11.0 ms `skip_snapshot` and a 231 ms `walk_one_edit`, both high, so the machine was loaded then.
 
+**Landed-line cache (#398, 2026-11-27).** A probe with a 1,000-commit trunk, one live overlap and one `PathCache`, release build, timed the second `overlap::find` at the same operation. At `278ef963` (no landed cache) it took 33–43 ms; at `22d197a2` it took 0.33–1.63 ms, about 100× faster. The first call still pays 43–57 ms while it builds the path and landed caches, so the fix is the warm-call cache. The shallow `status/large/index_clean_open_changes` bench is within its run-to-run noise on both sides (11.0–12.3 ms, gate < 15 ms) and does not exercise the 1,000-commit walk, so it is not evidence for the cache either way.
+
 
 ## Evidence (R3.01)
 

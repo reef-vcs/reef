@@ -20,7 +20,8 @@ use jj_lib::op_store::RefTarget;
 use jj_lib::ref_name::RefName;
 use jj_lib::repo::{ReadonlyRepo, Repo as _};
 use reef_api::v1::{
-    self, CreateWorkspaceRequest, GetStatusRequest, GetWorkspaceRequest, Workspace,
+    self, AbandonChangeRequest, CreateWorkspaceRequest, GetStatusRequest, GetWorkspaceRequest,
+    Workspace,
 };
 use reef_daemon::client::Client;
 use reef_daemon::config::Config;
@@ -59,6 +60,12 @@ async fn write(client: &Client, ws: &Workspace, file: &str, text: &str) {
     let path = Path::new(&ws.path).join(file);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(path, text).unwrap();
+    client.snapshot_workspace("", &ws.id, "").await.unwrap();
+}
+
+/// Removes `file` in `ws` and snapshots it.
+async fn remove(client: &Client, ws: &Workspace, file: &str) {
+    std::fs::remove_file(Path::new(&ws.path).join(file)).unwrap();
     client.snapshot_workspace("", &ws.id, "").await.unwrap();
 }
 
@@ -118,7 +125,19 @@ fn load(root: &Path) -> std::sync::Arc<ReadonlyRepo> {
 /// A commit on `parent` writing `files`, outside the daemon, as the jj CLI
 /// would; its id. With `main`, the `main` bookmark moves to it.
 fn commit_outside(root: &Path, parent: &str, files: &[(&str, &str)], move_main: bool) -> String {
-    use jj_lib::backend::{CopyId, TreeValue};
+    commit_outside_at(root, parent, files, move_main, None)
+}
+
+/// [`commit_outside`] with an explicit committer time, in seconds since the
+/// epoch, for a clock-skewed history.
+fn commit_outside_at(
+    root: &Path,
+    parent: &str,
+    files: &[(&str, &str)],
+    move_main: bool,
+    at: Option<i64>,
+) -> String {
+    use jj_lib::backend::{CopyId, MillisSinceEpoch, Signature, Timestamp, TreeValue};
     use jj_lib::repo_path::RepoPathBuf;
     let repo = load(root);
     let mut tx = repo.start_transaction();
@@ -140,13 +159,24 @@ fn commit_outside(root: &Path, parent: &str, files: &[(&str, &str)], move_main: 
         );
     }
     let tree = pollster::block_on(builder.write_tree()).unwrap();
-    let commit = pollster::block_on(
-        tx.repo_mut()
-            .new_commit(vec![parent.id().clone()], tree)
-            .set_description("outside")
-            .write(),
-    )
-    .unwrap();
+    let mut builder = tx
+        .repo_mut()
+        .new_commit(vec![parent.id().clone()], tree)
+        .set_description("outside");
+    if let Some(at) = at {
+        let signature = Signature {
+            name: "Reef Test".to_owned(),
+            email: "reef-test@example.com".to_owned(),
+            timestamp: Timestamp {
+                timestamp: MillisSinceEpoch(at * 1_000),
+                tz_offset: 0,
+            },
+        };
+        builder = builder
+            .set_author(signature.clone())
+            .set_committer(signature);
+    }
+    let commit = pollster::block_on(builder.write()).unwrap();
     if move_main {
         tx.repo_mut().set_local_bookmark_target(
             RefName::new("main"),
@@ -155,6 +185,82 @@ fn commit_outside(root: &Path, parent: &str, files: &[(&str, &str)], move_main: 
     }
     pollster::block_on(tx.commit("outside")).unwrap();
     commit.id().hex()
+}
+
+/// A conflicted merge commit of two sides of `on`, made outside the
+/// daemon as a user's `jj` would; its id.
+fn conflicted_commit(root: &Path, on: &str) -> String {
+    use jj_lib::backend::{CopyId, TreeValue};
+    use jj_lib::default_backend_factories::{
+        default_backend_factories, default_working_copy_factories,
+    };
+    use jj_lib::repo::Repo as _;
+    use jj_lib::repo_path::RepoPathBuf;
+    let settings = test_settings();
+    let workspace = jj_lib::default_backend_factories::default_workspace_loader_factory()
+        .create(root)
+        .unwrap()
+        .load(
+            &settings,
+            &default_backend_factories(),
+            &default_working_copy_factories(),
+        )
+        .unwrap();
+    let repo = pollster::block_on(workspace.repo_loader().load_at_head(None)).unwrap();
+    let mut tx = repo.start_transaction();
+    let store = tx.repo().store().clone();
+    let base = store
+        .get_commit(&CommitId::try_from_hex(on).unwrap())
+        .unwrap();
+    let mut sides = Vec::new();
+    for text in ["x\n", "y\n", "z\n"] {
+        let path = RepoPathBuf::from_internal_string("conflicted.txt").unwrap();
+        let id = pollster::block_on(store.write_file(&path, &mut text.as_bytes())).unwrap();
+        let mut builder = jj_lib::merged_tree_builder::MergedTreeBuilder::new(base.tree());
+        builder.set_or_remove(
+            path,
+            Some(TreeValue::File {
+                id,
+                executable: false,
+                copy_id: CopyId::placeholder(),
+            }),
+        );
+        let tree = pollster::block_on(builder.write_tree()).unwrap();
+        sides.push(
+            pollster::block_on(
+                tx.repo_mut()
+                    .new_commit(vec![base.id().clone()], tree)
+                    .set_description(text.trim())
+                    .write(),
+            )
+            .unwrap(),
+        );
+    }
+    // A three-way conflict whose parents merge only two ways: the path is
+    // conflicted and changes against its parents' merge, as a stale
+    // conflict left by a rebase does.
+    let merged =
+        pollster::block_on(jj_lib::rewrite::merge_commit_trees(tx.repo(), &sides)).unwrap();
+    let merge = pollster::block_on(
+        tx.repo_mut()
+            .new_commit(vec![sides[0].id().clone(), sides[1].id().clone()], merged)
+            .set_description("merge")
+            .write(),
+    )
+    .unwrap();
+    pollster::block_on(tx.commit("conflict")).unwrap();
+    merge.id().hex()
+}
+
+/// Moves the local `main` bookmark to `commit` outside the daemon.
+fn point_main(root: &Path, commit: &str) {
+    let repo = load(root);
+    let mut tx = repo.start_transaction();
+    tx.repo_mut().set_local_bookmark_target(
+        RefName::new("main"),
+        RefTarget::normal(CommitId::try_from_hex(commit).unwrap()),
+    );
+    pollster::block_on(tx.commit("point main")).unwrap();
 }
 
 /// The commit `ws`'s change is on: its first parent.
@@ -433,5 +539,219 @@ async fn status_and_get_workspace_agree_and_an_operation_has_none() {
         .workspace_status
         .unwrap();
     assert_eq!(at.workspace.unwrap().overlaps, []);
+    daemon.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_change_in_trunk_does_not_overlap_while_its_workspace_exists() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let a = create(client, &repo.id, "agent-a", None).await;
+    let b = create(client, &repo.id, "agent-b", None).await;
+    write(client, &a, "shared.txt", "a\n").await;
+    write(client, &b, "shared.txt", "b\n").await;
+    // A's own commit lands on trunk, while A's workspace stays on it.
+    let landed = inspect(client, &a).await.commit_id;
+    point_main(&repo.root, &landed);
+    let found = status(client, &b).await;
+    assert!(found.overlaps.is_empty(), "{found:?}");
+    assert_eq!(found.overlap_count, 0);
+    daemon.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_squash_merged_stack_does_not_overlap_after_trunk_edits_its_path() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    // The workspace on the lower change is still active when its PR merges.
+    let a = create(client, &repo.id, "agent-a", None).await;
+    write(client, &a, "shared.txt", "a\n").await;
+    // The branch's tip merged main, so its tree is what the squash wrote.
+    let tip = create(client, &repo.id, "agent-tip", Some(&a.change_id)).await;
+    write(client, &tip, "crates/other.txt", "x\n").await;
+    let b = create(client, &repo.id, "agent-b", None).await;
+    write(client, &b, "shared.txt", "b\n").await;
+    let on = base(client, &a).await;
+    // Main advances, the PR is squashed onto it, then trunk edits the file.
+    let advance = commit_outside(&repo.root, &on, &[("crates/other.txt", "x\n")], true);
+    let squash = commit_outside(&repo.root, &advance, &[("shared.txt", "a\n")], true);
+    commit_outside(&repo.root, &squash, &[("shared.txt", "a2\n")], true);
+    let found = status(client, &b).await;
+    assert!(found.overlaps.is_empty(), "{found:?}");
+    assert_eq!(found.overlap_count, 0);
+    daemon.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_live_change_stacked_on_a_squash_merged_change_still_overlaps() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let a = create(client, &repo.id, "agent-a", None).await;
+    write(client, &a, "shared.txt", "a\n").await;
+    let stacked = create(client, &repo.id, "agent-b", Some(&a.change_id)).await;
+    write(client, &stacked, "shared.txt", "b\n").await;
+    let c = create(client, &repo.id, "agent-c", None).await;
+    write(client, &c, "shared.txt", "c\n").await;
+    let on = base(client, &a).await;
+    let squash = commit_outside(&repo.root, &on, &[("shared.txt", "a\n")], true);
+    commit_outside(&repo.root, &squash, &[("shared.txt", "a2\n")], true);
+    let found = status(client, &c).await;
+    assert_eq!(
+        overlap_workspace_ids(&found),
+        [stacked.id.as_str()],
+        "{found:?}"
+    );
+    assert_eq!(found.overlaps[0].paths, ["shared.txt"]);
+    assert_eq!(found.overlap_count, 1);
+    daemon.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_abandoned_change_does_not_overlap() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let a = create(client, &repo.id, "agent-a", None).await;
+    let b = create(client, &repo.id, "agent-b", None).await;
+    write(client, &a, "shared.txt", "a\n").await;
+    write(client, &b, "shared.txt", "b\n").await;
+    client
+        .release_workspace("", &a.id, true, false)
+        .await
+        .unwrap();
+    client
+        .abandon_change(AbandonChangeRequest {
+            repo: repo.id.clone(),
+            revision: a.change_id.clone(),
+            ..AbandonChangeRequest::default()
+        })
+        .await
+        .unwrap();
+    let found = status(client, &b).await;
+    assert!(found.overlaps.is_empty(), "{found:?}");
+    assert_eq!(found.overlap_count, 0);
+    daemon.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_conflicted_change_path_does_not_overlap() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let b = create(client, &repo.id, "agent-b", None).await;
+    write(client, &b, "conflicted.txt", "b\n").await;
+    let on = base(client, &b).await;
+    let conflicted = conflicted_commit(&repo.root, &on);
+    let found = status(client, &b).await;
+    assert!(
+        !found
+            .overlaps
+            .iter()
+            .any(|overlap| overlap.commit_id == conflicted),
+        "{conflicted}: {found:?}"
+    );
+    daemon.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_live_change_is_not_landed_by_a_clock_skewed_trunk_tree() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let observer = create(client, &repo.id, "agent-observer", None).await;
+    write(client, &observer, "g", "mine\n").await;
+    let on = base(client, &observer).await;
+    // c1 lacks g and is written later than c2, its child, which adds g.
+    let now = 1_800_000_000;
+    let c1 = commit_outside_at(
+        &repo.root,
+        &on,
+        &[("c1.txt", "1\n")],
+        false,
+        Some(now + 3_600),
+    );
+    let c2 = commit_outside_at(&repo.root, &c1, &[("g", "g\n")], true, Some(now));
+    // A live change on c2 removes g: its tree is c1's, but c1 is below its
+    // base, so no clock can make it landed.
+    let live = create(client, &repo.id, "agent-live", Some(&c2)).await;
+    remove(client, &live, "g").await;
+    let found = status(client, &observer).await;
+    assert_eq!(
+        overlap_workspace_ids(&found),
+        [live.id.as_str()],
+        "{found:?}"
+    );
+    assert_eq!(found.overlaps[0].paths, ["g"]);
+    daemon.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_landed_tip_does_not_hide_a_lower_change_on_another_path() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let observer = create(client, &repo.id, "agent-observer", None).await;
+    write(client, &observer, "a-only.txt", "mine\n").await;
+    let on = base(client, &observer).await;
+    let lower = create(client, &repo.id, "agent-lower", None).await;
+    write(client, &lower, "a-only.txt", "a\n").await;
+    let tip = create(client, &repo.id, "agent-tip", Some(&lower.change_id)).await;
+    write(client, &tip, "a-only.txt", "landed\n").await;
+    write(client, &tip, "other.txt", "x\n").await;
+    write(client, &tip, "tip.txt", "t\n").await;
+    // Trunk reaches the tip's tree, but its last commit changes only
+    // tip.txt, so it does not cover the lower change's a-only.txt.
+    let advance = commit_outside(
+        &repo.root,
+        &on,
+        &[("a-only.txt", "landed\n"), ("other.txt", "x\n")],
+        true,
+    );
+    commit_outside(&repo.root, &advance, &[("tip.txt", "t\n")], true);
+    let found = status(client, &observer).await;
+    assert_eq!(
+        overlap_workspace_ids(&found),
+        [lower.id.as_str()],
+        "{found:?}"
+    );
+    assert_eq!(found.overlaps[0].paths, ["a-only.txt"]);
+    daemon.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_live_change_that_repeats_a_later_trunk_tree_adds_no_overlap() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let observer = create(client, &repo.id, "agent-observer", None).await;
+    write(client, &observer, "f", "mine\n").await;
+    let on = base(client, &observer).await;
+    let c2 = commit_outside(&repo.root, &on, &[("g", "g\n")], true);
+    let c3 = commit_outside(&repo.root, &c2, &[("f", "x\n")], true);
+    // The live change is on c2 and sets f to x: its whole tree and its only
+    // changed path are exactly c3's, so it adds nothing over trunk. It
+    // stays dropped; this test records that choice.
+    let live = create(client, &repo.id, "agent-live", Some(&c2)).await;
+    write(client, &live, "f", "x\n").await;
+    let found = status(client, &observer).await;
+    assert!(found.overlaps.is_empty(), "{c3}: {found:?}");
+    daemon.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_live_change_that_would_revert_later_trunk_work_is_dropped_as_accepted() {
+    let (daemon, repo) = fixture().await;
+    let client = &daemon.client;
+    let observer = create(client, &repo.id, "agent-observer", None).await;
+    write(client, &observer, "f", "mine\n").await;
+    let on = base(client, &observer).await;
+    // Trunk moves from c2 = f=y to c3 = f=x, then on to c5 = f=z.
+    let c1 = commit_outside(&repo.root, &on, &[("f", "x\n")], true);
+    let c2 = commit_outside(&repo.root, &c1, &[("f", "y\n")], true);
+    let c3 = commit_outside(&repo.root, &c2, &[("f", "x\n")], true);
+    let c4 = commit_outside(&repo.root, &c3, &[("h", "h\n")], true);
+    let c5 = commit_outside(&repo.root, &c4, &[("f", "z\n")], true);
+    // The live change is on c2 and sets f=x: its tree is c3's, and it is
+    // dropped although landing it would revert c5's edit. The tree signal
+    // cannot tell this from a squash merge; the drop is accepted (ADR 0079).
+    let live = create(client, &repo.id, "agent-live", Some(&c2)).await;
+    write(client, &live, "f", "x\n").await;
+    let found = status(client, &observer).await;
+    assert!(found.overlaps.is_empty(), "{c3} .. {c5}: {found:?}");
     daemon.stop().await;
 }
