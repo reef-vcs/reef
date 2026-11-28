@@ -150,6 +150,9 @@ are under `crates/reef-daemon/src/`.
 | `service/workspaces.rs` `release_workspace`, `renew_lease` (refused during a quiesce) | `ReleaseCall`, `HbStart` |
 | `daemon.rs` `bring_up` (restart grace before `load_active`, whose error it only logs) | `Start` |
 
+`reclaim_unloaded` also has a case the model leaves out: a repository whose
+directory is gone (#428). See "What the model leaves out".
+
 Move the sync commit forward only after you have read each covered function
 at the new commit and confirmed that the model still describes it. Do not
 move it just because the check passes. Put the new commit and its subject
@@ -275,6 +278,13 @@ with a trigger that fails the write:
   machine is a separate state machine.
 - **`ReleaseSpec`.** `force` and `skip_final_snapshot` are not modeled. Both
   callers in the model use the default spec.
+- **A repository whose directory is gone (#428).** The model's `Start` always
+  opens the repository. When it cannot (its directory was deleted or is on an
+  unmounted disk), its workspaces load no entry and a start does not touch
+  them. A release that asks for a final snapshot is refused with
+  `FinalSnapshotRepositoryGone`; one with `--no-snapshot` ends the workspace
+  and removes its directory. An expiry reclaim refuses too, so a workspace
+  whose repository is gone can be stuck until someone releases it.
 - **Time.** Time is reduced to whether a lease is renewable (`live`) or past
   its grace (`past`).
 - **Heartbeat timing.** A heartbeat stamped while the lease was renewable may

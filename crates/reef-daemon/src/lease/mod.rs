@@ -542,10 +542,19 @@ impl LeaseManager {
             *count += 1;
             *count
         };
-        let message = if matches!(error, ManagerError::FinalSnapshotFailed { .. }) {
-            "final snapshot failed"
-        } else {
-            "cannot reclaim the workspace"
+        let (message, kept) = match error {
+            ManagerError::FinalSnapshotFailed { .. } => (
+                "final snapshot failed",
+                "the workspace is kept and retried on the next tick",
+            ),
+            ManagerError::FinalSnapshotRepositoryGone { .. } => (
+                "cannot reclaim the workspace",
+                "the workspace is kept until its repository's directory is restored, or it is released with --no-snapshot",
+            ),
+            _ => (
+                "cannot reclaim the workspace",
+                "the workspace is kept and retried on the next tick",
+            ),
         };
         let chain = ErrorChain(error).to_string();
         if (count - 1) % ERROR_EVERY_TICKS == 0 {
@@ -555,7 +564,7 @@ impl LeaseManager {
                 repo = %lease.repo_id,
                 failed_ticks = count,
                 error = %chain,
-                "{message}; the workspace is kept and retried on the next tick"
+                "{message}; {kept}"
             );
         } else {
             tracing::debug!(

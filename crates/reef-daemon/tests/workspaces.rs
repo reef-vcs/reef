@@ -23,6 +23,7 @@ use reef_api::v1::{
     MoveWorkspaceRequest, SnapshotKind, WatchState, Workspace, create_workspace_request,
     move_workspace_request,
 };
+use reef_daemon::backend::{BackendChoice, BackendKind};
 use reef_daemon::client::ClientError;
 use reef_daemon::error::detail_of;
 use reef_daemon::model::{ReclaimReason, WorkspaceState};
@@ -34,6 +35,18 @@ const OWNER: &str = "tester@host";
 
 async fn fixture() -> (TestDaemon, SyntheticRepo) {
     TestDaemon::with_synthetic_repo(Preset::Small).await
+}
+
+/// [`fixture`] with workspace roots that are plain directories: on Linux
+/// the copy backend, not an overlay (whose root is a mountpoint, which
+/// cannot be removed from under the mount).
+async fn fixture_on_plain_directories() -> (TestDaemon, SyntheticRepo) {
+    TestDaemon::with_synthetic_repo_and(Preset::Small, |config| {
+        if cfg!(target_os = "linux") {
+            config.file.workspace.backend = BackendChoice::Named(BackendKind::Copy);
+        }
+    })
+    .await
 }
 
 fn request(
@@ -90,6 +103,31 @@ fn kind_of(error: &ClientError) -> ErrorKind {
     assert_eq!(detail.kind(), reef_daemon::error::proto_kind(*kind));
     assert_eq!(error.kind(), *kind);
     *kind
+}
+
+/// The file a test writes through a workspace's root, where the backend
+/// keeps it: the root itself, or an overlay's upper directory (the root may
+/// be unmounted when a restart skips a repository that is not open).
+fn unsnapshotted_edit(ws: &Workspace) -> PathBuf {
+    let root = Path::new(&ws.path);
+    if matches!(
+        Backend::try_from(ws.backend),
+        Ok(Backend::Overlayfs | Backend::FuseOverlayfs)
+    ) {
+        let mut upper = root.as_os_str().to_owned();
+        upper.push(".upper");
+        PathBuf::from(upper).join("unsnapshotted.txt")
+    } else {
+        root.join("unsnapshotted.txt")
+    }
+}
+
+/// The `ErrorDetail` an RPC error's status carries.
+fn detail_of_error(error: &ClientError) -> v1::ErrorDetail {
+    let ClientError::Rpc { status, .. } = error else {
+        panic!("not an RPC error: {error:?}");
+    };
+    detail_of(status).expect("an ErrorDetail in the status")
 }
 
 fn millis(time: &prost_types::Timestamp) -> i64 {
@@ -759,6 +797,123 @@ async fn forget_repository_refuses_with_active_workspace() {
         .unwrap();
     assert!(!again.already_registered);
     assert_ne!(again.repository.unwrap().id, repo.id);
+}
+
+// #428: a registered repository's directory is deleted while it has an
+// active workspace, and the daemon restarts. A release that cannot record a
+// final snapshot must say so rather than discard the edits, and `repo
+// forget` must name the workspaces and the command that ends them.
+#[tokio::test(flavor = "multi_thread")]
+async fn repository_directory_gone_refuses_a_silent_release_and_forget_names_the_way_out() {
+    let (daemon, repo) = fixture().await;
+    let ws = create(&daemon, &repo).await;
+    std::fs::write(Path::new(&ws.path).join("unsnapshotted.txt"), "keep me\n").unwrap();
+    let edit = unsnapshotted_edit(&ws);
+
+    let stopped = daemon.stop_keeping().await;
+    std::fs::rename(&repo.root, repo.root.with_extension("gone")).unwrap();
+    let daemon = stopped.start().await;
+
+    let refused = daemon
+        .client
+        .release_workspace("", &ws.id, true, false)
+        .await
+        .unwrap_err();
+    assert_eq!(kind_of(&refused), ErrorKind::Unavailable);
+    let detail = detail_of_error(&refused);
+    assert!(detail.hint.contains("--no-snapshot"), "{}", detail.hint);
+    assert_eq!(
+        detail.next,
+        ["reef", "ws", "release", "--no-snapshot", ws.id.as_str()]
+    );
+    assert!(
+        edit.exists(),
+        "a refused release keeps the workspace's edits"
+    );
+    let inspected = daemon
+        .client
+        .inspect_workspace("", &ws.id, false)
+        .await
+        .unwrap();
+    assert_eq!(
+        inspected.workspace.unwrap().state(),
+        v1::WorkspaceState::Active
+    );
+
+    let refused = daemon.client.forget_repository(&repo.id).await.unwrap_err();
+    assert_eq!(kind_of(&refused), ErrorKind::Conflict);
+    let detail = detail_of_error(&refused);
+    assert!(detail.hint.contains(ws.id.as_str()), "{}", detail.hint);
+    assert_eq!(
+        detail.next,
+        ["reef", "ws", "release", "--no-snapshot", ws.id.as_str()]
+    );
+
+    let released = daemon
+        .client
+        .release_workspace("", &ws.id, false, false)
+        .await
+        .unwrap();
+    assert!(!released.snapshot_taken);
+    assert!(!edit.exists(), "the workspace directory is torn down");
+    let forgotten = daemon.client.forget_repository(&repo.id).await.unwrap();
+    assert_eq!(forgotten.repository.unwrap().id, repo.id);
+}
+
+// #428: with the workspace's directory gone too, there are no edits to
+// lose, so a normal release still ends it with no repository handle.
+#[tokio::test(flavor = "multi_thread")]
+async fn repository_directory_gone_releases_a_missing_workspace() {
+    let (daemon, repo) = fixture_on_plain_directories().await;
+    let ws = create(&daemon, &repo).await;
+
+    let stopped = daemon.stop_keeping().await;
+    std::fs::remove_dir_all(&ws.path).unwrap();
+    std::fs::rename(&repo.root, repo.root.with_extension("gone")).unwrap();
+    let daemon = stopped.start().await;
+
+    let released = daemon
+        .client
+        .release_workspace("", &ws.id, true, false)
+        .await
+        .unwrap();
+    assert!(!released.snapshot_taken);
+    daemon.client.forget_repository(&repo.id).await.unwrap();
+}
+
+// #428 (P3a): a repository that is not open for a reason other than its
+// directory being gone must not hint a release that returns an empty hint.
+#[tokio::test(flavor = "multi_thread")]
+async fn forget_for_an_unreadable_repository_hints_a_working_next_step() {
+    if nix::unistd::geteuid().is_root() {
+        eprintln!("skipped: root ignores directory permissions");
+        return;
+    }
+    let (daemon, repo) = fixture().await;
+    let ws = create(&daemon, &repo).await;
+    let stopped = daemon.stop_keeping().await;
+    std::fs::set_permissions(&repo.root, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let daemon = stopped.start().await;
+
+    let refused = daemon.client.forget_repository(&repo.id).await.unwrap_err();
+    assert_eq!(kind_of(&refused), ErrorKind::Conflict);
+    let detail = detail_of_error(&refused);
+    assert!(detail.hint.contains("not open"), "{}", detail.hint);
+    assert_eq!(detail.next, ["reef", "repo", "list"]);
+
+    // The command the old hint named now says what to do instead of
+    // answering with an empty hint.
+    let release = daemon
+        .client
+        .release_workspace("", &ws.id, true, false)
+        .await
+        .unwrap_err();
+    let detail = detail_of_error(&release);
+    assert!(!detail.hint.is_empty(), "{detail:?}");
+    assert!(!detail.next.is_empty(), "{detail:?}");
+
+    std::fs::set_permissions(&repo.root, std::fs::Permissions::from_mode(0o755)).unwrap();
+    drop(daemon);
 }
 
 // 10

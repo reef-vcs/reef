@@ -24,6 +24,10 @@ use crate::snapshot::{SnapshotKind, TrackReason, description};
 /// reclaimed, so no final snapshot could be taken.
 const ROOT_MISSING: &str = "workspace root missing";
 
+/// The `reclaims.detail` of a workspace whose repository's directory is
+/// gone, so no final snapshot could be recorded.
+const REPOSITORY_GONE: &str = "repository directory gone; no final snapshot";
+
 /// The `reclaims.detail` of a workspace whose root had been replaced by a
 /// symlink, which a final snapshot would have scanned through (RX.01); the
 /// tear-down unlinks it.
@@ -441,6 +445,15 @@ impl Manager {
     /// these can race; `finish_workspace` lets one end it. Otherwise, or
     /// while a restore's rematerialization is pending (which rebuilds
     /// missing directories), [`ManagerError::NotLoaded`].
+    ///
+    /// A row whose repository's directory is gone has no handle to forget
+    /// its jj workspace with and no repository to snapshot into. When its
+    /// directory is also gone there is nothing to lose, so it is ended as
+    /// above. When the directory is there, a release that asks for a final
+    /// snapshot is refused with
+    /// [`ManagerError::FinalSnapshotRepositoryGone`], keeping its edits;
+    /// one that skips the snapshot (`--no-snapshot`, or `force`) ends it and
+    /// tears the directory down.
     async fn reclaim_unloaded(
         &self,
         id: WorkspaceId,
@@ -458,23 +471,55 @@ impl Manager {
                 state: record.state,
             });
         }
-        let handle = self.handle(record.repo_id)?;
+        let mut repository_gone = None;
+        let handle = match self.handle(record.repo_id) {
+            Ok(handle) => Some(handle),
+            Err(ManagerError::RepoGone { root, .. }) => {
+                tracing::warn!(
+                    workspace_id = %id,
+                    repo = %record.repo_id,
+                    path = %root.display(),
+                    "the workspace's repository directory is gone; no final snapshot can be recorded"
+                );
+                repository_gone = Some(root);
+                None
+            }
+            Err(error) => return Err(error),
+        };
         let missing = tokio::fs::symlink_metadata(&record.path)
             .await
             .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
-        if !missing || self.db.meta(META_REMATERIALIZE_PENDING)?.is_some() {
+        if self.db.meta(META_REMATERIALIZE_PENDING)?.is_some() {
             return Err(ManagerError::NotLoaded(id));
+        }
+        match &repository_gone {
+            Some(root) if !missing && spec.final_snapshot && !spec.force => {
+                return Err(ManagerError::FinalSnapshotRepositoryGone {
+                    id,
+                    repo: record.repo_id,
+                    root: root.clone(),
+                });
+            }
+            None if !missing => return Err(ManagerError::NotLoaded(id)),
+            _ => {}
         }
         if record.state == WorkspaceState::Active {
             self.begin_reclaim(id, record.repo_id, reason)?;
         }
-        let detail = match spec.detail {
-            Some(detail) => format!("{ROOT_MISSING}; {detail}"),
-            None => ROOT_MISSING.to_owned(),
-        };
+        let mut details = Vec::new();
+        if missing {
+            details.push(ROOT_MISSING.to_owned());
+        }
+        if repository_gone.is_some() {
+            details.push(REPOSITORY_GONE.to_owned());
+        }
+        if let Some(detail) = spec.detail {
+            details.push(detail.to_owned());
+        }
+        let detail = details.join("; ");
         let agent = spec.agent.as_deref().unwrap_or(&record.owner);
         let release_op_id = match self
-            .reclaim_missing(&record, &handle, reason, &detail, agent)
+            .reclaim_missing(&record, handle.as_ref(), reason, &detail, agent, !missing)
             .await
         {
             Ok(release_op_id) => release_op_id,
